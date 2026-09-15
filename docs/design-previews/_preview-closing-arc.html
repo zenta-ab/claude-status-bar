@@ -1,0 +1,352 @@
+<title>Closing Arc</title>
+<style>
+  :root{
+    --page:#faf9f7; --ink:#1c1c1f; --dim:#65656e; --rule:#dedde0; --card:#ffffff;
+  }
+  :root:not([data-theme="light"]){ @media (prefers-color-scheme: dark){} }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){ --page:#141416; --ink:#e9e9ec; --dim:#9a9aa4; --rule:#2c2c31; --card:#1c1c20; }
+  }
+  :root[data-theme="dark"]{ --page:#141416; --ink:#e9e9ec; --dim:#9a9aa4; --rule:#2c2c31; --card:#1c1c20; }
+
+  body{background:var(--page); color:var(--ink); font:14px/1.55 "Segoe UI",system-ui,-apple-system,sans-serif;
+       margin:0; padding:34px 28px 64px; -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px; margin:0 auto;}
+  h1{font-size:27px; letter-spacing:-.02em; margin:0 0 6px; font-weight:650;}
+  h2{font-size:12px; letter-spacing:.10em; text-transform:uppercase; color:var(--dim);
+     margin:44px 0 14px; font-weight:650; border-top:1px solid var(--rule); padding-top:14px;}
+  h3{font-size:13px; margin:0 0 4px; font-weight:650;}
+  p{margin:0 0 12px; max-width:74ch;}
+  .lede{font-size:16px; line-height:1.55; color:var(--ink); max-width:74ch;}
+  .dim{color:var(--dim);}
+  code,.mono{font-family:"Cascadia Mono",Consolas,ui-monospace,monospace; font-size:12px;}
+
+  /* taskbar chips */
+  .chip{padding:16px; border-radius:8px; display:flex; align-items:center; gap:18px; flex-wrap:wrap;}
+  .bar{display:flex; align-items:center; gap:14px; padding:6px 14px; border-radius:6px;}
+  .dk{background:#202020;}
+  .lt{background:#f3f3f3;}
+  .dk, .dk *{ --reality:#D6D6DC; --track:#4A4A52; --safe:#3D86C8; --tight:#C68A10;
+              --dry:#E24B3C; --band:#2C5A7A; --over:#FF7F70; }
+  .lt, .lt *{ --reality:#3A3A42; --track:#CBCBD2; --safe:#2F72B0; --tight:#A9750A;
+              --dry:#C4342A; --band:#93BCDE; --over:#8E1F17; }
+  .dk .lbl{color:#8b8b93;} .lt .lbl{color:#7b7b84;}
+  .lbl{font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;}
+
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:16px;}
+  .grid4{display:grid; grid-template-columns:repeat(4,1fr); gap:16px;}
+  @media (max-width:820px){ .grid3,.grid4{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width:520px){ .grid3,.grid4{grid-template-columns:1fr;} }
+
+  .card{border:1px solid var(--rule); border-radius:10px; background:var(--card); overflow:hidden;}
+  .card .hd{padding:12px 14px 10px; border-bottom:1px solid var(--rule);}
+  .card .bd{display:flex; gap:0;}
+  .card .bd > div{flex:1; display:flex; flex-direction:column; align-items:center; gap:10px; padding:18px 8px;}
+  .card .ft{padding:11px 14px; border-top:1px solid var(--rule); font-size:12.5px; color:var(--dim);}
+
+  .stack{display:flex; align-items:center; gap:16px;}
+  .px{position:relative; line-height:0;}
+  .px .g{position:absolute; inset:0; pointer-events:none;
+    background-image:repeating-linear-gradient(to right,rgba(140,140,150,.38) 0 1px,transparent 1px 8px),
+                     repeating-linear-gradient(to bottom,rgba(140,140,150,.38) 0 1px,transparent 1px 8px);}
+  table{border-collapse:collapse; width:100%; font-size:13px;}
+  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--rule); vertical-align:top;}
+  th{font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); font-weight:650;}
+  .sw{display:inline-block; width:26px; height:11px; border-radius:2px; vertical-align:-1px; margin-right:7px;}
+  ul{margin:0 0 12px; padding-left:19px; max-width:74ch;} li{margin-bottom:6px;}
+  .note{border-left:3px solid var(--rule); padding:2px 0 2px 14px; color:var(--dim); max-width:74ch;}
+  .kicker{font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:650; margin-bottom:6px;}
+  .two{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:26px;}
+  @media (max-width:820px){ .two{grid-template-columns:1fr;} }
+  .scroll{overflow-x:auto;}
+</style>
+
+<!-- ============ ICON SYMBOLS ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+
+  <!-- ---------- 16px: shared mask (now-slits at weekly 61% / session 56%) ---------- -->
+  <mask id="m16" maskUnits="userSpaceOnUse" x="-4" y="-4" width="24" height="24">
+    <rect x="-4" y="-4" width="24" height="24" fill="#fff"/>
+    <line x1="8" y1="2.4" x2="8" y2="-0.3" stroke="#000" stroke-width="1" transform="rotate(219.6 8 8)"/>
+    <line x1="8" y1="8"   x2="8" y2="2.6"  stroke="#000" stroke-width="1" transform="rotate(201.6 8 8)"/>
+  </mask>
+
+  <!-- SAFE : ring safe (61+20, 19 track) / disc safe (56+25.2, 18.8 track) -->
+  <symbol id="s16-safe" viewBox="0 0 16 16">
+   <g mask="url(#m16)"><g transform="rotate(-90 8 8)" fill="none" stroke-linecap="butt">
+    <circle cx="8" cy="8" r="7" stroke="var(--reality)" stroke-width="2" stroke-dasharray="26.83 999"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--safe)"    stroke-width="2" stroke-dasharray="8.80 999"  stroke-dashoffset="-26.83"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--track)"   stroke-width="2" stroke-dasharray="8.36 999"  stroke-dashoffset="-35.63"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--reality)" stroke-width="5" stroke-dasharray="8.80 999"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--safe)"    stroke-width="5" stroke-dasharray="3.96 999" stroke-dashoffset="-8.80"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--track)"   stroke-width="5" stroke-dasharray="2.95 999" stroke-dashoffset="-12.75"/>
+   </g></g>
+  </symbol>
+
+  <!-- TIGHT : disc ghost clamped 1px short of 12 o'clock -> transparent void -->
+  <symbol id="s16-tight" viewBox="0 0 16 16">
+   <g mask="url(#m16)"><g transform="rotate(-90 8 8)" fill="none" stroke-linecap="butt">
+    <circle cx="8" cy="8" r="7" stroke="var(--reality)" stroke-width="2" stroke-dasharray="26.83 999"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--safe)"    stroke-width="2" stroke-dasharray="8.80 999"  stroke-dashoffset="-26.83"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--track)"   stroke-width="2" stroke-dasharray="8.36 999"  stroke-dashoffset="-35.63"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--reality)" stroke-width="5" stroke-dasharray="8.80 999"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--tight)"   stroke-width="5" stroke-dasharray="6.41 999" stroke-dashoffset="-8.80"/>
+   </g></g>
+  </symbol>
+
+  <!-- DRY : disc ghost closes the circle exactly -->
+  <symbol id="s16-dry" viewBox="0 0 16 16">
+   <g mask="url(#m16)"><g transform="rotate(-90 8 8)" fill="none" stroke-linecap="butt">
+    <circle cx="8" cy="8" r="7" stroke="var(--reality)" stroke-width="2" stroke-dasharray="26.83 999"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--safe)"    stroke-width="2" stroke-dasharray="8.80 999"  stroke-dashoffset="-26.83"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--track)"   stroke-width="2" stroke-dasharray="8.36 999"  stroke-dashoffset="-35.63"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--reality)" stroke-width="5" stroke-dasharray="8.80 999"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--dry)"     stroke-width="5" stroke-dasharray="6.91 999" stroke-dashoffset="-8.80"/>
+   </g></g>
+  </symbol>
+
+  <!-- UNKNOWN : no ghost anywhere, remainder hollow, zero chroma -->
+  <symbol id="s16-unknown" viewBox="0 0 16 16">
+   <g mask="url(#m16)"><g transform="rotate(-90 8 8)" fill="none" stroke-linecap="butt">
+    <circle cx="8" cy="8" r="7" stroke="var(--reality)" stroke-width="2" stroke-dasharray="26.83 999"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--track)"   stroke-width="1" stroke-dasharray="17.15 999" stroke-dashoffset="-26.83"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--reality)" stroke-width="5" stroke-dasharray="8.80 999"/>
+    <circle cx="8" cy="8" r="4.5" stroke="var(--track)"   stroke-width="1" stroke-dasharray="12.44 999" stroke-dashoffset="-15.83"/>
+   </g></g>
+  </symbol>
+
+  <!-- HERO 16px : weekly TIGHT (61 + 34.4, 4.6 void) / session DRY -->
+  <symbol id="s16-hero" viewBox="0 0 16 16">
+   <g mask="url(#m16)"><g transform="rotate(-90 8 8)" fill="none" stroke-linecap="butt">
+    <circle cx="8" cy="8" r="7" stroke="var(--reality)" stroke-width="2" stroke-dasharray="26.83 999"/>
+    <circle cx="8" cy="8" r="7" stroke="var(--tight)"   stroke-width="2" stroke-dasharray="15.13 999" stroke-dashoffset="-26.83"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--reality)" stroke-width="5" stroke-dasharray="8.80 999"/>
+    <circle cx="8" cy="8" r="2.5" stroke="var(--dry)"     stroke-width="5" stroke-dasharray="6.91 999" stroke-dashoffset="-8.80"/>
+   </g></g>
+  </symbol>
+
+  <!-- ---------- 32px ---------- -->
+  <mask id="m32" maskUnits="userSpaceOnUse" x="-6" y="-6" width="44" height="44">
+    <rect x="-6" y="-6" width="44" height="44" fill="#fff"/>
+    <line x1="16" y1="4.6" x2="16" y2="-0.2" stroke="#000" stroke-width="1.5" transform="rotate(219.6 16 16)"/>
+    <line x1="16" y1="16"  x2="16" y2="5.4"  stroke="#000" stroke-width="1.5" transform="rotate(201.6 16 16)"/>
+  </mask>
+
+  <!-- HERO 32px : adds the overshoot rim (dead-time magnitude, 27.3%) -->
+  <symbol id="s32-hero" viewBox="0 0 32 32">
+   <g mask="url(#m32)"><g transform="rotate(-90 16 16)" fill="none" stroke-linecap="butt">
+    <circle cx="16" cy="16" r="14" stroke="var(--reality)" stroke-width="4" stroke-dasharray="53.66 999"/>
+    <circle cx="16" cy="16" r="14" stroke="var(--tight)"   stroke-width="4" stroke-dasharray="30.26 999" stroke-dashoffset="-53.66"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--reality)" stroke-width="10" stroke-dasharray="17.59 999"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--dry)"     stroke-width="10" stroke-dasharray="13.82 999" stroke-dashoffset="-17.59"/>
+    <circle cx="16" cy="16" r="9"  stroke="var(--over)"    stroke-width="2"  stroke-dasharray="15.44 999"/>
+   </g></g>
+  </symbol>
+
+  <!-- SAFE 32px : adds the soft band tail (optimistic -> pessimistic projection) -->
+  <symbol id="s32-safe" viewBox="0 0 32 32">
+   <g mask="url(#m32)"><g transform="rotate(-90 16 16)" fill="none" stroke-linecap="butt">
+    <circle cx="16" cy="16" r="14" stroke="var(--reality)" stroke-width="4" stroke-dasharray="53.66 999"/>
+    <circle cx="16" cy="16" r="14" stroke="var(--safe)"    stroke-width="4" stroke-dasharray="17.59 999" stroke-dashoffset="-53.66"/>
+    <circle cx="16" cy="16" r="14" stroke="var(--track)"   stroke-width="4" stroke-dasharray="16.71 999" stroke-dashoffset="-71.25"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--reality)" stroke-width="10" stroke-dasharray="17.59 999"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--safe)"    stroke-width="10" stroke-dasharray="5.65 999"  stroke-dashoffset="-17.59"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--band)"    stroke-width="10" stroke-dasharray="4.71 999"  stroke-dashoffset="-23.25"/>
+    <circle cx="16" cy="16" r="5"  stroke="var(--track)"   stroke-width="10" stroke-dasharray="3.46 999"  stroke-dashoffset="-27.96"/>
+   </g></g>
+  </symbol>
+
+  <!-- neighbour glyphs for the taskbar mockup -->
+  <symbol id="nb1" viewBox="0 0 16 16"><path d="M3 4h10v2H3zM3 7.5h10v2H3zM3 11h7v2H3z" fill="#8a8a92"/></symbol>
+  <symbol id="nb2" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="#8a8a92" stroke-width="1.6"/></symbol>
+  <symbol id="nb3" viewBox="0 0 16 16"><path d="M2.5 12.5 6 6l3 4 2-2.5 2.5 5z" fill="#8a8a92"/></symbol>
+</defs></svg>
+
+<div class="wrap">
+
+<h1>Closing Arc</h1>
+<p class="lede">The forecast is drawn as a ghost arc that continues where consumption has actually reached, running exactly as far as the model says you will burn before the window resets. So the unused remainder stops being decoration and becomes the answer: <strong>if any daylight is left in the ring, you make it to reset. If the arc closes the circle, you don't.</strong> The alarm is a shape, not a colour.</p>
+
+<h2>The two channels inside one arc</h2>
+<div class="two">
+<div>
+<p><strong>Length is the point estimate.</strong> The ghost sweeps <code>r &times; t_reset</code> percent of the circle — how much quota the model expects you to spend between now and the reset. Long ghost = hot burn and/or a long time still to go.</p>
+<p><strong>The ending is the confidence.</strong> How the ghost terminates is quantised from the forecast's probability of cut-off, not from its point estimate. Three endings, three different pixels:</p>
+<ul>
+  <li><strong>Track tone remaining</strong> — headroom the model will vouch for. <code>P(cutoff) &lt; 0.35</code></li>
+  <li><strong>A transparent void</strong> — headroom it cannot vouch for; the taskbar shows through. <code>0.35–0.85</code></li>
+  <li><strong>Nothing; closed at 12 o'clock</strong> — no headroom. <code>&gt; 0.85</code>, and the point estimate must close too.</li>
+</ul>
+<p class="note">Precedence rule: the ending always wins over the length. A TIGHT verdict keeps a 1&nbsp;px void even when the point estimate overshoots; a SAFE verdict keeps 3&nbsp;px of track. At 16&nbsp;px the ghost's <em>length</em> is approximate — its <em>ending</em> is exact.</p>
+</div>
+<div>
+<div class="card">
+  <div class="hd"><h3>Session disc, three endings</h3><span class="dim">All three are 56% consumed right now. Only the forecast differs.</span></div>
+  <div class="bd">
+    <div class="chip dk" style="border-radius:0"><svg width="84" height="84"><use href="#s16-safe"/></svg><span class="lbl">safe</span></div>
+    <div class="chip dk" style="border-radius:0"><svg width="84" height="84"><use href="#s16-tight"/></svg><span class="lbl">tight</span></div>
+    <div class="chip dk" style="border-radius:0"><svg width="84" height="84"><use href="#s16-dry"/></svg><span class="lbl">dry</span></div>
+  </div>
+  <div class="bd">
+    <div class="chip lt" style="border-radius:0"><svg width="84" height="84"><use href="#s16-safe"/></svg><span class="lbl">safe</span></div>
+    <div class="chip lt" style="border-radius:0"><svg width="84" height="84"><use href="#s16-tight"/></svg><span class="lbl">tight</span></div>
+    <div class="chip lt" style="border-radius:0"><svg width="84" height="84"><use href="#s16-dry"/></svg><span class="lbl">dry</span></div>
+  </div>
+  <div class="ft">16&nbsp;px geometry shown at 84&nbsp;px. The hairline at 7&nbsp;o'clock is the <em>now</em>-slit: transparent, 1&nbsp;px, marking where reality ends and forecast begins. The outer ring is held constant (weekly, safe) so the disc reads alone.</div>
+</div>
+</div>
+</div>
+
+<h2>Worked example — the user's actual state</h2>
+<div class="two">
+<div>
+<div class="card">
+  <div class="hd"><h3>Tue 09 Sep, 14:24</h3><span class="dim">Session 56% &middot; resets in 2h48m &middot; burn 0.41&nbsp;%/min</span></div>
+  <div class="bd">
+    <div class="chip dk" style="border-radius:0; gap:22px">
+      <div class="px"><svg width="128" height="128"><use href="#s16-hero"/></svg><div class="g"></div></div>
+      <div style="display:flex;flex-direction:column;gap:14px;align-items:center">
+        <svg width="128" height="128"><use href="#s32-hero"/></svg>
+        <span class="lbl">32&nbsp;px art</span>
+      </div>
+    </div>
+  </div>
+  <div class="bd">
+    <div class="chip lt" style="border-radius:0; gap:22px">
+      <div class="px"><svg width="128" height="128"><use href="#s16-hero"/></svg><div class="g"></div></div>
+      <div style="display:flex;flex-direction:column;gap:14px;align-items:center">
+        <svg width="128" height="128"><use href="#s32-hero"/></svg>
+        <span class="lbl">32&nbsp;px art</span>
+      </div>
+    </div>
+  </div>
+  <div class="ft">Left: the 16&nbsp;px asset at 8&times; with its pixel grid, so you can judge what actually lands in a pixel. Right: the 32&nbsp;px asset, which can afford the overshoot rim.</div>
+</div>
+</div>
+<div>
+<p class="kicker">What the icon is saying</p>
+<p><strong>Inner disc — session.</strong> Neutral wedge to 201.6° = the 56% already spent. The red ghost continues from there and lands exactly on 12&nbsp;o'clock. It <em>wanted</em> to sweep 71.3% (0.4097&nbsp;%/min &times; 168&nbsp;min) but only 44% of circle was left, so it is clipped — and clipping is precisely the alarm. No track tone survives anywhere in the disc. The circle is closed.</p>
+<p><strong>The bright rim arc (32&nbsp;px only)</strong> sweeps the 27.3% that did not fit — 27.3 / 0.4097 = <strong>~64 minutes dead in the water</strong>. That is the magnitude channel, and it exists only where there are pixels for it.</p>
+<p><strong>Outer ring — weekly.</strong> 61% spent, amber ghost projects +34.4% by Friday 07:00, and stops 4.6% short of closing. Amber-with-a-void, not red: the model's cut-off probability is around 0.55, so the ring says <em>too close to call</em> and shows the gap as taskbar, not as comfortable track.</p>
+<p class="note">The contrast worth noticing: a plain "56%" gauge and this icon show the same disc fill. Only one of them has already told you that you get cut off an hour before the window turns over, while the weekly is still undecided.</p>
+</div>
+</div>
+
+<h2>True size, in place</h2>
+<div class="grid3" style="grid-template-columns:1fr 1fr">
+  <div class="chip dk"><div class="bar dk" style="background:#202020">
+    <svg width="16" height="16"><use href="#nb1"/></svg>
+    <svg width="16" height="16"><use href="#nb2"/></svg>
+    <svg width="16" height="16"><use href="#s16-hero"/></svg>
+    <svg width="16" height="16"><use href="#nb3"/></svg>
+  </div><span class="lbl">16&nbsp;px &middot; 100% scaling</span></div>
+  <div class="chip lt"><div class="bar lt" style="background:#f3f3f3">
+    <svg width="16" height="16"><use href="#nb1"/></svg>
+    <svg width="16" height="16"><use href="#nb2"/></svg>
+    <svg width="16" height="16"><use href="#s16-hero"/></svg>
+    <svg width="16" height="16"><use href="#nb3"/></svg>
+  </div><span class="lbl">16&nbsp;px &middot; 100% scaling</span></div>
+</div>
+<div class="grid3" style="grid-template-columns:1fr 1fr; margin-top:14px">
+  <div class="chip dk">
+    <svg width="16" height="16"><use href="#s16-safe"/></svg>
+    <svg width="20" height="20"><use href="#s16-safe"/></svg>
+    <svg width="24" height="24"><use href="#s32-safe"/></svg>
+    <svg width="32" height="32"><use href="#s32-safe"/></svg>
+    <svg width="48" height="48"><use href="#s32-safe"/></svg>
+    <span class="lbl">safe &middot; 16 / 20 / 24 / 32 / 48</span>
+  </div>
+  <div class="chip lt">
+    <svg width="16" height="16"><use href="#s16-hero"/></svg>
+    <svg width="20" height="20"><use href="#s16-hero"/></svg>
+    <svg width="24" height="24"><use href="#s32-hero"/></svg>
+    <svg width="32" height="32"><use href="#s32-hero"/></svg>
+    <svg width="48" height="48"><use href="#s32-hero"/></svg>
+    <span class="lbl">dry &middot; 16 / 20 / 24 / 32 / 48</span>
+  </div>
+</div>
+<p class="dim" style="margin-top:12px">20&nbsp;px and 24&nbsp;px are shown scaled from the 16 and 32 masters to make the point that they must not ship that way — each needs its own hinted asset, because a 1&nbsp;px slit resampled by 1.25&times; becomes a grey smear.</p>
+
+<h2>Four states</h2>
+<div class="grid4">
+  <div class="card">
+    <div class="hd"><h3>Safe</h3><span class="dim">P(cutoff) &lt; 0.35</span></div>
+    <div class="bd"><div class="chip dk" style="border-radius:0"><svg width="96" height="96"><use href="#s16-safe"/></svg>
+      <svg width="16" height="16"><use href="#s16-safe"/></svg></div></div>
+    <div class="bd"><div class="chip lt" style="border-radius:0"><svg width="96" height="96"><use href="#s16-safe"/></svg>
+      <svg width="16" height="16"><use href="#s16-safe"/></svg></div></div>
+    <div class="ft">A real wedge of track tone survives in both rings. Cool blue ghost. Nothing to do.</div>
+  </div>
+  <div class="card">
+    <div class="hd"><h3>Tight</h3><span class="dim">0.35 – 0.85</span></div>
+    <div class="bd"><div class="chip dk" style="border-radius:0"><svg width="96" height="96"><use href="#s16-tight"/></svg>
+      <svg width="16" height="16"><use href="#s16-tight"/></svg></div></div>
+    <div class="bd"><div class="chip lt" style="border-radius:0"><svg width="96" height="96"><use href="#s16-tight"/></svg>
+      <svg width="16" height="16"><use href="#s16-tight"/></svg></div></div>
+    <div class="ft">Disc track tone is gone, but the circle is held open by a 1&nbsp;px transparent void at 12. Amber.</div>
+  </div>
+  <div class="card">
+    <div class="hd"><h3>Dry early</h3><span class="dim">&gt; 0.85</span></div>
+    <div class="bd"><div class="chip dk" style="border-radius:0"><svg width="96" height="96"><use href="#s16-dry"/></svg>
+      <svg width="16" height="16"><use href="#s16-dry"/></svg></div></div>
+    <div class="bd"><div class="chip lt" style="border-radius:0"><svg width="96" height="96"><use href="#s16-dry"/></svg>
+      <svg width="16" height="16"><use href="#s16-dry"/></svg></div></div>
+    <div class="ft">Closed. No third tone anywhere in the disc. Red. This is the only state that closes.</div>
+  </div>
+  <div class="card">
+    <div class="hd"><h3>No forecast</h3><span class="dim">cold / gap / rollover</span></div>
+    <div class="bd"><div class="chip dk" style="border-radius:0"><svg width="96" height="96"><use href="#s16-unknown"/></svg>
+      <svg width="16" height="16"><use href="#s16-unknown"/></svg></div></div>
+    <div class="bd"><div class="chip lt" style="border-radius:0"><svg width="96" height="96"><use href="#s16-unknown"/></svg>
+      <svg width="16" height="16"><use href="#s16-unknown"/></svg></div></div>
+    <div class="ft">No ghost, remainder drops to a hollow 1&nbsp;px outline, zero chroma. Refusal cannot be mistaken for OK, because OK has colour.</div>
+  </div>
+</div>
+
+<h2>Tones</h2>
+<div class="scroll"><table>
+  <tr><th>Role</th><th>Means</th><th>Dark taskbar #202020</th><th>Light taskbar #f3f3f3</th></tr>
+  <tr><td><strong>Reality</strong></td><td>Spent. Never carries a verdict colour — it is just true.</td>
+      <td><span class="sw" style="background:#D6D6DC"></span><code>#D6D6DC</code></td>
+      <td><span class="sw" style="background:#3A3A42"></span><code>#3A3A42</code></td></tr>
+  <tr><td><strong>Ghost · safe</strong></td><td>Forecast, will not close</td>
+      <td><span class="sw" style="background:#3D86C8"></span><code>#3D86C8</code></td>
+      <td><span class="sw" style="background:#2F72B0"></span><code>#2F72B0</code></td></tr>
+  <tr><td><strong>Ghost · tight</strong></td><td>Forecast, too close to call</td>
+      <td><span class="sw" style="background:#C68A10"></span><code>#C68A10</code></td>
+      <td><span class="sw" style="background:#A9750A"></span><code>#A9750A</code></td></tr>
+  <tr><td><strong>Ghost · dry</strong></td><td>Forecast, closes the circle</td>
+      <td><span class="sw" style="background:#E24B3C"></span><code>#E24B3C</code></td>
+      <td><span class="sw" style="background:#C4342A"></span><code>#C4342A</code></td></tr>
+  <tr><td><strong>Overshoot</strong></td><td>Dead minutes (24&nbsp;px+ only)</td>
+      <td><span class="sw" style="background:#FF7F70"></span><code>#FF7F70</code></td>
+      <td><span class="sw" style="background:#8E1F17"></span><code>#8E1F17</code></td></tr>
+  <tr><td><strong>Track</strong></td><td>Headroom the model vouches for</td>
+      <td><span class="sw" style="background:#4A4A52"></span><code>#4A4A52</code></td>
+      <td><span class="sw" style="background:#CBCBD2"></span><code>#CBCBD2</code></td></tr>
+  <tr><td><strong>Void / slit</strong></td><td>Absence — taskbar shows through</td>
+      <td colspan="2"><code>alpha 0</code> — the same treatment as the locked ring/disc gap</td></tr>
+</table></div>
+<p style="margin-top:12px">One invariant runs through both themes: <strong>distance from the taskbar colour is certainty.</strong> Track sits nearest the background, ghost in the middle, reality furthest away. The luminance order survives greyscale, so the icon still parses with all colour removed.</p>
+
+<h2>Rules the renderer must enforce</h2>
+<div class="two">
+<div>
+<ul>
+  <li><strong>Never composite ghost alpha over the taskbar.</strong> A 45% orange over #f3f3f3 is a 1.15:1 ghost of a ghost. The "translucency" is baked into an opaque mid-tone per theme, so behaviour is identical on acrylic, solid, and wallpaper-through taskbars.</li>
+  <li><strong>Minimum sweeps.</strong> Track wedge ≥ 3&nbsp;px of visible arc at the element's outer edge, void ≥ 1&nbsp;px, ghost ≥ 2&nbsp;px or it is not drawn. Anything below the floor snaps to the floor, and the verdict tone carries the truth.</li>
+  <li><strong>Closure is reserved.</strong> Only a DRY verdict may close the circle. TIGHT is clamped 1&nbsp;px short, always. This is what makes the alarm colour-blind-safe: closed vs not-closed is pure geometry.</li>
+  <li><strong>Hysteresis on the ending, not just the colour.</strong> 3 consecutive polls plus a 0.05 deadband on P(cutoff) before a terminal treatment changes, or the void will strobe open and shut at the boundary.</li>
+</ul>
+</div>
+<div>
+<ul>
+  <li><strong>The now-slit is always drawn</strong>, in every state including 100% and including no-forecast. It is the datum that stops solid + ghost being read as one big fill.</li>
+  <li><strong>Ship real assets at 16/20/24/32/40/48.</strong> Slit width, ring thickness and the overshoot rim are per-size decisions, not a scale factor. The overshoot rim and the soft band tail exist at 24&nbsp;px and above only.</li>
+  <li><strong>Rollover flushes to no-forecast</strong> for at least the hysteresis window. A ghost must never survive a reset boundary, and a re-seeded forecast must earn its colour back.</li>
+  <li><strong>Tooltip carries what the pixels dropped:</strong> "Session 56% &rarr; 100% at 16:08, 64 min before reset (94%). Weekly 61% &rarr; ~95% at reset — too close to call."</li>
+</ul>
+</div>
+</div>
+
+</div>

@@ -1,0 +1,327 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light dark}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style></head><body><title>Verdict Ring</title>
+<style>
+  :root{
+    --bg:#faf9f7; --panel:#ffffff; --ink:#1a1a1c; --dim:#5c5f66; --faint:#8a8e96;
+    --rule:#e2e0dc; --rule2:#efedea; --accent:#b8541f; --code:#f3f1ee;
+    --bad:#c4392f; --good:#1d7f57;
+    --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace;
+    --sans:"Segoe UI",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#131315; --panel:#1a1a1d; --ink:#eceae6; --dim:#a0a3aa; --faint:#71757d;
+    --rule:#2c2c31; --rule2:#232327; --accent:#f0904f; --code:#202024;
+    --bad:#f07a6c; --good:#4cc294;
+  }}
+  :root[data-theme="dark"]{
+    --bg:#131315; --panel:#1a1a1d; --ink:#eceae6; --dim:#a0a3aa; --faint:#71757d;
+    --rule:#2c2c31; --rule2:#232327; --accent:#f0904f; --code:#202024;
+    --bad:#f07a6c; --good:#4cc294;
+  }
+  body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--sans);margin:0;
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto;padding:56px 28px 96px}
+  h1{font-size:31px;line-height:1.15;letter-spacing:-.022em;margin:0 0 6px;font-weight:640}
+  h2{font-size:12px;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);
+     font-weight:670;margin:56px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+  h3{font-size:15px;margin:26px 0 8px;font-weight:640;letter-spacing:-.005em}
+  p{margin:0 0 12px;max-width:74ch}
+  .lede{font-size:17px;line-height:1.55;color:var(--dim);max-width:70ch;margin-bottom:0}
+  .kicker{font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+          color:var(--accent);margin-bottom:14px}
+  code,.m{font-family:var(--mono);font-size:.88em;background:var(--code);
+          padding:.1em .34em;border-radius:3px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:14px 0}
+  th{text-align:left;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+     color:var(--faint);font-weight:670;padding:0 12px 7px 0;border-bottom:1px solid var(--rule)}
+  td{padding:11px 12px 11px 0;border-bottom:1px solid var(--rule2);vertical-align:top}
+  td.m{background:transparent;font-family:var(--mono);font-size:12.5px;
+       padding:11px 12px 11px 0;color:var(--dim);white-space:nowrap}
+  td.ico{white-space:nowrap;width:1%;padding-right:16px}
+  td.ico svg{vertical-align:middle;margin-right:5px}
+  .scroll{overflow-x:auto}
+  .tb{display:flex;align-items:center;gap:20px;padding:14px 20px;border-radius:8px}
+  .tb-d{background:#202020}.tb-l{background:#f3f3f3}
+  .lz{display:flex;flex-direction:column;align-items:center;gap:7px}
+  .lz b{font:600 9.5px var(--mono);letter-spacing:.06em}
+  .tb-d .lz b{color:#8d8d8d}.tb-l .lz b{color:#77777a}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+  .hero{display:grid;grid-template-columns:auto auto 1fr;gap:0;align-items:center;
+        border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:22px 0 8px}
+  .hero .hp{padding:30px 34px;display:flex;align-items:center;justify-content:center}
+  .hero .hd{background:#202020}.hero .hl{background:#f3f3f3}
+  .hero .hx{padding:22px 26px;background:var(--panel);align-self:stretch;
+            display:flex;flex-direction:column;justify-content:center;gap:3px}
+  .hx .r{display:flex;gap:10px;font:12.5px/1.7 var(--mono)}
+  .hx .r span:first-child{color:var(--faint);width:9.5em;flex:none}
+  .hx .r b{font-weight:600}
+  @media(max-width:820px){.hero{grid-template-columns:1fr 1fr}.hero .hx{grid-column:1/-1}}
+  .strip{display:flex;flex-wrap:wrap;gap:10px;padding:16px 18px;border-radius:8px}
+  .strip figure{margin:0;display:flex;flex-direction:column;align-items:center;gap:7px;width:88px}
+  .strip figure svg{display:block}
+  .strip .ic:nth-of-type(2){margin-top:-2px}
+  .strip figcaption{font:500 9.5px/1.35 var(--mono);letter-spacing:.03em;text-align:center}
+  .strip.tb-d figcaption{color:#9a9a9a}.strip.tb-l figcaption{color:#6a6a6d}
+  .gpair{margin:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+  .gpair svg{display:block;border-radius:2px}
+  .gpair figcaption{font-size:11.5px;color:var(--faint);max-width:22em;line-height:1.5}
+  .grids{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start}
+  .cvdrow{display:flex;align-items:center;gap:16px;margin-bottom:8px}
+  .cvdrow>span{font:600 10.5px var(--mono);letter-spacing:.06em;color:var(--faint);
+               width:8.5em;flex:none;text-align:right}
+  .cvdrow .tb{flex:1;gap:14px}
+  .note{border-left:2px solid var(--accent);padding:2px 0 2px 16px;margin:18px 0;
+        color:var(--dim);font-size:14px;max-width:72ch}
+  .bad{color:var(--bad)}.good{color:var(--good)}
+  ul{margin:0 0 12px;padding-left:20px;max-width:74ch}li{margin-bottom:6px}
+  .ic{display:block;fill:none;stroke-width:4.4}.pd{--tk:#5c5c5c;--dk:#414141;--bc:#f0413e}.pl{--tk:#a8a8a8;--dk:#c6c6c6;--bc:#c41f1c}.pd.v0{--rc:#c9d2dc;--dc:#c9d2dc}.pd.v1{--rc:#22c58c;--dc:#22c58c}.pd.v2{--rc:#f2b32c;--dc:#f2b32c}.pd.v3{--rc:#f47434;--dc:#f47434}.pd.v4{--rc:#f2663a;--dc:#f2663a}.pd.v5{--rc:#f1583f;--dc:#f1583f}.pd.v6{--rc:#f04a44;--dc:#f04a44}.pd.v7{--rc:#ef3b3b;--dc:#ef3b3b}.pd.w0{--rc:#22c58c;--dc:#f2663a}.pd.w1{--rc:#f1583f;--dc:#f04a44}.pd.w2{--rc:#c9d2dc;--dc:#f1583f}.pd.w3{--rc:#c8b23a;--dc:#d99a2b}.pl.v0{--rc:#55606d;--dc:#55606d}.pl.v1{--rc:#0e8f63;--dc:#0e8f63}.pl.v2{--rc:#b57c08;--dc:#b57c08}.pl.v3{--rc:#c84b15;--dc:#c84b15}.pl.v4{--rc:#c6401a;--dc:#c6401a}.pl.v5{--rc:#c53520;--dc:#c53520}.pl.v6{--rc:#c42a26;--dc:#c42a26}.pl.v7{--rc:#c0201f;--dc:#c0201f}.pl.w0{--rc:#0e8f63;--dc:#c6401a}.pl.w1{--rc:#c53520;--dc:#c42a26}.pl.w2{--rc:#55606d;--dc:#c53520}.pl.w3{--rc:#c8b23a;--dc:#d99a2b}
+  .lbl{font:600 10px var(--mono);letter-spacing:.09em;text-transform:uppercase;
+       color:var(--faint);margin:0 0 8px}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><mask id="mHc" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><circle cx="16" cy="16" r="3.2" fill="#000"/></mask><mask id="mHs" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><rect x="12" y="12" width="8" height="8" fill="#000"/></mask><mask id="mB" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><circle cx="25.2" cy="25.2" r="6.3" fill="#000"/></mask><mask id="mHcB" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><circle cx="16" cy="16" r="3.2" fill="#000"/><circle cx="25.2" cy="25.2" r="6.3" fill="#000"/></mask><mask id="mHsB" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><rect x="12" y="12" width="8" height="8" fill="#000"/><circle cx="25.2" cy="25.2" r="6.3" fill="#000"/></mask><filter id="deut" color-interpolation-filters="linearRGB"><feColorMatrix type="matrix" values="0.625 0.375 0 0 0  0.700 0.300 0 0 0  0 0.300 0.700 0 0  0 0 0 1 0"/></filter><filter id="prot" color-interpolation-filters="linearRGB"><feColorMatrix type="matrix" values="0.567 0.433 0 0 0  0.558 0.442 0 0 0  0 0.242 0.758 0 0  0 0 0 1 0"/></filter><filter id="trit" color-interpolation-filters="linearRGB"><feColorMatrix type="matrix" values="0.950 0.050 0 0 0  0 0.433 0.567 0 0  0 0.475 0.525 0 0  0 0 0 1 0"/></filter><symbol id="a" viewBox="0 0 32 32"><g><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g></symbol><symbol id="b" viewBox="0 0 32 32"><g mask="url(#mB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="3.7" fill="none" stroke="var(--rc)" stroke-width="1.8"/></symbol><symbol id="c" viewBox="0 0 32 32"><g mask="url(#mHc)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g></symbol><symbol id="d" viewBox="0 0 32 32"><g mask="url(#mHs)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g></symbol><symbol id="e" viewBox="0 0 32 32"><g mask="url(#mHcB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="f" viewBox="0 0 32 32"><g mask="url(#mHsB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="44 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="g" viewBox="0 0 32 32"><g mask="url(#mHcB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="71 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="h" viewBox="0 0 32 32"><g mask="url(#mHsB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" pathLength="100" stroke-dasharray="71 100" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><path d="M16,16 L16,7 A9,9 0 1 1 12.69,24.37 Z" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="i" viewBox="0 0 32 32"><g mask="url(#mHcB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><circle cx="16" cy="16" r="9" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="j" viewBox="0 0 32 32"><g mask="url(#mHsB)"><circle cx="16" cy="16" r="13.2" stroke="var(--tk)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="13.2" stroke="var(--rc)" transform="rotate(-90 16 16)"/><circle cx="16" cy="16" r="9" fill="var(--dk)"/><circle cx="16" cy="16" r="9" fill="var(--dc)"/></g><circle cx="25.2" cy="25.2" r="4.6" fill="var(--bc)"/></symbol><symbol id="g-A_dark" viewBox="0 0 16 16" shape-rendering="crispEdges"><rect width="16" height="16" fill="#202020"/><rect x="4" y="0" width="1" height="1" fill="#212121"/><rect x="5" y="0" width="1" height="1" fill="#303030"/><rect x="6" y="0" width="1" height="1" fill="#424242"/><rect x="7" y="0" width="1" height="1" fill="#494949"/><rect x="8" y="0" width="1" height="1" fill="#21916a"/><rect x="9" y="0" width="1" height="1" fill="#217d5d"/><rect x="10" y="0" width="1" height="1" fill="#214c3d"/><rect x="11" y="0" width="1" height="1" fill="#202322"/><rect x="3" y="1" width="1" height="1" fill="#2f2f2f"/><rect x="4" y="1" width="1" height="1" fill="#545454"/><rect x="5" y="1" width="3" height="1" fill="#5c5c5c"/><rect x="8" y="1" width="3" height="1" fill="#22c58c"/><rect x="11" y="1" width="1" height="1" fill="#22ae7d"/><rect x="12" y="1" width="1" height="1" fill="#20493b"/><rect x="2" y="2" width="1" height="1" fill="#383838"/><rect x="3" y="2" width="1" height="1" fill="#5b5b5b"/><rect x="4" y="2" width="1" height="1" fill="#5c5c5c"/><rect x="5" y="2" width="1" height="1" fill="#5b5b5b"/><rect x="6" y="2" width="1" height="1" fill="#4b4b4b"/><rect x="7" y="2" width="1" height="1" fill="#3f3f3f"/><rect x="8" y="2" width="1" height="1" fill="#217558"/><rect x="9" y="2" width="1" height="1" fill="#21976e"/><rect x="10" y="2" width="1" height="1" fill="#22c28a"/><rect x="11" y="2" width="1" height="1" fill="#22c58c"/><rect x="12" y="2" width="1" height="1" fill="#22c28a"/><rect x="13" y="2" width="1" height="1" fill="#21634c"/><rect x="1" y="3" width="1" height="1" fill="#2f2f2f"/><rect x="2" y="3" width="1" height="1" fill="#5b5b5b"/><rect x="3" y="3" width="1" height="1" fill="#5c5c5c"/><rect x="4" y="3" width="1" height="1" fill="#4c4c4c"/><rect x="5" y="3" width="1" height="1" fill="#282828"/><rect x="6" y="3" width="1" height="1" fill="#272727"/><rect x="7" y="3" width="1" height="1" fill="#2f2f2f"/><rect x="8" y="3" width="1" height="1" fill="#82412c"/><rect x="9" y="3" width="1" height="1" fill="#4e2f26"/><rect x="10" y="3" width="1" height="1" fill="#20372f"/><rect x="11" y="3" width="1" height="1" fill="#21996f"/><rect x="12" y="3" width="1" height="1" fill="#22c58c"/><rect x="13" y="3" width="1" height="1" fill="#22c28a"/><rect x="14" y="3" width="1" height="1" fill="#20493b"/><rect x="0" y="4" width="1" height="1" fill="#212121"/><rect x="1" y="4" width="1" height="1" fill="#545454"/><rect x="2" y="4" width="1" height="1" fill="#5c5c5c"/><rect x="3" y="4" width="1" height="1" fill="#4c4c4c"/><rect x="4" y="4" width="1" height="1" fill="#222222"/><rect x="5" y="4" width="1" height="1" fill="#383838"/><rect x="6" y="4" width="2" height="2" fill="#414141"/><rect x="8" y="4" width="2" height="2" fill="#f2663a"/><rect x="10" y="4" width="1" height="1" fill="#b75233"/><rect x="11" y="4" width="1" height="1" fill="#2a2623"/><rect x="12" y="4" width="1" height="1" fill="#21996f"/><rect x="13" y="4" width="1" height="1" fill="#22c58c"/><rect x="14" y="4" width="1" height="1" fill="#22ae7d"/><rect x="15" y="4" width="1" height="1" fill="#202322"/><rect x="0" y="5" width="1" height="1" fill="#303030"/><rect x="1" y="5" width="1" height="6" fill="#5c5c5c"/><rect x="2" y="5" width="1" height="1" fill="#5b5b5b"/><rect x="3" y="5" width="1" height="1" fill="#282828"/><rect x="4" y="5" width="1" height="1" fill="#383838"/><rect x="5" y="5" width="1" height="6" fill="#414141"/><rect x="10" y="5" width="1" height="6" fill="#f2663a"/><rect x="11" y="5" width="1" height="1" fill="#b75233"/><rect x="12" y="5" width="1" height="1" fill="#20372f"/><rect x="13" y="5" width="1" height="1" fill="#22c28a"/><rect x="14" y="5" width="1" height="6" fill="#22c58c"/><rect x="15" y="5" width="1" height="1" fill="#214c3d"/><rect x="0" y="6" width="1" height="1" fill="#424242"/><rect x="2" y="6" width="1" height="1" fill="#4b4b4b"/><rect x="3" y="6" width="1" height="1" fill="#272727"/><rect x="4" y="6" width="1" height="4" fill="#414141"/><rect x="11" y="6" width="1" height="4" fill="#f2663a"/><rect x="12" y="6" width="1" height="1" fill="#4e2f26"/><rect x="13" y="6" width="1" height="1" fill="#21976e"/><rect x="15" y="6" width="1" height="1" fill="#217d5d"/><rect x="0" y="7" width="1" height="2" fill="#494949"/><rect x="2" y="7" width="1" height="2" fill="#3f3f3f"/><rect x="3" y="7" width="1" height="2" fill="#2f2f2f"/><rect x="12" y="7" width="1" height="2" fill="#82412c"/><rect x="13" y="7" width="1" height="2" fill="#217558"/><rect x="15" y="7" width="1" height="2" fill="#21916a"/><rect x="0" y="9" width="1" height="1" fill="#424242"/><rect x="2" y="9" width="1" height="1" fill="#4b4b4b"/><rect x="3" y="9" width="1" height="1" fill="#272727"/><rect x="12" y="9" width="1" height="1" fill="#4e2f26"/><rect x="13" y="9" width="1" height="1" fill="#21976e"/><rect x="15" y="9" width="1" height="1" fill="#217d5d"/><rect x="0" y="10" width="1" height="1" fill="#303030"/><rect x="2" y="10" width="1" height="1" fill="#5b5b5b"/><rect x="3" y="10" width="1" height="1" fill="#282828"/><rect x="4" y="10" width="1" height="1" fill="#383838"/><rect x="6" y="10" width="1" height="1" fill="#494341"/><rect x="7" y="10" width="1" height="1" fill="#ea643a"/><rect x="8" y="10" width="2" height="2" fill="#f2663a"/><rect x="11" y="10" width="1" height="1" fill="#b75233"/><rect x="12" y="10" width="1" height="1" fill="#20372f"/><rect x="13" y="10" width="1" height="1" fill="#22c28a"/><rect x="15" y="10" width="1" height="1" fill="#214c3d"/><rect x="0" y="11" width="1" height="1" fill="#212121"/><rect x="1" y="11" width="1" height="1" fill="#545454"/><rect x="2" y="11" width="1" height="1" fill="#5c5c5c"/><rect x="3" y="11" width="1" height="1" fill="#4c4c4c"/><rect x="4" y="11" width="1" height="1" fill="#222222"/><rect x="5" y="11" width="1" height="1" fill="#383838"/><rect x="6" y="11" width="1" height="1" fill="#834f3e"/><rect x="7" y="11" width="1" height="1" fill="#f2663a"/><rect x="10" y="11" width="1" height="1" fill="#b75233"/><rect x="11" y="11" width="1" height="1" fill="#2a2623"/><rect x="12" y="11" width="1" height="1" fill="#21996f"/><rect x="13" y="11" width="1" height="1" fill="#22c58c"/><rect x="14" y="11" width="1" height="1" fill="#22ae7d"/><rect x="15" y="11" width="1" height="1" fill="#202322"/><rect x="1" y="12" width="1" height="1" fill="#2f2f2f"/><rect x="2" y="12" width="1" height="1" fill="#5b5b5b"/><rect x="3" y="12" width="1" height="1" fill="#5c5c5c"/><rect x="4" y="12" width="1" height="1" fill="#4c4c4c"/><rect x="5" y="12" width="1" height="1" fill="#282828"/><rect x="6" y="12" width="1" height="1" fill="#482e26"/><rect x="7" y="12" width="2" height="1" fill="#82412c"/><rect x="9" y="12" width="1" height="1" fill="#4e2f26"/><rect x="10" y="12" width="1" height="1" fill="#20372f"/><rect x="11" y="12" width="1" height="1" fill="#21996f"/><rect x="12" y="12" width="1" height="1" fill="#22c58c"/><rect x="13" y="12" width="1" height="1" fill="#22c28a"/><rect x="14" y="12" width="1" height="1" fill="#20493b"/><rect x="2" y="13" width="1" height="1" fill="#383838"/><rect x="3" y="13" width="1" height="1" fill="#5b5b5b"/><rect x="4" y="13" width="1" height="1" fill="#5c5c5c"/><rect x="5" y="13" width="1" height="1" fill="#5b5b5b"/><rect x="6" y="13" width="1" height="1" fill="#4b4b4b"/><rect x="7" y="13" width="2" height="1" fill="#3f3f3f"/><rect x="9" y="13" width="1" height="1" fill="#4b4b4b"/><rect x="10" y="13" width="1" height="1" fill="#2cb082"/><rect x="11" y="13" width="1" height="1" fill="#22c58c"/><rect x="12" y="13" width="1" height="1" fill="#22c28a"/><rect x="13" y="13" width="1" height="1" fill="#21634c"/><rect x="3" y="14" width="1" height="1" fill="#2f2f2f"/><rect x="4" y="14" width="1" height="1" fill="#545454"/><rect x="5" y="14" width="5" height="1" fill="#5c5c5c"/><rect x="10" y="14" width="1" height="1" fill="#448870"/><rect x="11" y="14" width="1" height="1" fill="#22ae7d"/><rect x="12" y="14" width="1" height="1" fill="#20493b"/><rect x="4" y="15" width="1" height="1" fill="#212121"/><rect x="5" y="15" width="1" height="1" fill="#303030"/><rect x="6" y="15" width="1" height="1" fill="#424242"/><rect x="7" y="15" width="2" height="1" fill="#494949"/><rect x="9" y="15" width="1" height="1" fill="#424242"/><rect x="10" y="15" width="1" height="1" fill="#2e3331"/><rect x="11" y="15" width="1" height="1" fill="#202322"/></symbol><symbol id="g-B_light" viewBox="0 0 16 16" shape-rendering="crispEdges"><rect width="16" height="16" fill="#f3f3f3"/><rect x="4" y="0" width="1" height="1" fill="#f2f2f2"/><rect x="5" y="0" width="1" height="1" fill="#dfdfdf"/><rect x="6" y="0" width="1" height="1" fill="#c9c9c9"/><rect x="7" y="0" width="1" height="1" fill="#bfbfbf"/><rect x="8" y="0" width="1" height="1" fill="#d37062"/><rect x="9" y="0" width="1" height="1" fill="#d9887c"/><rect x="10" y="0" width="1" height="1" fill="#e7c1bb"/><rect x="11" y="0" width="1" height="1" fill="#f2f0f0"/><rect x="3" y="1" width="1" height="1" fill="#e0e0e0"/><rect x="4" y="1" width="1" height="1" fill="#b3b3b3"/><rect x="5" y="1" width="3" height="1" fill="#a8a8a8"/><rect x="8" y="1" width="3" height="1" fill="#c53520"/><rect x="11" y="1" width="1" height="1" fill="#cb503e"/><rect x="12" y="1" width="1" height="1" fill="#e8c4be"/><rect x="2" y="2" width="1" height="1" fill="#d5d5d5"/><rect x="3" y="2" width="1" height="1" fill="#a9a9a9"/><rect x="4" y="2" width="1" height="1" fill="#a8a8a8"/><rect x="5" y="2" width="1" height="1" fill="#a9a9a9"/><rect x="6" y="2" width="1" height="1" fill="#bdbdbd"/><rect x="7" y="2" width="1" height="1" fill="#cccccc"/><rect x="8" y="2" width="1" height="1" fill="#db9186"/><rect x="9" y="2" width="1" height="1" fill="#d26a5b"/><rect x="10" y="2" width="1" height="1" fill="#c63823"/><rect x="11" y="2" width="1" height="1" fill="#c53520"/><rect x="12" y="2" width="1" height="1" fill="#c63823"/><rect x="13" y="2" width="1" height="1" fill="#e0a69d"/><rect x="1" y="3" width="1" height="1" fill="#e0e0e0"/><rect x="2" y="3" width="1" height="1" fill="#a9a9a9"/><rect x="3" y="3" width="1" height="1" fill="#a8a8a8"/><rect x="4" y="3" width="1" height="1" fill="#bcbcbc"/><rect x="5" y="3" width="1" height="1" fill="#e8e8e8"/><rect x="6" y="3" width="1" height="1" fill="#e9e9e9"/><rect x="7" y="3" width="1" height="1" fill="#dedede"/><rect x="8" y="3" width="1" height="1" fill="#dd9593"/><rect x="9" y="3" width="1" height="1" fill="#e9c7c6"/><rect x="10" y="3" width="1" height="1" fill="#edd8d5"/><rect x="11" y="3" width="1" height="1" fill="#d16758"/><rect x="12" y="3" width="1" height="1" fill="#c53520"/><rect x="13" y="3" width="1" height="1" fill="#c63823"/><rect x="14" y="3" width="1" height="1" fill="#e8c4be"/><rect x="0" y="4" width="1" height="1" fill="#f2f2f2"/><rect x="1" y="4" width="1" height="1" fill="#b3b3b3"/><rect x="2" y="4" width="1" height="1" fill="#a8a8a8"/><rect x="3" y="4" width="1" height="1" fill="#bcbcbc"/><rect x="4" y="4" width="1" height="1" fill="#f0f0f0"/><rect x="5" y="4" width="1" height="1" fill="#d3d3d3"/><rect x="6" y="4" width="2" height="2" fill="#c6c6c6"/><rect x="8" y="4" width="2" height="2" fill="#c42a26"/><rect x="10" y="4" width="1" height="1" fill="#d16360"/><rect x="11" y="4" width="1" height="1" fill="#f0e7e6"/><rect x="12" y="4" width="1" height="1" fill="#d16758"/><rect x="13" y="4" width="1" height="1" fill="#c53520"/><rect x="14" y="4" width="1" height="1" fill="#cb503e"/><rect x="15" y="4" width="1" height="1" fill="#f2f0f0"/><rect x="0" y="5" width="1" height="1" fill="#dfdfdf"/><rect x="1" y="5" width="1" height="4" fill="#a8a8a8"/><rect x="2" y="5" width="1" height="1" fill="#a9a9a9"/><rect x="3" y="5" width="1" height="1" fill="#e8e8e8"/><rect x="4" y="5" width="1" height="1" fill="#d3d3d3"/><rect x="5" y="5" width="1" height="6" fill="#c6c6c6"/><rect x="10" y="5" width="1" height="4" fill="#c42a26"/><rect x="11" y="5" width="1" height="1" fill="#d16360"/><rect x="12" y="5" width="1" height="1" fill="#edd8d5"/><rect x="13" y="5" width="1" height="1" fill="#c63823"/><rect x="14" y="5" width="1" height="4" fill="#c53520"/><rect x="15" y="5" width="1" height="1" fill="#e7c1bb"/><rect x="0" y="6" width="1" height="1" fill="#c9c9c9"/><rect x="2" y="6" width="1" height="1" fill="#bdbdbd"/><rect x="3" y="6" width="1" height="1" fill="#e9e9e9"/><rect x="4" y="6" width="1" height="4" fill="#c6c6c6"/><rect x="11" y="6" width="1" height="3" fill="#c42a26"/><rect x="12" y="6" width="1" height="1" fill="#e9c7c6"/><rect x="13" y="6" width="1" height="1" fill="#d26a5b"/><rect x="15" y="6" width="1" height="1" fill="#d9887c"/><rect x="0" y="7" width="1" height="2" fill="#bfbfbf"/><rect x="2" y="7" width="1" height="2" fill="#cccccc"/><rect x="3" y="7" width="1" height="2" fill="#dedede"/><rect x="12" y="7" width="1" height="2" fill="#dd9593"/><rect x="13" y="7" width="1" height="2" fill="#db9186"/><rect x="15" y="7" width="1" height="2" fill="#d37062"/><rect x="0" y="9" width="1" height="1" fill="#cbc2c0"/><rect x="1" y="9" width="1" height="1" fill="#b28079"/><rect x="2" y="9" width="1" height="1" fill="#ca8b82"/><rect x="3" y="9" width="1" height="1" fill="#e9e9e9"/><rect x="10" y="9" width="1" height="1" fill="#c52d29"/><rect x="11" y="9" width="1" height="1" fill="#d46f6c"/><rect x="12" y="9" width="1" height="1" fill="#ecd4d3"/><rect x="13" y="9" width="1" height="1" fill="#dfa097"/><rect x="14" y="9" width="1" height="1" fill="#c73e2a"/><rect x="15" y="9" width="1" height="1" fill="#d9887c"/><rect x="0" y="10" width="1" height="1" fill="#e7c1bb"/><rect x="1" y="10" width="1" height="1" fill="#c53520"/><rect x="2" y="10" width="1" height="1" fill="#c63823"/><rect x="3" y="10" width="1" height="1" fill="#edd8d5"/><rect x="4" y="10" width="1" height="1" fill="#d3d3d3"/><rect x="6" y="10" width="1" height="1" fill="#c6bfbe"/><rect x="7" y="10" width="1" height="1" fill="#c4312e"/><rect x="8" y="10" width="1" height="2" fill="#c42a26"/><rect x="9" y="10" width="1" height="1" fill="#c52d29"/><rect x="10" y="10" width="1" height="1" fill="#e5b7b6"/><rect x="11" y="10" width="1" height="1" fill="#e1a09f"/><rect x="12" y="10" width="1" height="1" fill="#d3615f"/><rect x="13" y="10" width="1" height="1" fill="#dc8c8b"/><rect x="14" y="10" width="1" height="1" fill="#eacfcb"/><rect x="15" y="10" width="1" height="1" fill="#e9c9c5"/><rect x="0" y="11" width="1" height="1" fill="#f2f0f0"/><rect x="1" y="11" width="1" height="1" fill="#cb503e"/><rect x="2" y="11" width="1" height="1" fill="#c53520"/><rect x="3" y="11" width="1" height="1" fill="#d16758"/><rect x="4" y="11" width="1" height="1" fill="#f0eeee"/><rect x="5" y="11" width="1" height="1" fill="#d3d3d3"/><rect x="6" y="11" width="1" height="1" fill="#c58c8a"/><rect x="7" y="11" width="1" height="1" fill="#c42a26"/><rect x="9" y="11" width="1" height="1" fill="#d46f6c"/><rect x="10" y="11" width="1" height="1" fill="#e1a09f"/><rect x="11" y="11" width="3" height="3" fill="#c41f1c"/><rect x="14" y="11" width="1" height="1" fill="#d87877"/><rect x="1" y="12" width="1" height="1" fill="#e8c4be"/><rect x="2" y="12" width="1" height="1" fill="#c63823"/><rect x="3" y="12" width="1" height="1" fill="#c53520"/><rect x="4" y="12" width="1" height="1" fill="#d16758"/><rect x="5" y="12" width="1" height="1" fill="#edd8d5"/><rect x="6" y="12" width="1" height="1" fill="#e9cccb"/><rect x="7" y="12" width="2" height="1" fill="#dd9593"/><rect x="9" y="12" width="1" height="1" fill="#ecd4d3"/><rect x="10" y="12" width="1" height="1" fill="#d3615f"/><rect x="14" y="12" width="1" height="1" fill="#ca3a37"/><rect x="2" y="13" width="1" height="1" fill="#e0a69d"/><rect x="3" y="13" width="1" height="1" fill="#c63823"/><rect x="4" y="13" width="1" height="1" fill="#c53520"/><rect x="5" y="13" width="1" height="1" fill="#c63823"/><rect x="6" y="13" width="1" height="1" fill="#d26a5b"/><rect x="7" y="13" width="2" height="1" fill="#db9186"/><rect x="9" y="13" width="1" height="1" fill="#dfa097"/><rect x="10" y="13" width="1" height="1" fill="#dc8c8b"/><rect x="14" y="13" width="1" height="1" fill="#d25e5c"/><rect x="3" y="14" width="1" height="1" fill="#e8c4be"/><rect x="4" y="14" width="1" height="1" fill="#cb503e"/><rect x="5" y="14" width="4" height="1" fill="#c53520"/><rect x="9" y="14" width="1" height="1" fill="#c73e2a"/><rect x="10" y="14" width="1" height="1" fill="#eacfcb"/><rect x="11" y="14" width="1" height="1" fill="#d87877"/><rect x="12" y="14" width="1" height="1" fill="#ca3a37"/><rect x="13" y="14" width="1" height="1" fill="#d25e5c"/><rect x="14" y="14" width="1" height="1" fill="#efdfdf"/><rect x="4" y="15" width="1" height="1" fill="#f2f0f0"/><rect x="5" y="15" width="1" height="1" fill="#e7c1bb"/><rect x="6" y="15" width="1" height="1" fill="#d9887c"/><rect x="7" y="15" width="2" height="1" fill="#d37062"/><rect x="9" y="15" width="1" height="1" fill="#d9887c"/><rect x="10" y="15" width="1" height="1" fill="#e9c9c5"/></symbol></defs></svg>
+
+<div class="wrap">
+
+<div class="kicker">Tray icon encoding &middot; two-clocks</div>
+<h1>Verdict Ring</h1>
+<p class="lede">The gauge shows where you are. The <b>colour shows who wins the race</b> &mdash;
+depletion or reset &mdash; and nothing else. A percentage never sets a colour.</p>
+
+<h2>The worked example</h2>
+
+<div class="hero">
+  <div class="hp hd"><svg class="ic pd w0" width="132" height="132" viewBox="0 0 32 32"><use href="#c"/></svg></div>
+  <div class="hp hl"><svg class="ic pl w0" width="132" height="132" viewBox="0 0 32 32"><use href="#c"/></svg></div>
+  <div class="hx">
+    <div class="r"><span>weekly ring</span><b>44&nbsp;% used</b> &middot; resets Fri 07:00, in 3d&nbsp;6h</div>
+    <div class="r"><span></span>burn 0.0081&nbsp;%/min &rarr; dry in 4d&nbsp;18h &rarr; <b class="good">slack +1d&nbsp;12h</b></div>
+    <div class="r"><span></span>p_cut 0.03 &nbsp;&rarr;&nbsp; <b class="good">SAFE</b> (teal, no badge)</div>
+    <div class="r" style="height:10px"><span></span></div>
+    <div class="r"><span>session disc</span><b>56&nbsp;% used</b> &middot; resets in 2h&nbsp;48m</div>
+    <div class="r"><span></span>burn 0.410&nbsp;%/min &rarr; dry in 1h&nbsp;47m &rarr; <b class="bad">61&nbsp;min short</b></div>
+    <div class="r"><span></span>p_cut 0.94 &nbsp;&rarr;&nbsp; <b class="bad">DRY_EARLY k=0.51</b> (hole + orange&ndash;red)</div>
+  </div>
+</div>
+
+<p class="note"><b>44&nbsp;% and 56&nbsp;% are almost the same number, and the icon renders them in
+opposite colours.</b> That is the whole design. The ring is green not because 44 is a small number but
+because at that burn rate the week ends before the quota does; the disc is red not because 56 is a big
+number but because the session quota ends 61&nbsp;minutes before the window resets. A percentage-driven
+icon paints both of these the same shade of amber (see the control at the bottom).</p>
+
+<h2>Channel budget</h2>
+
+<div class="scroll"><table>
+<tr><th>Channel</th><th>Carries</th><th>Survives 16&nbsp;px?</th><th>Notes</th></tr>
+<tr><td><b>Outer ring sweep</b></td><td>weekly position (locked)</td><td>Yes &mdash; 100&nbsp;px band</td>
+    <td>Coarse; reads to roughly the nearest eighth.</td></tr>
+<tr><td><b>Ring hue</b></td><td><b>weekly verdict</b></td><td>Yes</td>
+    <td>~44 coloured pixels at 44&nbsp;% sweep. Hue on a large area is the cheapest bit in the icon.</td></tr>
+<tr><td><b>Inner disc pie</b></td><td>session position (locked)</td><td>Yes &mdash; 60&nbsp;px disc</td>
+    <td>Reads to roughly the nearest quarter.</td></tr>
+<tr><td><b>Disc hue</b></td><td><b>session verdict</b></td><td>Yes</td><td></td></tr>
+<tr><td><b>Centre hole</b></td><td><b>session DRY_EARLY</b> (redundant, non-colour)</td>
+    <td>Yes &mdash; hinted to a crisp 4&times;4&nbsp;px punch</td>
+    <td>Transparent, so it reads on any taskbar colour. Costs 16 of the disc&rsquo;s 60&nbsp;px.</td></tr>
+<tr><td><b>Corner badge</b></td><td><b>weekly DRY_EARLY</b> (redundant, non-colour)</td>
+    <td>Yes &mdash; 17 solid px, only 5 antialiased</td>
+    <td>Punched out with a transparent keyline. Costs 13&nbsp;% of the ring band.</td></tr>
+<tr><td><b>Badge glyph</b></td><td>hollow = measuring, solid = dry</td>
+    <td><span class="bad">No</span></td><td><b>&ge;24&nbsp;px only.</b> At 16&nbsp;px the badge is a blob. Presence is the whole message, and presence is enough.</td></tr>
+<tr><td><b>Intensity ramp k</b></td><td>size of the shortfall</td>
+    <td><span class="bad">Weakly</span></td>
+    <td>Orange vs red reads for normal vision; the five steps do not, and none of it survives colour blindness. <b>k carries no state</b> &mdash; the hole and the badge already did. It shades a verdict, it never sets one.</td></tr>
+</table></div>
+
+<p>Two structural cues, one per window, spatially separated so you can tell which clock is losing:
+a hole in the middle means <i>this session</i> runs dry early; a badge in the corner means <i>this week</i>
+does. Both are transparency, not colour, so they survive greyscale, every form of colour blindness, and
+any taskbar tint.</p>
+
+<h2>State machine</h2>
+
+<div class="scroll"><table>
+<tr><th></th><th>State</th><th>Entry gate</th><th>Icon</th><th>Why</th></tr>
+<tr><td class="ico"><svg class="ic pd v0" width="30" height="30" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v0" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg></td><td><b>MEASURING</b></td><td>forecaster refuses, or a discontinuity freeze is active</td><td>achromatic slate at an extreme lightness; hollow badge at &ge;24&nbsp;px</td><td>Chroma <i>is</i> the verdict channel. No chroma, no claim. Pushed to near-white on dark taskbars, near-black on light, so it cannot converge with SAFE under colour blindness either.</td></tr><tr><td class="ico"><svg class="ic pd v1" width="30" height="30" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v1" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg></td><td><b>SAFE</b></td><td>p_cut &le; 0.20 <b>and</b> slack_med &ge; S_hi</td><td>teal fill; no hole, no badge</td><td>Reassurance requires the <i>pessimistic</i> edge of the band to clear the reset.</td></tr><tr><td class="ico"><svg class="ic pd v2" width="30" height="30" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg></td><td><b>TIGHT</b></td><td>everything the other four gates decline to claim</td><td>amber fill; no structural cue at 16&nbsp;px</td><td>&ldquo;Too close to call.&rdquo; The band straddles the reset, or the margin is thin.</td></tr><tr><td class="ico"><svg class="ic pd v4" width="30" height="30" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg></td><td><b>DRY_EARLY</b></td><td>p_cut &ge; 0.80 <b>and</b> shortfall_med &ge; S_lo</td><td><b>centre hole</b> (session) <b>+ corner badge</b> (weekly), plus an orange&rarr;red ramp</td><td>The two punches carry the state; k = clamp01((shortfall &minus; S_lo)/(S_crit &minus; S_lo)) only shades it.</td></tr><tr><td class="ico"><svg class="ic pd v7" width="30" height="30" viewBox="0 0 32 32"><use href="#i"/></svg><svg class="ic pd v7" width="16" height="16" viewBox="0 0 32 32"><use href="#j"/></svg></td><td><b>SPENT</b></td><td>P &ge; 99&nbsp;% or REM &lt; 2q</td><td>full 360&deg; red + hole + badge</td><td>The race is over. Exempt from every dwell and rate limit &mdash; shown on the first poll.</td></tr>
+</table></div>
+
+<p>The gate is deliberately <b>two-dimensional</b>: a verdict needs both a confident probability
+<i>and</i> a shortfall big enough to matter. <code>p_cut&nbsp;=&nbsp;0.9</code> with a three-minute
+shortfall is <b>TIGHT</b>, not red &mdash; being three minutes short is not being dead in the water.
+Symmetrically, a comfortable probability with a five-minute margin is also TIGHT, not green.
+Everything the four confident gates decline to claim falls into TIGHT, which is therefore the honest
+default rather than a middle band.</p>
+
+<p>Every forecaster in the shortlist can feed this: <code>p_cut</code> is a probability the model
+already computes (EWMA-rate states it directly; the band models get it from where zero sits inside
+their slack interval), and <code>shortfall_med</code> is the median of that same interval. The state
+machine never sees a burn rate.</p>
+
+<h3>Thresholds &mdash; scaled to the window, floored in absolute minutes</h3>
+
+<div class="scroll"><table>
+<tr><th>Symbol</th><th>Definition</th><th>Session (W&nbsp;=&nbsp;300&nbsp;min)</th><th>Weekly (W&nbsp;=&nbsp;10&nbsp;080&nbsp;min)</th><th>Meaning</th></tr>
+<tr><td class="m">S_hi</td><td class="m">max(0.08&middot;W, 15)</td><td><b>24 min</b></td><td><b>806 min</b> (13h&nbsp;26m)</td><td>slack needed to say SAFE</td></tr>
+<tr><td class="m">S_lo</td><td class="m">max(0.05&middot;W, 10)</td><td><b>15 min</b></td><td><b>504 min</b> (8h&nbsp;24m)</td><td>shortfall needed to say DRY_EARLY</td></tr>
+<tr><td class="m">S_crit</td><td class="m">max(0.35&middot;W, 60)</td><td><b>105 min</b></td><td><b>3 528 min</b> (2d&nbsp;10h)</td><td>shortfall at full intensity, k&nbsp;=&nbsp;1</td></tr>
+</table></div>
+
+<p>Scaling matters: 60&nbsp;minutes of shortfall inside a five-hour window is a ruined afternoon;
+60&nbsp;minutes inside a seven-day window is a rounding error. The absolute floors stop the session
+thresholds collapsing to noise. Worked example:
+<code>k = (60.6 &minus; 15)/(105 &minus; 15) = 0.51</code> &rarr; render step 0.50.</p>
+
+<h2>Hysteresis</h2>
+
+<p>Four independent mechanisms, because a tray icon that changes colour twice a minute is worse than
+no icon. All of them are asymmetric in the same direction: <b>escalate quickly, de-escalate slowly.</b>
+Warning late costs the user an interrupted refactor; warning too long costs a glance.</p>
+
+<div class="scroll"><table>
+<tr><th>Mechanism</th><th>Session</th><th>Weekly</th><th>Effect</th></tr>
+<tr><td><b>1. Dwell (N consecutive polls)</b><br><span style="color:var(--faint)">severity order SAFE &lt; TIGHT &lt; DRY &lt; SPENT</span></td>
+    <td>escalate 2 polls (60&nbsp;s)<br>de-escalate 6 polls (3&nbsp;min)</td>
+    <td>escalate 4 polls (2&nbsp;min)<br>de-escalate 20 polls (10&nbsp;min)</td>
+    <td>A single burst poll cannot repaint the tray; a single quiet poll cannot cancel a warning.</td></tr>
+<tr><td><b>2. Schmitt margins</b></td>
+    <td colspan="2">leave SAFE when <span class="m">p_cut &ge; 0.30</span> <b>or</b> <span class="m">slack &le; 0.75&middot;S_hi</span> (18&nbsp;min)<br>
+        leave DRY when <span class="m">p_cut &le; 0.70</span> <b>and</b> <span class="m">shortfall &le; 0.60&middot;S_lo</span> (9&nbsp;min)</td>
+    <td>Entry and exit are different values, so a metric sitting exactly on a boundary cannot chatter. Note the <b>or</b> / <b>and</b>: leaving SAFE is easy, leaving DRY is hard.</td></tr>
+<tr><td><b>3. Intensity slew + deadband</b></td>
+    <td>k in 5 steps; &le;1 step per poll; &plusmn;0.06 deadband on each step boundary</td>
+    <td>&le;1 step per 4 polls</td>
+    <td>The ramp creeps instead of strobing. Also caps the icon cache at ~40 bitmaps rather than a continuum &mdash; a real constraint when every change is an HICON upload.</td></tr>
+<tr><td><b>4. Hard rate limit</b></td><td>1 change / 90&nbsp;s</td><td>1 change / 5&nbsp;min</td>
+    <td>Backstop. <b>SPENT is exempt</b> &mdash; hitting the wall is shown on the poll it happens.</td></tr>
+</table></div>
+
+<h3>Discontinuities</h3>
+<ul>
+<li><b>Window rollover</b> &rarr; <b>MEASURING</b> immediately, verdict history cleared. The old verdict
+described a window that no longer exists; carrying it forward for three minutes of &ldquo;de-escalation
+dwell&rdquo; would be a lie with a countdown on it.</li>
+<li><b>Clock jump, sleep/resume, suspected ceiling change</b> (the +50&nbsp;% boost expiring on
+13&nbsp;September is exactly this) &rarr; hold the current verdict for at most 2 polls, then MEASURING
+until the forecaster clears its own re-seed period.</li>
+<li><b>Never classify on a discontinuity poll.</b> A rollover looks like a huge negative delta and a
+resume looks like a huge positive one; both must be dropped, not fed to the gate.</li>
+</ul>
+
+<h3>Notification, separately from the icon</h3>
+<p>A toast fires only on the confirmed <span class="m">SAFE|TIGHT &rarr; DRY_EARLY</span> transition,
+at most once per window, re-arming only after a rollover or after 10 minutes back in SAFE. The icon is
+ambient; the toast is an interruption and must be rarer than the icon it accompanies.</p>
+
+<h2>Size ladder</h2>
+<p class="lbl">Worked example &mdash; 16 / 20 / 24 / 32 / 48&nbsp;px, actual size</p>
+<div class="two"><div class="tb tb-d"><span class="lz"><b>16</b><svg class="ic pd w0" width="16" height="16" viewBox="0 0 32 32"><use href="#d"/></svg></span><span class="lz"><b>20</b><svg class="ic pd w0" width="20" height="20" viewBox="0 0 32 32"><use href="#d"/></svg></span><span class="lz"><b>24</b><svg class="ic pd w0" width="24" height="24" viewBox="0 0 32 32"><use href="#c"/></svg></span><span class="lz"><b>32</b><svg class="ic pd w0" width="32" height="32" viewBox="0 0 32 32"><use href="#c"/></svg></span><span class="lz"><b>48</b><svg class="ic pd w0" width="48" height="48" viewBox="0 0 32 32"><use href="#c"/></svg></span></div><div class="tb tb-l"><span class="lz"><b>16</b><svg class="ic pl w0" width="16" height="16" viewBox="0 0 32 32"><use href="#d"/></svg></span><span class="lz"><b>20</b><svg class="ic pl w0" width="20" height="20" viewBox="0 0 32 32"><use href="#d"/></svg></span><span class="lz"><b>24</b><svg class="ic pl w0" width="24" height="24" viewBox="0 0 32 32"><use href="#c"/></svg></span><span class="lz"><b>32</b><svg class="ic pl w0" width="32" height="32" viewBox="0 0 32 32"><use href="#c"/></svg></span><span class="lz"><b>48</b><svg class="ic pl w0" width="48" height="48" viewBox="0 0 32 32"><use href="#c"/></svg></span></div></div>
+<p class="lbl" style="margin-top:18px">Both windows DRY &mdash; hole and badge together</p>
+<div class="two"><div class="tb tb-d"><span class="lz"><b>16</b><svg class="ic pd w1" width="16" height="16" viewBox="0 0 32 32"><use href="#h"/></svg></span><span class="lz"><b>20</b><svg class="ic pd w1" width="20" height="20" viewBox="0 0 32 32"><use href="#h"/></svg></span><span class="lz"><b>24</b><svg class="ic pd w1" width="24" height="24" viewBox="0 0 32 32"><use href="#g"/></svg></span><span class="lz"><b>32</b><svg class="ic pd w1" width="32" height="32" viewBox="0 0 32 32"><use href="#g"/></svg></span><span class="lz"><b>48</b><svg class="ic pd w1" width="48" height="48" viewBox="0 0 32 32"><use href="#g"/></svg></span></div><div class="tb tb-l"><span class="lz"><b>16</b><svg class="ic pl w1" width="16" height="16" viewBox="0 0 32 32"><use href="#h"/></svg></span><span class="lz"><b>20</b><svg class="ic pl w1" width="20" height="20" viewBox="0 0 32 32"><use href="#h"/></svg></span><span class="lz"><b>24</b><svg class="ic pl w1" width="24" height="24" viewBox="0 0 32 32"><use href="#g"/></svg></span><span class="lz"><b>32</b><svg class="ic pl w1" width="32" height="32" viewBox="0 0 32 32"><use href="#g"/></svg></span><span class="lz"><b>48</b><svg class="ic pl w1" width="48" height="48" viewBox="0 0 32 32"><use href="#g"/></svg></span></div></div>
+<p>16 and 20&nbsp;px ship a hand-hinted square hole; 24&nbsp;px and up use the circle from the vector
+master. This is ordinary icon hinting, and it is the difference between a crisp punch and a grey smudge.</p>
+
+<h2>What actually happens at 16&nbsp;px</h2>
+<p>Not a mock-up. These are the real rasters, 8&times;8 supersampled from the shipping geometry and
+composited onto the two Windows taskbar colours, shown at 13&times; next to true size.</p>
+<div class="grids"><figure class="gpair"><svg width="208" height="208" viewBox="0 0 16 16"><use href="#g-A_dark"/></svg><svg width="16" height="16" viewBox="0 0 16 16"><use href="#g-A_dark"/></svg><figcaption>worked example on a dark taskbar &mdash; weekly SAFE, session DRY. True 16&nbsp;px raster, magnified 13&times;, true size below.</figcaption></figure><figure class="gpair"><svg width="208" height="208" viewBox="0 0 16 16"><use href="#g-B_light"/></svg><svg width="16" height="16" viewBox="0 0 16 16"><use href="#g-B_light"/></svg><figcaption>both windows DRY on a light taskbar &mdash; centre hole <i>and</i> corner badge, and the badge&rsquo;s transparent keyline notching the ring.</figcaption></figure></div>
+<p style="margin-top:22px">The hole is a circle in the vector master and a hand-hinted 4&times;4
+square at 16 and 20&nbsp;px. Rasterising the circle instead gives the same 16 pixels smeared across a
+soft plus-shape at roughly half alpha &mdash; a smudge rather than a punch. Ordinary icon hinting, and
+it is what makes the redundant cue actually redundant.</p>
+
+<div class="scroll"><table style="margin-top:26px">
+<tr><th>Measurement</th><th>Value</th><th>Reading</th></tr>
+<tr><td>Ring band</td><td><b>100 px</b></td><td>Enough for hue plus a coarse sweep. The locked structure is affordable.</td></tr>
+<tr><td>Transparent gap</td><td><b>28 px</b></td><td>The 1&nbsp;px gap survives &mdash; the two gauges stay visually separate.</td></tr>
+<tr><td>Inner disc</td><td><b>60 px</b></td><td>Small. A pie angle here reads to about a quarter turn, no better.</td></tr>
+<tr><td>Fully opaque pixels</td><td><b>88 of 256</b></td><td rowspan="2">More than half of everything drawn is an antialiased edge pixel. This is the real pixel budget, and it is why no glyph fits inside the disc.</td></tr>
+<tr><td>Antialiased edge pixels</td><td><b>104 of 256</b></td></tr>
+<tr><td>Centre hole</td><td><b>16 px, 0 antialiased</b></td><td>Hinted to the pixel grid. Perfectly crisp at every DPI.</td></tr>
+<tr><td>Corner badge</td><td><b>17 solid + 5 AA px</b></td><td>Unmistakably present or absent. Shape is not readable.</td></tr>
+<tr><td>Badge cost</td><td><b>13&nbsp;% of the ring band</b></td><td>Accepted: the badge only appears when the exact weekly percentage has stopped being the interesting question.</td></tr>
+</table></div>
+
+<h2>All states</h2>
+<div class="strip tb tb-d"><figure><svg class="ic pd v0" width="32" height="32" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v0" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>MEASURING</figcaption></figure><figure><svg class="ic pd v1" width="32" height="32" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v1" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>SAFE</figcaption></figure><figure><svg class="ic pd v2" width="32" height="32" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>TIGHT</figcaption></figure><figure><svg class="ic pd v3" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v3" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.25</figcaption></figure><figure><svg class="ic pd v4" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.50</figcaption></figure><figure><svg class="ic pd v5" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v5" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.75</figcaption></figure><figure><svg class="ic pd v6" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v6" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=1.0</figcaption></figure><figure><svg class="ic pd v7" width="32" height="32" viewBox="0 0 32 32"><use href="#i"/></svg><svg class="ic pd v7" width="16" height="16" viewBox="0 0 32 32"><use href="#j"/></svg><figcaption>SPENT</figcaption></figure></div>
+<div class="strip tb tb-l" style="margin-top:12px"><figure><svg class="ic pl v0" width="32" height="32" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pl v0" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>MEASURING</figcaption></figure><figure><svg class="ic pl v1" width="32" height="32" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pl v1" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>SAFE</figcaption></figure><figure><svg class="ic pl v2" width="32" height="32" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pl v2" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>TIGHT</figcaption></figure><figure><svg class="ic pl v3" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pl v3" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.25</figcaption></figure><figure><svg class="ic pl v4" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pl v4" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.50</figcaption></figure><figure><svg class="ic pl v5" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pl v5" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=.75</figcaption></figure><figure><svg class="ic pl v6" width="32" height="32" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pl v6" width="16" height="16" viewBox="0 0 32 32"><use href="#f"/></svg><figcaption>DRY k=1.0</figcaption></figure><figure><svg class="ic pl v7" width="32" height="32" viewBox="0 0 32 32"><use href="#i"/></svg><svg class="ic pl v7" width="16" height="16" viewBox="0 0 32 32"><use href="#j"/></svg><figcaption>SPENT</figcaption></figure></div>
+<p>Two palettes, not one compromise colour. The app swaps icon sets on the Windows
+<span class="m">SystemUsesLightTheme</span> change broadcast, so each palette only has to work against a
+single background. The light set is the same three hues at roughly 15&nbsp;% lower lightness.</p>
+
+<h3>The two clocks are independent</h3>
+<div class="strip tb tb-d"><figure><svg class="ic pd v1" width="40" height="40" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v1" width="16" height="16" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>weekly SAFE<br>session SAFE</figcaption></figure><figure><svg class="ic pd w0" width="40" height="40" viewBox="0 0 32 32"><use href="#c"/></svg><svg class="ic pd w0" width="16" height="16" viewBox="0 0 32 32"><use href="#d"/></svg><figcaption>weekly SAFE<br>session DRY</figcaption></figure><figure><svg class="ic pd w1" width="40" height="40" viewBox="0 0 32 32"><use href="#g"/></svg><svg class="ic pd w1" width="16" height="16" viewBox="0 0 32 32"><use href="#h"/></svg><figcaption>weekly DRY<br>session DRY</figcaption></figure><figure><svg class="ic pd w2" width="40" height="40" viewBox="0 0 32 32"><use href="#c"/></svg><svg class="ic pd w2" width="16" height="16" viewBox="0 0 32 32"><use href="#d"/></svg><figcaption>weekly MEASURING<br>session DRY</figcaption></figure></div>
+<p>Ring and disc carry separate verdicts, so &ldquo;the session is fine but the week is what
+bites&rdquo; &mdash; the common case for a Max user &mdash; is a state the icon can actually express.
+It is also why the redundant cues are split by position rather than merged into one alert.</p>
+
+<h2>Colour vision</h2>
+<div style="padding:14px 0"><div class="cvdrow"><span>normal</span><div class="tb tb-d"><svg class="ic pd v0" width="28" height="28" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v1" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v3" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v5" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v6" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v7" width="28" height="28" viewBox="0 0 32 32"><use href="#i"/></svg></div></div><div class="cvdrow"><span>deuteranopia</span><div class="tb tb-d" style="filter:url(#deut)"><svg class="ic pd v0" width="28" height="28" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v1" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v3" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v5" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v6" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v7" width="28" height="28" viewBox="0 0 32 32"><use href="#i"/></svg></div></div><div class="cvdrow"><span>protanopia</span><div class="tb tb-d" style="filter:url(#prot)"><svg class="ic pd v0" width="28" height="28" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v1" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v3" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v5" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v6" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v7" width="28" height="28" viewBox="0 0 32 32"><use href="#i"/></svg></div></div><div class="cvdrow"><span>tritanopia</span><div class="tb tb-d" style="filter:url(#trit)"><svg class="ic pd v0" width="28" height="28" viewBox="0 0 32 32"><use href="#b"/></svg><svg class="ic pd v1" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v2" width="28" height="28" viewBox="0 0 32 32"><use href="#a"/></svg><svg class="ic pd v3" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v4" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v5" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v6" width="28" height="28" viewBox="0 0 32 32"><use href="#e"/></svg><svg class="ic pd v7" width="28" height="28" viewBox="0 0 32 32"><use href="#i"/></svg></div></div></div>
+<p>Simulated with V&iacute;&eacute;not linear-RGB matrices applied to the real artwork, not to swatches.
+<b>The simulation changed the design.</b> An earlier version leaned on an amber&rarr;red lightness ramp
+to separate TIGHT from DRY_EARLY; under deuteranopia the whole warm family collapses into one yellow and
+that separation simply is not there. So the ramp was demoted to decoration and the structural cues were
+promoted to carry the state.</p>
+
+<p>What colour actually delivers is a <b>three-way split</b>, and that part survives every simulation:</p>
+<ul>
+<li><b>achromatic &rarr; MEASURING.</b> Chroma versus no-chroma is the one distinction no form of colour
+blindness removes, and the slate is pushed to an extreme lightness so it also separates from SAFE by
+brightness.</li>
+<li><b>cool &rarr; SAFE.</b> Teal, not green: the blue component survives deuteranopia and protanopia as
+a distinct lavender-blue, where a true green would land in the same yellow as the warm states.</li>
+<li><b>warm &rarr; TIGHT, DRY_EARLY, SPENT.</b></li>
+</ul>
+
+<p><b>Inside the warm family colour delivers nothing, and the design no longer asks it to.</b>
+TIGHT and DRY_EARLY are separated entirely by transparency &mdash; the <b>centre hole</b> for the
+session, the <b>corner badge</b> for the week &mdash; both punched through to the taskbar and therefore
+invariant under every colour transform, including full greyscale. That is precisely why the badge fires
+on the whole of DRY_EARLY rather than on the top of the ramp: making it an intensity marker would have
+left <span class="m">k&nbsp;=&nbsp;0.25</span> indistinguishable from TIGHT for a deuteranope, which is
+the one confusion this icon cannot afford.</p>
+
+<p class="note"><b>The gap that remains:</b> SPENT versus DRY&nbsp;k=1.0. Both warm, both carrying hole
+and badge, differing only by a full 360&deg; sweep and a slightly different red &mdash; so under
+deuteranopia at 16&nbsp;px they are the same icon. That is acceptable: they are adjacent states meaning
+&ldquo;about to be cut off&rdquo; and &ldquo;cut off&rdquo;, and the full sweep is genuinely readable at
+24&nbsp;px and up. The k=0.25 to k=1.0 ramp is likewise flat for a deuteranope, and that is deliberate
+rather than regrettable, because no decision hangs on it.</p>
+
+<h2>Control: what percentage-driven colour looks like</h2>
+<div class="strip tb tb-d" style="gap:36px;padding:26px 30px;align-items:flex-start"><figure><svg class="ic pd w3" width="92" height="92" viewBox="0 0 32 32"><use href="#a"/></svg><figcaption>coloured by percentage</figcaption></figure><figure><svg class="ic pd w0" width="92" height="92" viewBox="0 0 32 32"><use href="#c"/></svg><figcaption>coloured by verdict</figcaption></figure></div>
+<p style="margin-top:14px">Same data, same geometry, colour taken from the raw percentage on a
+green&ndash;amber&ndash;red ramp. 44&nbsp;% and 56&nbsp;% land two shades apart: both amber, both
+mildly worrying, neither actionable. Nothing in the left icon tells you that one of those two windows
+will cut you off in 107 minutes and the other will not. The right icon spends exactly the same pixels
+and answers the question.</p>
+
+<h2>Where this breaks</h2>
+<ul>
+<li><b>The intensity ramp is decoration.</b> Five values of k render as roughly three distinguishable
+colours in a 60-pixel disc for normal vision, and as one colour under deuteranopia. It survives only
+because it is free; every decision the user makes is carried by the four states and the two punches. If
+it had to justify its pixels it would be cut.</li>
+<li><b>A 17-pixel dot is now load-bearing.</b> On the weekly ring, TIGHT and DRY_EARLY differ only by
+the badge for anyone who cannot use the warm ramp. Lose the badge &mdash; an aggressive scaling mode, a
+taskbar that clips the icon &mdash; and that whole distinction goes with it.</li>
+<li><b>The badge eats 13&nbsp;% of the weekly ring.</b> There is no free space in a circle inscribed in
+a square. If weekly sweep is near 40&nbsp;% the badge sits right on the arc head, which is the worst
+place for it.</li>
+<li><b>MEASURING is the most dangerous state and it has the least redundancy.</b> It is carried by
+chroma and lightness only; the hollow badge that would make it structural is unreadable below
+24&nbsp;px. A refusal that reads as a verdict is the worst failure available to this icon, so the
+mitigation lives outside it: the tooltip leads with the word <i>measuring</i> and the reason, and the
+state never renders in a verdict hue, not even for one frame during a transition.</li>
+<li><b>Two independent verdicts is one more than most users will parse.</b> Ring-red / disc-green
+requires the user to have learned which ring is which. The panel must teach it; the icon cannot.</li>
+<li><b>Everything downstream of <code>p_cut</code> inherits its calibration.</b> The state machine is
+only as honest as the probability it is handed, and by the forecasters&rsquo; own admission that
+probability is an unvalidated prior until real session logs exist. The 0.20&nbsp;/&nbsp;0.80 gates
+should be treated as ordinal cut-points, not as calibrated risk.</li>
+<li><b>Under 20&nbsp;px on a 100&nbsp;% DPI display the whole thing is 256 pixels.</b> Nothing more can
+be added. Any further signal has to live in the flyout, the tooltip, or a toast.</li>
+</ul>
+
+</div>
+</body></html>

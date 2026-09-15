@@ -1,0 +1,310 @@
+<title>Pace Wedge</title>
+<style>
+  body{margin:0;background:#14171c;color:#e6e9ef;
+       font:13px/1.55 "Segoe UI",-apple-system,system-ui,sans-serif;}
+  .wrap{max-width:1020px;margin:0 auto;padding:28px 22px 60px;}
+  h1{font-size:22px;letter-spacing:-.01em;margin:0 0 4px;}
+  h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:#98a1b2;
+     margin:34px 0 12px;padding-bottom:6px;border-bottom:1px solid #262b34;}
+  p{margin:0 0 10px;max-width:74ch;}
+  .lede{color:#c3cad8;max-width:78ch;}
+  code{font:12px/1.4 Consolas,"Cascadia Mono",monospace;background:#1c212a;
+       padding:1px 5px;border-radius:3px;color:#cfe0ff;}
+  .row{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;}
+  .card{background:#191d25;border:1px solid #262b34;border-radius:9px;padding:14px;}
+  .cap{font-size:11px;color:#98a1b2;margin-top:8px;letter-spacing:.02em;max-width:46ch;}
+  .cap b{color:#e6e9ef;font-weight:600;}
+  .bar{display:inline-flex;align-items:center;gap:10px;padding:7px 11px;border-radius:6px;}
+  .bar.dark{background:#202020;} .bar.light{background:#f3f3f3;}
+  .bar .lab{font-size:10px;letter-spacing:.06em;text-transform:uppercase;}
+  .bar.dark .lab{color:#8b8b8b;} .bar.light .lab{color:#6a6a6a;}
+  .zoomstack{display:flex;gap:14px;flex-wrap:wrap;}
+  .zc{text-align:center;}
+  .zc .t{font-size:10px;color:#98a1b2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px;}
+  .zbox{border-radius:6px;padding:6px;display:inline-block;}
+  .zbox.d{background:#202020;} .zbox.l{background:#f3f3f3;}
+  table{border-collapse:collapse;font-size:12px;margin:6px 0 0;}
+  th,td{text-align:left;padding:5px 14px 5px 0;border-bottom:1px solid #262b34;vertical-align:top;}
+  th{color:#98a1b2;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin-right:6px;
+      outline:1px solid rgba(255,255,255,.16);}
+  .grid4{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;}
+  .verdict{font-size:11px;font-weight:700;letter-spacing:.03em;}
+  .v-hot{color:#F9A25A;} .v-ok{color:#7FB4FF;} .v-mut{color:#98a1b2;}
+  .warn{border-left:2px solid #F97316;padding-left:12px;color:#d8c4b2;font-size:12.5px;max-width:76ch;}
+  .good{border-left:2px solid #2F6FE0;padding-left:12px;color:#bfd0ee;font-size:12.5px;max-width:76ch;}
+  .eq{font:13px/1.7 Consolas,monospace;color:#cfe0ff;background:#1c212a;padding:10px 14px;
+      border-radius:6px;display:inline-block;}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+
+<!-- ===== 32 px ===== -->
+<symbol id="ring32-dry" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="13.25" fill="none" stroke="#8A93A6" stroke-opacity=".34" stroke-width="3.5"/>
+  <path d="M16 2.75 A13.25 13.25 0 1 1 8.212 26.719" fill="none" stroke="#2F6FE0" stroke-width="3.5"/>
+  <path d="M8.212 26.719 A13.25 13.25 0 0 1 4.011 21.642" fill="none" stroke="#F97316" stroke-width="3.5"/>
+  <line x1="9.240" y1="25.304" x2="7.183" y2="28.135" stroke="#0E1116" stroke-opacity=".88" stroke-width="1"/>
+</symbol>
+<symbol id="ring32-bank" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="13.25" fill="none" stroke="#8A93A6" stroke-opacity=".34" stroke-width="3.5"/>
+  <path d="M23.788 26.719 A13.25 13.25 0 0 1 11.905 28.601" fill="none" stroke="#2F6FE0" stroke-opacity=".30" stroke-width="3.5"/>
+  <path d="M16 2.75 A13.25 13.25 0 0 1 23.788 26.719" fill="none" stroke="#2F6FE0" stroke-width="3.5"/>
+  <line x1="12.446" y1="26.937" x2="11.365" y2="30.266" stroke="#0E1116" stroke-opacity=".88" stroke-width="1"/>
+</symbol>
+<symbol id="disc32-dry" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="9.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M16 16 L16 6.4 A9.6 9.6 0 0 1 19.534 24.926 Z" fill="#2F6FE0"/>
+  <path d="M16 16 L19.534 24.926 A9.6 9.6 0 0 1 12.466 24.926 Z" fill="#F97316"/>
+  <line x1="17.325" y1="19.347" x2="19.534" y2="24.926" stroke="#0E1116" stroke-opacity=".88" stroke-width="1"/>
+</symbol>
+<symbol id="disc32-safe" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="9.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M16 16 L22.572 22.998 A9.6 9.6 0 0 1 13.033 25.130 Z" fill="#2F6FE0" fill-opacity=".30"/>
+  <path d="M16 16 L16 6.4 A9.6 9.6 0 0 1 22.572 22.998 Z" fill="#2F6FE0"/>
+  <line x1="14.888" y1="19.424" x2="13.033" y2="25.130" stroke="#0E1116" stroke-opacity=".88" stroke-width="1"/>
+</symbol>
+<symbol id="disc32-tight" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="9.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M16 16 L16 6.4 A9.6 9.6 0 0 1 16 25.6 Z" fill="#2F6FE0"/>
+  <line x1="16.226" y1="19.593" x2="16.603" y2="25.581" stroke="#0E1116" stroke-opacity=".88" stroke-width="1"/>
+</symbol>
+<symbol id="disc32-unk" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="9.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M16 16 L16 6.4 A9.6 9.6 0 0 1 17.203 6.476 Z" fill="#2F6FE0"/>
+  <line x1="16.675" y1="12.464" x2="17.799" y2="6.570" stroke="#0E1116" stroke-opacity=".62"
+        stroke-width="1" stroke-dasharray="1.3 1.3"/>
+</symbol>
+<symbol id="ico32-hero"  viewBox="0 0 32 32"><use href="#ring32-dry"/><use href="#disc32-dry"/></symbol>
+<symbol id="ico32-dry"   viewBox="0 0 32 32"><use href="#ring32-bank"/><use href="#disc32-dry"/></symbol>
+<symbol id="ico32-safe"  viewBox="0 0 32 32"><use href="#ring32-bank"/><use href="#disc32-safe"/></symbol>
+<symbol id="ico32-tight" viewBox="0 0 32 32"><use href="#ring32-bank"/><use href="#disc32-tight"/></symbol>
+<symbol id="ico32-unk"   viewBox="0 0 32 32"><use href="#ring32-bank"/><use href="#disc32-unk"/></symbol>
+
+<!-- ===== 16 px : no hairline, no banked ghost ===== -->
+<symbol id="ring16-dry" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="6.5" fill="none" stroke="#8A93A6" stroke-opacity=".34" stroke-width="2"/>
+  <path d="M8 1.5 A6.5 6.5 0 1 1 4.179 13.259" fill="none" stroke="#2F6FE0" stroke-width="2"/>
+  <path d="M4.179 13.259 A6.5 6.5 0 0 1 2.119 10.768" fill="none" stroke="#F97316" stroke-width="2"/>
+</symbol>
+<symbol id="ring16-bank" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="6.5" fill="none" stroke="#8A93A6" stroke-opacity=".34" stroke-width="2"/>
+  <path d="M8 1.5 A6.5 6.5 0 0 1 11.821 13.259" fill="none" stroke="#2F6FE0" stroke-width="2"/>
+</symbol>
+<symbol id="disc16-dry" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="4.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M8 8 L8 3.4 A4.6 4.6 0 0 1 9.693 12.277 Z" fill="#2F6FE0"/>
+  <path d="M8 8 L9.693 12.277 A4.6 4.6 0 0 1 6.307 12.277 Z" fill="#F97316"/>
+</symbol>
+<symbol id="disc16-safe" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="4.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M8 8 L8 3.4 A4.6 4.6 0 0 1 11.149 11.353 Z" fill="#2F6FE0"/>
+</symbol>
+<symbol id="disc16-tight" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="4.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M8 8 L8 3.4 A4.6 4.6 0 0 1 8 12.6 Z" fill="#2F6FE0"/>
+</symbol>
+<symbol id="disc16-unk" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="4.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M8 8 L8 3.4 A4.6 4.6 0 0 1 8.577 3.436 Z" fill="#2F6FE0"/>
+</symbol>
+<symbol id="disc16-clamp" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="4.6" fill="#8A93A6" fill-opacity=".34"/>
+  <path d="M8 8 L8 3.4 A4.6 4.6 0 0 1 8.862 12.518 Z" fill="#2F6FE0"/>
+  <path d="M8 8 L8.862 12.518 A4.6 4.6 0 0 1 7.424 12.564 Z" fill="#F97316" fill-opacity=".65"/>
+</symbol>
+<symbol id="ico16-hero"  viewBox="0 0 16 16"><use href="#ring16-dry"/><use href="#disc16-dry"/></symbol>
+<symbol id="ico16-dry"   viewBox="0 0 16 16"><use href="#ring16-bank"/><use href="#disc16-dry"/></symbol>
+<symbol id="ico16-safe"  viewBox="0 0 16 16"><use href="#ring16-bank"/><use href="#disc16-safe"/></symbol>
+<symbol id="ico16-tight" viewBox="0 0 16 16"><use href="#ring16-bank"/><use href="#disc16-tight"/></symbol>
+<symbol id="ico16-unk"   viewBox="0 0 16 16"><use href="#ring16-bank"/><use href="#disc16-unk"/></symbol>
+<symbol id="ico16-clamp" viewBox="0 0 16 16"><use href="#ring16-bank"/><use href="#disc16-clamp"/></symbol>
+
+<symbol id="grid16" viewBox="0 0 16 16">
+  <g stroke="#ffffff" stroke-opacity=".13" stroke-width=".05">
+    <path d="M1 0V16M2 0V16M3 0V16M4 0V16M5 0V16M6 0V16M7 0V16M8 0V16M9 0V16M10 0V16M11 0V16M12 0V16M13 0V16M14 0V16M15 0V16"/>
+    <path d="M0 1H16M0 2H16M0 3H16M0 4H16M0 5H16M0 6H16M0 7H16M0 8H16M0 9H16M0 10H16M0 11H16M0 12H16M0 13H16M0 14H16M0 15H16"/>
+  </g>
+</symbol>
+<symbol id="grid32" viewBox="0 0 32 32">
+  <g stroke="#ffffff" stroke-opacity=".10" stroke-width=".07">
+    <path d="M2 0V32M4 0V32M6 0V32M8 0V32M10 0V32M12 0V32M14 0V32M16 0V32M18 0V32M20 0V32M22 0V32M24 0V32M26 0V32M28 0V32M30 0V32"/>
+    <path d="M0 2H32M0 4H32M0 6H32M0 8H32M0 10H32M0 12H32M0 14H32M0 16H32M0 18H32M0 20H32M0 22H32M0 24H32M0 26H32M0 28H32M0 30H32"/>
+  </g>
+</symbol>
+</defs></svg>
+
+<div class="wrap">
+
+<h1>Pace Wedge</h1>
+<p class="lede">The pace marker is not a line drawn <em>on</em> the gauge &mdash; it is the boundary of a
+re&#8209;coloured sector <em>inside</em> the gauge. The wedge only repaints pixels the locked structure already
+spends, so the encoding costs <b>zero new pixels at 16&nbsp;px</b>. The two pixels the brief budgeted are spent
+instead on a hairline that appears only at 24&nbsp;px and above, where they are affordable.</p>
+
+<h2>Why this is exact, not a heuristic</h2>
+<p>With <code>p</code> = fraction used and <code>e</code> = fraction of the window elapsed
+(<code>e = 1 &minus; t_reset/W</code>, both free from a single snapshot):</p>
+<p class="eq">t_dep = W&middot;e(1&minus;p)/p &nbsp; &nbsp; t_reset = W(1&minus;e) &nbsp; &rarr; &nbsp;
+<b>dead time D = W&middot;(p&minus;e)/p</b> &nbsp; &rarr; &nbsp; D &gt; 0 &nbsp;&hArr;&nbsp; p &gt; e</p>
+<p><b>&ldquo;Fill leads tick&rdquo; is algebraically identical to &ldquo;you get cut off before reset&rdquo;</b> under the
+cumulative-pace estimator &mdash; no rate model, no history, no smoothing, correct on the first poll after a cold
+start. The wedge is the numerator and the whole filled sector is the denominator, so the picture is also
+<em>calibrated</em>: <code>D = W &times; wedge / fill</code>. In the worked example
+<code>300 &times; 12/56 = 64&nbsp;min</code>, matching the brief's hand calculation exactly.</p>
+
+<h2>Worked example &mdash; session 56% used, 44% elapsed, reset in 2h48m</h2>
+<div class="row">
+  <div class="card">
+    <div class="row" style="gap:14px;align-items:center">
+      <span class="bar dark"><svg width="32" height="32"><use href="#ico32-hero"/></svg>
+        <svg width="16" height="16"><use href="#ico16-hero"/></svg><span class="lab">1&times;</span></span>
+      <span class="bar light"><svg width="32" height="32"><use href="#ico32-hero"/></svg>
+        <svg width="16" height="16"><use href="#ico16-hero"/></svg><span class="lab">1&times;</span></span>
+    </div>
+    <div class="cap">Actual tray size on <code>#202020</code> and <code>#f3f3f3</code>.
+      <b>Both gauges carry a hot wedge here:</b> the ring says the week runs dry ~20&nbsp;h early, the disc says
+      this session runs dry ~64&nbsp;min early.</div>
+  </div>
+  <div class="zoomstack">
+    <div class="zc"><div class="t">32&nbsp;px &middot; 7&times;</div>
+      <span class="zbox d"><svg width="224" height="224" style="display:block"><use href="#ico32-hero"/><use href="#grid32"/></svg></span></div>
+    <div class="zc"><div class="t">16&nbsp;px &middot; 14&times;</div>
+      <span class="zbox d"><svg width="224" height="224" style="display:block"><use href="#ico16-hero"/><use href="#grid16"/></svg></span></div>
+    <div class="zc"><div class="t">16&nbsp;px &middot; light</div>
+      <span class="zbox l"><svg width="224" height="224" style="display:block"><use href="#ico16-hero"/></svg></span></div>
+  </div>
+</div>
+
+<h2>Four tones &mdash; one hue plus one alarm hue</h2>
+<table>
+<tr><th>Tone</th><th>Means</th><th>Angular span</th></tr>
+<tr><td><span class="sw" style="background:#2F6FE0"></span>solid accent</td><td>spent, and within the linear allowance</td><td>12 o'clock &rarr; <code>min(p,e)</code></td></tr>
+<tr><td><span class="sw" style="background:#F97316"></span>orange wedge</td><td><b>overspend</b> &mdash; consumption that is ahead of the clock</td><td><code>e &rarr; p</code>, only when <code>p&gt;e</code></td></tr>
+<tr><td><span class="sw" style="background:#4b6ea8"></span>ghost accent 30%</td><td>banked credit &mdash; allowance earned and not spent</td><td><code>p &rarr; e</code>, only when <code>p&lt;e</code>, <b>&ge;24&nbsp;px only</b></td></tr>
+<tr><td><span class="sw" style="background:#4a505c"></span>muted track</td><td>not yet earned</td><td><code>max(p,e) &rarr; 360&deg;</code></td></tr>
+<tr><td><span class="sw" style="background:#0E1116"></span>ink hairline</td><td>the pace angle itself</td><td>1&nbsp;px radial, <b>&ge;24&nbsp;px only</b></td></tr>
+</table>
+<p style="margin-top:12px">The wedge always spans <code>[min(p,e), max(p,e)]</code> &mdash; it <em>is</em> the lead
+or the lag, and its colour is the sign of the race. The user never has to remember which side of a tick is bad:
+<b>orange exists &hArr; you will be cut off.</b> There is no green anywhere in the icon, so there is no
+red/green pair to fail.</p>
+
+<h2>States</h2>
+<div class="grid4">
+
+  <div class="card">
+    <div class="row" style="gap:10px;align-items:center">
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico32-safe"/><use href="#grid32"/></svg></span>
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico16-safe"/><use href="#grid16"/></svg></span>
+      <span class="bar dark"><svg width="16" height="16"><use href="#ico16-safe"/></svg></span>
+    </div>
+    <div class="cap"><span class="verdict v-ok">SAFE</span> &middot; 38% used, 55% elapsed<br>
+    32&nbsp;px: ghost wedge + hairline show 17&nbsp;pp of banked credit &mdash; you can spend faster.
+    <b>16&nbsp;px: nothing at all.</b> The icon is silent when you are fine; the entire 16&nbsp;px budget is
+    reserved for the alarm.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="gap:10px;align-items:center">
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico32-tight"/><use href="#grid32"/></svg></span>
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico16-tight"/><use href="#grid16"/></svg></span>
+      <span class="bar dark"><svg width="16" height="16"><use href="#ico16-tight"/></svg></span>
+    </div>
+    <div class="cap"><span class="verdict v-mut">TIGHT / ON PACE</span> &middot; 50% used, 49% elapsed<br>
+    Coincidence is a state, not a failure. At 32&nbsp;px the hairline lands <em>on</em> the fill edge, half over
+    accent and half over track &mdash; a crisp positive mark, not an absence. At 16&nbsp;px it degrades to
+    &ldquo;no orange&rdquo;.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="gap:10px;align-items:center">
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico32-dry"/><use href="#grid32"/></svg></span>
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico16-dry"/><use href="#grid16"/></svg></span>
+      <span class="bar dark"><svg width="16" height="16"><use href="#ico16-dry"/></svg></span>
+    </div>
+    <div class="cap"><span class="verdict v-hot">DRY EARLY</span> &middot; 56% used, 44% elapsed &rarr; 64&nbsp;min dead<br>
+    43.2&deg; hot wedge = 8.0&nbsp;px&sup2; of orange inside a 9.2&nbsp;px disc at 16&nbsp;px. Survives.
+    The ring simultaneously shows the week banked &mdash; two independent verdicts, no confusion, because they
+    are spatially separated.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="gap:10px;align-items:center">
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico32-unk"/><use href="#grid32"/></svg></span>
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico16-unk"/><use href="#grid16"/></svg></span>
+      <span class="bar dark"><svg width="16" height="16"><use href="#ico16-unk"/></svg></span>
+    </div>
+    <div class="cap"><span class="verdict v-mut">NO VERDICT</span> &middot; fresh window, 2% used, 3% elapsed<br>
+    <code>E &lt; W/30</code> or <code>P &lt; 3q</code> &rarr; the ratio is quantisation noise. Wedge suppressed;
+    32&nbsp;px shows a <b>dotted</b> hairline (line known, verdict withheld). 16&nbsp;px shows nothing &mdash;
+    identical to ON&nbsp;PACE. That collision is benign: both states call for the same action, none.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="gap:10px;align-items:center">
+      <span class="zbox d"><svg width="112" height="112" style="display:block"><use href="#ico16-clamp"/><use href="#grid16"/></svg></span>
+      <span class="bar dark"><svg width="16" height="16"><use href="#ico16-clamp"/></svg></span>
+    </div>
+    <div class="cap"><span class="verdict v-hot">MINIMUM-INK CLAMP</span> &middot; 52% used, 48% elapsed (4&nbsp;pp, ~24&nbsp;min dead)<br>
+    True wedge 14.4&deg; &rarr; ~2.6&nbsp;px&sup2;, invisible. At 16&nbsp;px only, a real gap of &ge;3&nbsp;pp is drawn
+    at a floor of 18&deg; and 65% alpha. The clamp extends the wedge <b>inward</b>, so the fill edge &mdash; and
+    therefore the raw percentage &mdash; stays truthful; only the internal boundary lies, and only in the
+    warn-earlier direction.</div>
+  </div>
+
+</div>
+
+<h2>Geometry</h2>
+<table>
+<tr><th></th><th>16&nbsp;px</th><th>32&nbsp;px</th></tr>
+<tr><td>ring outer / mid / inner r</td><td>7.5 / 6.5 / 5.5 &nbsp;(w&nbsp;2.0)</td><td>15.0 / 13.25 / 11.5 &nbsp;(w&nbsp;3.5)</td></tr>
+<tr><td>transparent gap</td><td>5.5 &rarr; 4.6 &nbsp;(0.9&nbsp;px)</td><td>11.5 &rarr; 9.6 &nbsp;(1.9&nbsp;px)</td></tr>
+<tr><td>disc r</td><td>4.6 &nbsp;(9.2&nbsp;px dia, ~66&nbsp;px&sup2;)</td><td>9.6 &nbsp;(19.2&nbsp;px dia, ~289&nbsp;px&sup2;)</td></tr>
+<tr><td>hot wedge, disc</td><td>full slice, apex at centre</td><td>full slice, apex at centre</td></tr>
+<tr><td>hot wedge, ring</td><td>arc segment, full 2&nbsp;px thickness</td><td>arc segment, full 3.5&nbsp;px thickness</td></tr>
+<tr><td>hairline</td><td><b>omitted</b></td><td>1&nbsp;px ink; disc r&nbsp;3.6&rarr;9.6, ring r&nbsp;11.5&rarr;15</td></tr>
+<tr><td>ghost (banked) wedge</td><td><b>omitted</b></td><td>accent @ 30%</td></tr>
+<tr><td>dead-band</td><td colspan="2">|p&minus;e| &le; 2&nbsp;pp renders as ON PACE &mdash; 2&nbsp;pp is 2 quanta, below which the difference is not evidence</td></tr>
+</table>
+<p style="margin-top:10px">The hairline deliberately stops at the disc rim and never crosses the transparent gap:
+every pixel of it sits on a known opaque background, so one ink colour works on both taskbars. A nub poking into
+the gap would have to contrast with <code>#202020</code> and <code>#f3f3f3</code> at once, and at 16&nbsp;px it
+would close the 0.9&nbsp;px gap and weld the disc to the ring.</p>
+
+<h2>Resolution floor, honestly</h2>
+<table>
+<tr><th>gauge</th><th>first ink at</th><th>reliable at</th><th>equivalent dead time</th></tr>
+<tr><td>disc @ 16&nbsp;px</td><td>5&nbsp;pp &nbsp;(3.3&nbsp;px&sup2;, 1.4&nbsp;px arc)</td><td><b>8&nbsp;pp</b> &nbsp;(5.3&nbsp;px&sup2;, 2.3&nbsp;px arc)</td><td>~48&nbsp;min of a 5&nbsp;h window</td></tr>
+<tr><td>ring @ 16&nbsp;px</td><td>4&nbsp;pp</td><td><b>6&nbsp;pp</b> &nbsp;(2.5&times;2&nbsp;px)</td><td>~15&nbsp;h of a 7&nbsp;d window</td></tr>
+<tr><td>disc @ 32&nbsp;px</td><td>2&nbsp;pp</td><td><b>4&nbsp;pp</b> &nbsp;(11.6&nbsp;px&sup2;)</td><td>~24&nbsp;min</td></tr>
+<tr><td>ring @ 32&nbsp;px</td><td>1.5&nbsp;pp</td><td><b>3&nbsp;pp</b> &nbsp;(2.5&times;3.5&nbsp;px)</td><td>~7&nbsp;h</td></tr>
+</table>
+<p class="good" style="margin-top:12px">The 16&nbsp;px floor lands at roughly 40&ndash;50&nbsp;minutes of projected dead
+time. That is the encoding's best defence rather than something to hide: a 20-minute shortfall is below the
+threshold at which a user can usefully change behaviour anyway. <b>The pixel floor and the actionability floor are
+approximately the same number.</b> The minimum-ink clamp buys back the 3&ndash;8&nbsp;pp band at the cost of area
+fidelity in exactly the range where area fidelity stops mattering.</p>
+
+<h2>Where it breaks</h2>
+<p class="warn">1. <b>Light taskbar, ahead of pace.</b> The hot wedge is the outermost part of the fill, so on
+<code>#f3f3f3</code> the <em>fill edge</em> becomes orange (L*&nbsp;63) against a light track (L*&nbsp;~83) instead of
+blue (L*&nbsp;47) against it. Reading the raw percentage gets ~10&nbsp;L* harder precisely when you are overspending.
+The pace boundary itself stays crisp (&Delta;L&nbsp;16 plus a full hue flip), so the verdict never degrades &mdash;
+only the magnitude read does.</p>
+<p class="warn">2. <b>16&nbsp;px cannot separate ON&nbsp;PACE from NO&nbsp;VERDICT.</b> Both are &ldquo;no orange&rdquo;.
+Benign, because both mean &ldquo;do nothing&rdquo;, but real &mdash; only the tooltip disambiguates.</p>
+<p class="warn">3. <b>Two overspends at once</b> put orange on ring and disc together. Still legible, but the icon
+is then ~20% orange, and the severity gradient between &ldquo;week is 3&nbsp;h short&rdquo; and &ldquo;week is
+40&nbsp;h short&rdquo; is carried by arc length alone, which at 16&nbsp;px resolves to about three steps.</p>
+<p class="warn">4. <b><code>e</code> must come from the reported countdown</b>, never from local-clock arithmetic on
+an absolute reset timestamp. A DST shift or a laptop resume would otherwise move the tick by an hour with no other
+symptom. Suppress the wedge for one poll after any monotonic-clock discontinuity.</p>
+<p class="warn">5. <b>A moving ceiling breaks it silently.</b> The +50% boost expiring on 13&nbsp;Sept rescales
+<code>p</code> without touching <code>e</code>; the wedge jumps and looks like a burn spike. Treat a detected
+ceiling change as a rollover: suppress, re-seed.</p>
+<p class="warn">6. <b>It is a pace comparison, not a forecast.</b> It assumes the rest of the window resembles the
+window so far. Twenty idle minutes do not shrink the wedge, they only stop it growing. The EWMA and Theil&ndash;Sen
+recency estimators are precisely what disagree with it, and that disagreement belongs in the panel, not the icon.</p>
+
+</div>

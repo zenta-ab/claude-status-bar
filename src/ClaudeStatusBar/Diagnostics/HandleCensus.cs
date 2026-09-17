@@ -29,6 +29,13 @@ public static class HandleCensus
     /// <summary>Returns 0 if the GDI/USER delta stayed within threshold, 1 otherwise.</summary>
     public static int RunSelfTest(int iterations = 5000, int threshold = 8)
     {
+        int single = RunSingleIconSelfTest(iterations, threshold);
+        int multi = RunMultiAccountIconSelfTest(threshold: 8);
+        return single == 0 && multi == 0 ? 0 : 1;
+    }
+
+    static int RunSingleIconSelfTest(int iterations, int threshold)
+    {
         using var notifyIcon = new NotifyIcon { Visible = false };
         using var slot = new IconSlot(notifyIcon);
 
@@ -57,6 +64,54 @@ public static class HandleCensus
         Console.WriteLine(
             $"selftest n={iterations}  GDI {before.gdi}->{after.gdi} (d={dGdi})  " +
             $"USER {before.user}->{after.user} (d={dUser})  threshold={threshold}");
+
+        return Math.Abs(dGdi) <= threshold && Math.Abs(dUser) <= threshold ? 0 : 1;
+    }
+
+    /// <summary>
+    /// docs/multi-account.md: every IconSlot rule (Icon.FromHandle stays banned,
+    /// retire-after-assign, no leaks) must still hold when whole TrayIconHandle instances --
+    /// NotifyIcon + IconSlot together -- are created and destroyed as accounts are added/removed
+    /// or the display mode changes, not just re-rendered in place. Repeatedly stands up three
+    /// accounts' worth of icons, renders each once, then tears the whole set down, and checks the
+    /// GDI/USER delta across many such create/destroy cycles.
+    /// </summary>
+    static int RunMultiAccountIconSelfTest(int cycles = 200, int accountsPerCycle = 3, int threshold = 8)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var views = new[]
+        {
+            DemoQuotaSource.Build(now).First(s => s.Key == "safe").View,
+            DemoQuotaSource.Build(now).First(s => s.Key == "tight").View,
+            DemoQuotaSource.Build(now).First(s => s.Key == "spent_session").View,
+        };
+
+        void RunOneCycle()
+        {
+            var handles = new TrayIconHandle[accountsPerCycle];
+            for (int i = 0; i < accountsPerCycle; i++)
+            {
+                handles[i] = new TrayIconHandle();
+                handles[i].Slot.Update(views[i % views.Length], accountLabel: $"Konto {i + 1}");
+            }
+            foreach (var h in handles) h.Dispose();
+        }
+
+        for (int i = 0; i < 5; i++) RunOneCycle(); // warm-up
+
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var before = Sample();
+
+        for (int i = 0; i < cycles; i++) RunOneCycle();
+
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var after = Sample();
+
+        int dGdi = after.gdi - before.gdi;
+        int dUser = after.user - before.user;
+        Console.WriteLine(
+            $"selftest (multi-account, {accountsPerCycle} icons x {cycles} create/destroy cycles)  " +
+            $"GDI {before.gdi}->{after.gdi} (d={dGdi})  USER {before.user}->{after.user} (d={dUser})  threshold={threshold}");
 
         return Math.Abs(dGdi) <= threshold && Math.Abs(dUser) <= threshold ? 0 : 1;
     }

@@ -1,4 +1,6 @@
 using System.Drawing.Imaging;
+using System.Globalization;
+using ClaudeStatusBar.Config;
 using ClaudeStatusBar.Data;
 using ClaudeStatusBar.Diagnostics;
 using ClaudeStatusBar.Icons;
@@ -8,9 +10,9 @@ using ClaudeStatusBar.Ui;
 namespace ClaudeStatusBar;
 
 /// <summary>
-/// Owns the tray icon, the panel, the poll/eval timers and the CLI channel for the
-/// app's whole lifetime. Polling runs on the thread pool; results are marshalled
-/// back to the UI thread with SynchronizationContext.Post (not Control.Invoke).
+/// Owns every tray icon, the panel, the poll/eval timers and the CLI channel for the app's whole
+/// lifetime. Polling runs on the thread pool; results are marshalled back to the UI thread with
+/// SynchronizationContext.Post (not Control.Invoke).
 ///
 /// Wiring rules from Model/QuotaModel.cs's doc comment (docs/forecast-and-states.md):
 ///   - One QuotaModel for the app's lifetime.
@@ -24,8 +26,8 @@ namespace ClaudeStatusBar;
 ///
 /// --demo mode never constructs a QuotaModel, a ClaudeCliChannelSupervisor, or a
 /// DiskLogSink (no claude.exe child, no session, no hooks, no log directory
-/// writes): DemoQuotaSource feeds synthetic QuotaViews through the exact same
-/// _evalTimer -> IconSlot/PanelForm path instead.
+/// writes): DemoQuotaSource/MultiAccountDemoSource feed synthetic QuotaViews through the exact
+/// same _evalTimer -> icon/PanelForm path instead.
 ///
 /// Channel lifecycle (Codex review High #1, #6): the channel is not owned
 /// directly here any more -- ClaudeCliChannelSupervisor owns launch, health
@@ -35,37 +37,56 @@ namespace ClaudeStatusBar;
 /// there and the freshness ladder (Live -> Stale -> Unknown) degrades exactly the
 /// way it does for an ordinary transport failure -- never a stale confident number.
 ///
+/// Multi-account (docs/multi-account.md): channel, QuotaModel, DiskLogSink, poll scheduling and
+/// WarmStart-before-first-Ingest are owned per account by Data/AccountRuntime.cs, one per
+/// accounts.json entry. This context owns the _accounts list, drives every account's Evaluate()
+/// on the same 1s tick independently (one account failing, logged out, or missing must never
+/// stop any other), and reconciles ONE TrayIconHandle per account the display plan
+/// (Model/AccountDisplayPlan.cs) says should have an icon: one per enabled account in perAccount
+/// mode (capped at MaxIcons), or the single closest-to-blocked account in binding mode. The panel
+/// always shows one account at a time (_explicitPanelAccountIndex, or the display-mode default
+/// when unset) plus, when more than one account is configured, a compact "other accounts" list
+/// any row of which switches the panel to that account.
+///
 /// Shutdown (Codex review High #5, Medium #8, Low #17): every exit route
 /// (ExitApp from the tray menu, Application.Run returning, Program's finally)
 /// funnels through the single idempotent Shutdown() below, in the specific order
-/// the review calls out: shutdown flag first, then panel hooks/timers/tray icon
+/// the review calls out: shutdown flag first, then panel hooks/timers/tray icons
 /// (cheap, UI-thread, synchronous), then the child process kill and log writers
 /// (potentially slow I/O) bounded and off the UI thread.
 /// </summary>
 public sealed class StatusBarApplicationContext : ApplicationContext
 {
-    static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
     static readonly TimeSpan EvalTickInterval = TimeSpan.FromSeconds(1);
     static readonly TimeSpan DemoStateInterval = TimeSpan.FromSeconds(4);
     static readonly TimeSpan ShutdownDeadline = TimeSpan.FromSeconds(5);
+    const int DemoMaxIcons = 3;
+
+    /// <summary>One account as the display/icon-selection layer needs it: a label (null keeps the single-account panel/tooltip pixel-identical) and its last QuotaView.</summary>
+    readonly record struct DisplayAccount(string? Label, QuotaView View);
+
+    /// <summary>One step of the --demo / --capture-states cycle: either a legacy single-account state (Accounts.Count == 1, Label null) or a MultiAccountDemoSource frame.</summary>
+    readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex);
 
     readonly bool _demoMode;
-    readonly NotifyIcon _notifyIcon;
-    readonly IconSlot _iconSlot;
     readonly PanelForm _panel;
-    readonly System.Windows.Forms.Timer _pollTimer;
     readonly System.Windows.Forms.Timer _evalTimer;
     readonly System.Windows.Forms.Timer? _demoTimer;
     readonly SynchronizationContext _uiContext;
-    readonly ClaudeCliChannelSupervisor? _channelSupervisor;
-    readonly DiskLogSink? _logSink;
-    readonly QuotaModel? _quotaModel;
+    readonly List<AccountRuntime> _accounts = new();
+    readonly Dictionary<int, TrayIconHandle> _iconsByIndex = new();
+    readonly ContextMenuStrip _trayMenu;
+    readonly ToolStripMenuItem _toggleModeItem;
 
-    IReadOnlyList<DemoQuotaSource.DemoState> _demoStates = Array.Empty<DemoQuotaSource.DemoState>();
+    AccountsConfig _accountsConfig = AccountsConfig.Default();
+    AccountDisplayMode _displayMode = AccountDisplayMode.PerAccount;
+    int _maxIcons = 3;
+    int? _explicitPanelAccountIndex;
+    int? _lastRightClickedAccountIndex;
+    int? _shownAccountIndex; // whichever index RenderAccounts last showed the panel for -- see OnRefreshRequested
+
+    IReadOnlyList<DemoFrame> _demoFrames = Array.Empty<DemoFrame>();
     int _demoIndex;
-    QuotaView _currentView = QuotaView.Initial;
-    bool _polling;
-    bool _warmStarted;
     bool _shuttingDown;
 
     public StatusBarApplicationContext(bool demoMode = false, bool showPanelOnStartup = false)
@@ -74,32 +95,17 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
         _uiContext = SynchronizationContext.Current!;
 
-        _notifyIcon = new NotifyIcon
-        {
-            Text = "Claude Status Bar",
-            Visible = true,
-        };
-        _iconSlot = new IconSlot(_notifyIcon);
-        _iconSlot.Update(QuotaView.Initial); // something visible immediately, before the first poll/demo tick lands
-
-        _panel = new PanelForm(_notifyIcon);
-        _notifyIcon.MouseClick += (_, e) =>
-        {
-            if (e.Button == MouseButtons.Left) _panel.Toggle();
-        };
-
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Visa panel", null, (_, _) => _panel.Toggle());
-        menu.Items.Add("Exit", null, (_, _) => ExitApp());
-        _notifyIcon.ContextMenuStrip = menu;
+        (_trayMenu, _toggleModeItem) = BuildTrayMenu();
+        _panel = new PanelForm();
+        _panel.OtherAccountClicked += FocusAccount;
+        _panel.RefreshRequested += OnRefreshRequested;
 
         _evalTimer = new System.Windows.Forms.Timer { Interval = (int)EvalTickInterval.TotalMilliseconds };
         _evalTimer.Tick += (_, _) => SafeTick();
 
         if (_demoMode)
         {
-            _pollTimer = new System.Windows.Forms.Timer { Interval = 60_000 }; // never started -- demo mode does not poll
-            _demoStates = DemoQuotaSource.Build(DateTimeOffset.UtcNow);
+            _demoFrames = BuildDemoFrames(DateTimeOffset.UtcNow);
             _demoTimer = new System.Windows.Forms.Timer { Interval = (int)DemoStateInterval.TotalMilliseconds };
             _demoTimer.Tick += (_, _) => SafeAdvanceDemo();
             AdvanceDemo(); // show the first state immediately, don't wait 4s
@@ -107,18 +113,28 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         }
         else
         {
-            _quotaModel = new QuotaModel();
+            _accountsConfig = AccountsConfig.LoadOrCreateDefault();
+            _displayMode = _accountsConfig.DisplayMode;
+            _maxIcons = Math.Max(1, _accountsConfig.MaxIcons);
+            UpdateToggleModeItemText();
 
-            string logDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "logs");
-            _logSink = new DiskLogSink(logDir);
-            _channelSupervisor = new ClaudeCliChannelSupervisor(ChildProcessSpec.Default(), _logSink);
-            _channelSupervisor.Start(); // launches in the background; any failure is reported through the same IngestFailure path a poll failure uses
+            int index = 0;
+            foreach (AccountEntry entry in _accountsConfig.Accounts)
+            {
+                if (entry.Enabled)
+                {
+                    string slot = index == 0 ? "default" : index.ToString(CultureInfo.InvariantCulture);
+                    _accounts.Add(new AccountRuntime(slot, entry, index, _uiContext));
+                }
+                index++;
+            }
 
-            _pollTimer = new System.Windows.Forms.Timer { Interval = 30_000 };
-            _pollTimer.Tick += (_, _) => _ = PollAsync();
-            _pollTimer.Start();
-            _ = PollAsync(); // do not wait for the first tick to show up
+            // Every account is driven independently from here on (docs/multi-account.md): one
+            // account's channel failing to launch, being logged out, or its config directory
+            // going missing must never stop any other account's polling or eval loop.
+            foreach (AccountRuntime account in _accounts) account.Start();
+
+            RenderAccounts(_accounts.Select(a => new DisplayAccount(null, a.LastView)).ToList(), _displayMode, _maxIcons);
         }
 
         _evalTimer.Start();
@@ -139,6 +155,74 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         }
     }
 
+    // ---- tray menu (docs/multi-account.md, the task's "Tray context menu" item) ----
+
+    (ContextMenuStrip Menu, ToolStripMenuItem ToggleItem) BuildTrayMenu()
+    {
+        var menu = new ContextMenuStrip
+        {
+            Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors()),
+            BackColor = DarkMenuColors.Background,
+            ForeColor = DarkMenuColors.Foreground,
+        };
+
+        var showPanelItem = new ToolStripMenuItem("Visa panel") { ForeColor = DarkMenuColors.Foreground };
+        showPanelItem.Click += (_, _) => FocusAccount(DefaultFocusAccountIndex());
+
+        var toggleItem = new ToolStripMenuItem { ForeColor = DarkMenuColors.Foreground };
+        toggleItem.Click += (_, _) => ToggleDisplayMode();
+
+        var exitItem = new ToolStripMenuItem("Exit") { ForeColor = DarkMenuColors.Foreground };
+        exitItem.Click += (_, _) => ExitApp();
+
+        menu.Items.Add(showPanelItem);
+        menu.Items.Add(toggleItem);
+        menu.Items.Add(exitItem);
+        return (menu, toggleItem);
+    }
+
+    /// <summary>Which account "Visa panel" opens on when it wasn't reached through a specific icon's own right-click: whichever icon was last right-clicked, else the current display-mode default.</summary>
+    int DefaultFocusAccountIndex()
+    {
+        if (_lastRightClickedAccountIndex is { } idx) return idx;
+        IReadOnlyList<DisplayAccount> current = CurrentDisplayAccounts();
+        return EffectiveDefaultPanelAccountIndex(current, _displayMode, DateTimeOffset.UtcNow) ?? 0;
+    }
+
+    IReadOnlyList<DisplayAccount> CurrentDisplayAccounts() =>
+        _demoMode
+            ? (_demoFrames.Count > 0 ? _demoFrames[_demoIndex % _demoFrames.Count].Accounts : Array.Empty<DisplayAccount>())
+            : _accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList();
+
+    /// <summary>docs/multi-account.md's context-menu toggle: writes displayMode to accounts.json and applies immediately.</summary>
+    void ToggleDisplayMode()
+    {
+        _displayMode = _displayMode == AccountDisplayMode.PerAccount ? AccountDisplayMode.Binding : AccountDisplayMode.PerAccount;
+        UpdateToggleModeItemText();
+        PersistDisplayMode();
+        if (!_demoMode) RenderAccounts(_accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList(), _displayMode, _maxIcons);
+    }
+
+    /// <summary>Shows the ACTION the click would perform (what mode you'd switch TO), the common toggle-item idiom.</summary>
+    void UpdateToggleModeItemText() =>
+        _toggleModeItem.Text = _displayMode == AccountDisplayMode.PerAccount
+            ? "Visa bara den som är närmast taket"
+            : "Visa ikon per konto";
+
+    void PersistDisplayMode()
+    {
+        if (_demoMode) return; // demo mode never touches the user's real accounts.json
+        try
+        {
+            _accountsConfig.DisplayMode = _displayMode;
+            AccountsConfig.Save(_accountsConfig);
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"failed to persist accounts.json display mode: {ex.Message}");
+        }
+    }
+
     /// <summary>Targeted try/finally around the 1Hz timer body (Codex review Medium #15): an Evaluate/render exception must never take down the message loop.</summary>
     void SafeTick()
     {
@@ -154,110 +238,209 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         catch (Exception ex) { SafeLog.Warn($"Demo tick threw: {ex.Message}"); }
     }
 
-    /// <summary>The 1Hz UI tick: Evaluate() in live mode, or a re-push of the current demo view so its relative countdowns keep advancing on screen.</summary>
+    /// <summary>
+    /// The 1Hz UI tick: Evaluate() every account in live mode (each is cheap, per
+    /// QuotaModel.Evaluate's own contract) and reconcile/re-render every tray icon plus the
+    /// panel, or re-push the current demo frame so its relative countdowns keep advancing.
+    /// </summary>
     void Tick()
     {
-        if (!_demoMode)
+        if (_demoMode)
         {
-            DateTimeOffset utcNow = DateTimeOffset.UtcNow;
-            long monoMs = Environment.TickCount64;
-            _currentView = _quotaModel!.Evaluate(utcNow, monoMs);
+            PushCurrentDemoFrame();
+            return;
         }
 
-        _iconSlot.Update(_currentView);
-        _panel.UpdateView(_currentView, _demoMode);
+        DateTimeOffset utcNow = DateTimeOffset.UtcNow;
+        long monoMs = Environment.TickCount64;
+        foreach (AccountRuntime account in _accounts) account.Evaluate(utcNow, monoMs);
+        RefreshDisambiguatedLabels();
+
+        var current = _accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList();
+        RenderAccounts(current, _displayMode, _maxIcons);
+    }
+
+    void PushCurrentDemoFrame()
+    {
+        if (_demoFrames.Count == 0) return;
+        DemoFrame frame = _demoFrames[_demoIndex % _demoFrames.Count];
+        RenderAccounts(frame.Accounts, frame.Mode, DemoMaxIcons);
     }
 
     void AdvanceDemo()
     {
-        if (_demoStates.Count == 0) return;
-        _currentView = _demoStates[_demoIndex % _demoStates.Count].View;
+        if (_demoFrames.Count == 0) return;
+        Tick();
         _demoIndex++;
+    }
+
+    /// <summary>
+    /// The shared rendering path for both live and demo accounts (docs/multi-account.md
+    /// "Display"): decides which accounts get a tray icon (Model/AccountDisplayPlan.cs),
+    /// creates/destroys TrayIconHandles to match, renders every live icon, and updates the panel
+    /// with whichever account is currently focused plus the "other accounts" rows.
+    /// </summary>
+    void RenderAccounts(IReadOnlyList<DisplayAccount> current, AccountDisplayMode mode, int maxIcons)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        if (_explicitPanelAccountIndex is { } exp && exp >= current.Count) _explicitPanelAccountIndex = null;
+
+        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(true, a.View)).ToList();
+        IReadOnlyList<int> desired = current.Count == 0
+            ? Array.Empty<int>()
+            : AccountDisplayPlan.SelectIconAccounts(candidates, mode, Math.Max(1, maxIcons), now);
+        var desiredSet = new HashSet<int>(desired);
+
+        foreach (int key in _iconsByIndex.Keys.Where(k => !desiredSet.Contains(k)).ToList())
+        {
+            _iconsByIndex[key].Dispose();
+            _iconsByIndex.Remove(key);
+        }
+
+        foreach (int idx in desired.OrderBy(i => i))
+        {
+            if (_iconsByIndex.ContainsKey(idx)) continue;
+            var handle = new TrayIconHandle { NotifyIcon = { ContextMenuStrip = _trayMenu } };
+            int captured = idx;
+            handle.NotifyIcon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) FocusAccount(captured); };
+            handle.NotifyIcon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Right) _lastRightClickedAccountIndex = captured; };
+            _iconsByIndex[idx] = handle;
+        }
+
+        bool multi = current.Count > 1;
+        foreach ((int idx, TrayIconHandle handle) in _iconsByIndex)
+            handle.Slot.Update(current[idx].View, multi ? current[idx].Label : null);
+
+        if (current.Count == 0)
+        {
+            _shownAccountIndex = null;
+            _panel.UpdateView(QuotaView.Initial, _demoMode, null, Array.Empty<OtherAccountRow>());
+            _panel.SetAnchorIcon(null);
+            return;
+        }
+
+        int panelIndex = _explicitPanelAccountIndex ?? EffectiveDefaultPanelAccountIndex(current, mode, now) ?? 0;
+        _shownAccountIndex = panelIndex;
+        DisplayAccount shown = current[panelIndex];
+
+        IReadOnlyList<OtherAccountRow> otherRows = multi
+            ? current
+                .Select((a, i) => (a, i))
+                .Where(t => t.i != panelIndex)
+                .Select(t => PanelText.ComposeOtherAccountRow(t.i, t.a.Label ?? $"Konto {t.i + 1}", t.a.View, now, TimeZoneInfo.Local))
+                .ToList()
+            : Array.Empty<OtherAccountRow>();
+
+        // The task's reload button: busy exactly while a poll for the SHOWN account is in
+        // flight (never all accounts, and never demo mode -- there is no AccountRuntime to
+        // poll there). Reads AccountRuntime.IsPolling, the very same flag PollAsync's own
+        // concurrency guard is keyed on, so the button can never show "idle" while a poll it
+        // just started is actually still running.
+        bool refreshInFlight = !_demoMode && panelIndex < _accounts.Count && _accounts[panelIndex].IsPolling;
+
+        _panel.UpdateView(shown.View, _demoMode, multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null, otherRows, refreshInFlight);
+        _panel.SetAnchorIcon(_iconsByIndex.TryGetValue(panelIndex, out TrayIconHandle? anchorHandle)
+            ? anchorHandle.NotifyIcon
+            : _iconsByIndex.Values.Select(h => h.NotifyIcon).FirstOrDefault());
+    }
+
+    /// <summary>
+    /// The task's reload button: forces an immediate poll for whichever account the panel is
+    /// currently showing (never all accounts). No-op in demo mode (there is no AccountRuntime),
+    /// with no account currently shown, or while that account already has a poll in flight --
+    /// AccountRuntime.RequestImmediateRefresh/PollAsync's own _polling guard makes the last case
+    /// safe on its own, but checking IsPolling here too avoids even scheduling the redundant
+    /// call. Re-ticks immediately afterward so the button's busy state shows up without waiting
+    /// up to 1s for the next regular eval tick (the same pattern FocusAccount already uses).
+    /// </summary>
+    void OnRefreshRequested()
+    {
+        if (_demoMode) return;
+        if (_shownAccountIndex is not { } idx || idx < 0 || idx >= _accounts.Count) return;
+
+        AccountRuntime account = _accounts[idx];
+        if (!account.IsPolling) _ = account.RequestImmediateRefresh();
         Tick();
     }
 
-    async Task PollAsync()
+    /// <summary>docs/multi-account.md "Display": in binding mode the default focus is the binding account itself; otherwise the first configured account.</summary>
+    static int? EffectiveDefaultPanelAccountIndex(IReadOnlyList<DisplayAccount> current, AccountDisplayMode mode, DateTimeOffset now)
     {
-        if (_channelSupervisor is null || _polling || _shuttingDown) return;
-        _polling = true;
-        try
-        {
-            var (snapshot, error, latency) = await _channelSupervisor.GetUsageAsync(RequestTimeout).ConfigureAwait(false);
-            _uiContext.Post(_ =>
-            {
-                // Shutdown may have started while this poll was in flight (Codex review
-                // Medium #8): a posted completion must never touch disposed UI resources.
-                if (_shuttingDown) return;
-                ApplyResult(snapshot, error, latency);
-            }, null);
-        }
-        finally
-        {
-            _polling = false;
-        }
+        if (current.Count == 0) return null;
+        if (mode != AccountDisplayMode.Binding) return 0;
+
+        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(true, a.View)).ToList();
+        return AccountDisplayPlan.SelectBinding(candidates, now) ?? 0;
     }
 
-    void ApplyResult(UsageSnapshot? snapshot, string? error, TimeSpan latency)
+    /// <summary>
+    /// docs/multi-account.md "Panel": clicking a tray icon opens the panel on that icon's
+    /// account; clicking an "other accounts" row switches to that account. If the panel is
+    /// already open on this exact account, this click closes it instead (the existing
+    /// single-icon toggle behaviour), so a click doesn't reopen what it just closed.
+    /// </summary>
+    void FocusAccount(int accountIndex)
     {
-        DateTimeOffset utcNow = DateTimeOffset.UtcNow;
-        long monoMs = Environment.TickCount64;
-
-        if (snapshot is null)
-        {
-            SafeLog.Info($"get_usage failed after {latency.TotalMilliseconds:F0}ms: {error}");
-            _quotaModel!.IngestFailure(error ?? "unknown error", utcNow, monoMs);
-        }
-        else
-        {
-            if (error != null)
-                SafeLog.Info($"get_usage parse warning: {error}");
-
-            SafeLog.Info(
-                $"get_usage {latency.TotalMilliseconds:F0}ms  " +
-                $"session(5h)={snapshot.SessionUtilization:F1}%  resets_at={snapshot.SessionResetsAt}  " +
-                $"weekly(all models)={(snapshot.WeeklyUtilization?.ToString("F1") ?? "?")}%");
-
-            // WarmStart must run BEFORE Ingest for this same snapshot, and only on the
-            // first successful poll ever -- see QuotaModel.WarmStart's doc comment for why
-            // the order matters (its replay would otherwise be dropped by the dt<=0 guard).
-            if (!_warmStarted)
-            {
-                _quotaModel!.WarmStart(snapshot, utcNow);
-                _warmStarted = true;
-            }
-            _quotaModel!.Ingest(snapshot, utcNow, monoMs);
-        }
-
-        TimeSpan next = _quotaModel!.NextPollDelay(utcNow);
-        _pollTimer.Interval = Math.Max(1, (int)Math.Round(next.TotalMilliseconds));
-
-        // Push immediately rather than waiting up to 1s for the next eval tick.
-        _currentView = _quotaModel.Evaluate(utcNow, monoMs);
-        LogCommittedState(); // round-2 verification aid (docs/reviews/2026-09-11-codex-quota-model-round2.md item #4): nothing else durably records the committed verdict per poll
-        _iconSlot.Update(_currentView);
-        _panel.UpdateView(_currentView, _demoMode);
+        if (_panel.Visible && _explicitPanelAccountIndex == accountIndex) { _panel.Toggle(); return; }
+        _explicitPanelAccountIndex = accountIndex;
+        if (!_panel.Visible) _panel.ShowPanel();
+        Tick();
     }
 
-    /// <summary>One line per poll recording the committed verdict (not just the raw % SafeLog.Info already logs above), so a restart's first-poll behavior can be inspected after the fact. Best-effort: never allowed to affect the poll path.</summary>
-    void LogCommittedState()
+    /// <summary>
+    /// Recomputes AccountLabel.Disambiguate over the whole account set and installs the result
+    /// on each AccountRuntime (docs/multi-account.md "Labels": duplicate labels get the plan,
+    /// then the email local part, appended).
+    /// </summary>
+    void RefreshDisambiguatedLabels()
     {
-        // Through DiskLogSink like every other disk write: off the UI thread, size-capped, 7-day retention.
-        _logSink?.EnqueueRaw("state",
-            $"session={_currentView.Session.State} sessionReason={_currentView.Session.MeasuringReason ?? "-"} " +
-            $"weekly={_currentView.Weekly.State} weeklyReason={_currentView.Weekly.MeasuringReason ?? "-"} freshness={_currentView.Freshness}");
+        if (_accounts.Count == 0) return;
+        var inputs = _accounts
+            .Select(a => new AccountLabelInput(a.OverrideLabel, a.Identity, a.SubscriptionType))
+            .ToList();
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(inputs);
+        for (int i = 0; i < _accounts.Count; i++) _accounts[i].ApplyDisambiguatedLabel(labels[i]);
+    }
+
+    /// <summary>The full --demo / --capture-states cycle: every legacy single-account DemoQuotaSource state, then the multi-account frames (docs/multi-account.md, the task's "Demo mode" item).</summary>
+    static IReadOnlyList<DemoFrame> BuildDemoFrames(DateTimeOffset utcNow)
+    {
+        var frames = new List<DemoFrame>();
+        foreach (DemoQuotaSource.DemoState s in DemoQuotaSource.Build(utcNow))
+            frames.Add(new DemoFrame(s.Key, AccountDisplayMode.PerAccount, new[] { new DisplayAccount(null, s.View) }, FocusIndex: 0));
+
+        foreach (MultiAccountDemoSource.MultiState m in MultiAccountDemoSource.Build(utcNow))
+        {
+            IReadOnlyList<DisplayAccount> accounts = m.Accounts.Select(a => new DisplayAccount(a.Label, a.View)).ToList();
+            frames.Add(new DemoFrame(m.Key, m.Mode, accounts, m.FocusIndex));
+        }
+
+        return frames;
     }
 
     /// <summary>
     /// Automation-only path for --capture-states/--capture-icon-sheet (see the
-    /// task's verification step 3): steps through every demo state, showing and
-    /// screen-capturing the real, non-activating panel (safe: it never takes
-    /// focus, which is the whole point of ShowWithoutActivation/WS_EX_NOACTIVATE),
-    /// then renders the icon contact sheet purely in-memory, then exits.
+    /// task's verification step 3): steps through every demo frame (single- and
+    /// multi-account, both display modes), showing and screen-capturing the real,
+    /// non-activating panel (safe: it never takes focus, which is the whole point
+    /// of ShowWithoutActivation/WS_EX_NOACTIVATE), then renders the icon contact
+    /// sheet purely in-memory, then exits.
     /// </summary>
     public void RunAutomatedCapture(string? statesDir, string? iconSheetPath)
     {
+        // Both timers that would otherwise independently re-render demo content must stop: the
+        // 4s _demoTimer obviously, but also the regular 1Hz _evalTimer -- its demo-mode Tick()
+        // path re-renders _demoFrames[_demoIndex % Count] using the field _demoIndex, which is
+        // now frozen (only _demoTimer's own handler ever advances it) and out of sync with this
+        // method's own local `i`. Left running, it would race this method's render+capture
+        // sequence every second and occasionally overwrite the panel with a stale frame right
+        // before the screenshot (confirmed: intermittently captured the wrong frame before this
+        // fix). RunAutomatedCapture drives its own render (via RenderAccounts) + capture loop
+        // below, so the regular eval timer has nothing left to do during this run.
+        _evalTimer.Stop();
         _demoTimer?.Stop();
-        IReadOnlyList<DemoQuotaSource.DemoState> states = DemoQuotaSource.Build(DateTimeOffset.UtcNow);
+        IReadOnlyList<DemoFrame> frames = BuildDemoFrames(DateTimeOffset.UtcNow);
         int i = 0;
         bool waitingToCapture = false;
         var stepTimer = new System.Windows.Forms.Timer { Interval = 250 };
@@ -269,22 +452,22 @@ public sealed class StatusBarApplicationContext : ApplicationContext
 
             if (waitingToCapture)
             {
-                if (statesDir != null) CapturePanel(states[i].Key, statesDir);
+                if (statesDir != null) CapturePanel(frames[i].Key, statesDir);
                 _panel.HidePanel();
                 i++;
                 waitingToCapture = false;
             }
 
-            if (i >= states.Count)
+            if (i >= frames.Count)
             {
-                if (iconSheetPath != null) SaveIconSheet(states, iconSheetPath);
+                if (iconSheetPath != null) SaveIconSheet(DemoQuotaSource.Build(DateTimeOffset.UtcNow), iconSheetPath);
                 stepTimer.Dispose();
                 ExitApp();
                 return;
             }
 
-            _currentView = states[i].View;
-            Tick();
+            _explicitPanelAccountIndex = frames[i].FocusIndex < frames[i].Accounts.Count ? frames[i].FocusIndex : 0;
+            RenderAccounts(frames[i].Accounts, frames[i].Mode, DemoMaxIcons);
             _panel.ShowPanel();
             waitingToCapture = true;
             stepTimer.Interval = 500; // let layout/paint settle before the screenshot
@@ -293,9 +476,21 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         stepTimer.Start();
     }
 
+    /// <summary>
+    /// Invalidate + Update forces a synchronous WM_PAINT right before the capture (cheap
+    /// insurance against the panel's own paint not yet having landed), then copies the composited
+    /// desktop pixels at the panel's bounds -- PrintWindow was tried here instead and rejected:
+    /// against this window's WS_EX_TOOLWINDOW/WS_EX_TOPMOST/ShowWithoutActivation combination it
+    /// intermittently produced solid-black captures, strictly worse than CopyFromScreen. The
+    /// actual stale-frame race (captured the wrong demo frame) was the 1Hz _evalTimer racing this
+    /// method's own render+capture loop -- see RunAutomatedCapture's _evalTimer.Stop().
+    /// </summary>
     void CapturePanel(string name, string dir)
     {
         Directory.CreateDirectory(dir);
+        _panel.Invalidate();
+        _panel.Update();
+
         Rectangle bounds = _panel.Bounds;
         using var bmp = new Bitmap(bounds.Width, bounds.Height);
         using (var g = Graphics.FromImage(bmp))
@@ -303,7 +498,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         bmp.Save(Path.Combine(dir, $"{name}.png"), ImageFormat.Png);
     }
 
-    /// <summary>All 8 demo states x 4 sizes x 2 backgrounds, 8x nearest-neighbour scaled, composed in-memory (no window, no screen capture needed).</summary>
+    /// <summary>All 8 demo states x 4 sizes x 2 backgrounds, 8x nearest-neighbour scaled, composed in-memory (no window, no screen capture needed). Icon renders are single-account-shaped by design -- unrelated to the multi-account panel captures above.</summary>
     static void SaveIconSheet(IReadOnlyList<DemoQuotaSource.DemoState> states, string path)
     {
         int[] sizes = { 16, 20, 24, 32 };
@@ -387,25 +582,29 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         try { _panel.HidePanel(); } catch (Exception ex) { SafeLog.Warn($"HidePanel during shutdown threw: {ex.Message}"); }
         try { _panel.Dispose(); } catch (Exception ex) { SafeLog.Warn($"Panel.Dispose during shutdown threw: {ex.Message}"); }
 
-        try { _pollTimer.Stop(); _pollTimer.Dispose(); } catch { /* best effort */ }
         try { _evalTimer.Stop(); _evalTimer.Dispose(); } catch { /* best effort */ }
         try { _demoTimer?.Stop(); _demoTimer?.Dispose(); } catch { /* best effort */ }
 
-        try { _notifyIcon.Visible = false; } catch { /* best effort */ }
+        foreach (TrayIconHandle handle in _iconsByIndex.Values)
+        {
+            try { handle.Dispose(); } catch (Exception ex) { SafeLog.Warn($"TrayIconHandle.Dispose during shutdown threw: {ex.Message}"); }
+        }
+        _iconsByIndex.Clear();
 
-        // Terminate the child and flush the log writers off the UI thread, bounded (Codex
-        // review High #5): closing a redirected pipe/flushing the CSV can block if the
-        // child is not reading or the disk is slow, and that must never hang the thread
-        // this runs on across every exit route.
+        // Terminate every account's child and flush its log writer off the UI thread, bounded
+        // (Codex review High #5): closing a redirected pipe/flushing the CSV can block if the
+        // child is not reading or the disk is slow, and that must never hang the thread this
+        // runs on across every exit route. One account's cleanup hanging must not stop another's.
         RunBoundedOnBackgroundThread(async () =>
         {
-            if (_channelSupervisor != null) await _channelSupervisor.DisposeAsync().ConfigureAwait(false);
-            if (_logSink != null) await _logSink.DisposeAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            foreach (AccountRuntime account in _accounts)
+            {
+                try { await account.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception ex) { SafeLog.Warn($"account disposal during shutdown threw: {ex.Message}"); }
+            }
         }, ShutdownDeadline);
 
-        try { _iconSlot.Dispose(); } catch { /* best effort */ }
-        try { _notifyIcon.ContextMenuStrip?.Dispose(); } catch { /* best effort */ }
-        try { _notifyIcon.Dispose(); } catch { /* best effort */ }
+        try { _trayMenu.Dispose(); } catch { /* best effort */ }
     }
 
     static void RunBoundedOnBackgroundThread(Func<Task> work, TimeSpan deadline)
@@ -418,5 +617,28 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         {
             SafeLog.Warn($"Shutdown cleanup did not finish cleanly: {ex.Message}");
         }
+    }
+
+    /// <summary>docs/multi-account.md's tray context menu, "Keep it dark-themed like today": matches PanelForm's own dark palette rather than the WinForms default light menu.</summary>
+    sealed class DarkMenuColors : ProfessionalColorTable
+    {
+        public static readonly Color Background = Color.FromArgb(255, 0x20, 0x20, 0x20);
+        public static readonly Color Foreground = Color.FromArgb(255, 0xF2, 0xF2, 0xF2);
+        static readonly Color Border = Color.FromArgb(255, 0x3A, 0x3A, 0x3A);
+        static readonly Color Hover = Color.FromArgb(255, 0x3A, 0x3A, 0x3A);
+
+        public override Color ToolStripDropDownBackground => Background;
+        public override Color ImageMarginGradientBegin => Background;
+        public override Color ImageMarginGradientMiddle => Background;
+        public override Color ImageMarginGradientEnd => Background;
+        public override Color MenuBorder => Border;
+        public override Color MenuItemBorder => Border;
+        public override Color MenuItemSelected => Hover;
+        public override Color MenuItemSelectedGradientBegin => Hover;
+        public override Color MenuItemSelectedGradientEnd => Hover;
+        public override Color MenuItemPressedGradientBegin => Hover;
+        public override Color MenuItemPressedGradientEnd => Hover;
+        public override Color SeparatorDark => Border;
+        public override Color SeparatorLight => Border;
     }
 }

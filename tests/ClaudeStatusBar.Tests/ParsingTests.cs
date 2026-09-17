@@ -68,6 +68,43 @@ public class ParsingTests
         Assert.Equal(69.5, snapshot.WeeklyUtilization);     // JSON float
     }
 
+    [Fact]
+    public void UsageParser_ReadsSubscriptionType_ForAccountLabelling()
+    {
+        // docs/multi-account.md: subscription_type feeds AccountLabel, never the quota model
+        // itself -- this only checks it is carried onto UsageSnapshot at all.
+        string json = """
+        {
+          "response": {
+            "subscription_type": "team",
+            "five_hour": { "utilization": 10, "resets_at": "2026-09-11T11:20:00.524090+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out _);
+
+        Assert.Equal("team", snapshot!.SubscriptionType);
+    }
+
+    [Fact]
+    public void UsageParser_MissingSubscriptionType_LeavesItNull()
+    {
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 10, "resets_at": "2026-09-11T11:20:00.524090+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out _);
+
+        Assert.Null(snapshot!.SubscriptionType);
+    }
+
     // ---- decision 10 (round 2): resets_at bounds and guarded deadline arithmetic ----
 
     [Fact]

@@ -20,6 +20,13 @@ public sealed record WindowSectionText(string Title, string ResetHeader, string 
 public sealed record PanelTextResult(StatusBoxText StatusBox, WindowSectionText Session, WindowSectionText Weekly);
 
 /// <summary>
+/// One row of the panel's "other accounts" list (docs/multi-account.md "Display", the task's
+/// "Panel" item): the account this row switches to (AccountIndex, into whatever list the caller
+/// built it from), its label, a short verdict-only line, and the colour role to render it in.
+/// </summary>
+public sealed record OtherAccountRow(int AccountIndex, string Label, string Line, PanelColorRole Role);
+
+/// <summary>
 /// The panel-v2 "answer first" text layer (docs/panel-v2.md): pure function of
 /// (QuotaView, now, tz) -> every string the panel shows, no drawing. Kept separate
 /// from PanelForm so the exact wording is testable without a Graphics context.
@@ -40,6 +47,36 @@ public static class PanelText
         ComposeStatusBox(view, now, tz),
         ComposeSection("AKTUELL SESSION", WindowKind.Session, view.Session, now, tz),
         ComposeSection("VECKA", WindowKind.Weekly, view.Weekly, now, tz));
+
+    /// <summary>
+    /// One compact "other accounts" row (docs/multi-account.md "Display"): label, verdict
+    /// colour, one short line -- "räcker till reset" / "slut 15:01" / "mäter takt", never a full
+    /// status-box sentence. Same driver rule as the status box (more severe window, session wins
+    /// an exact tie) and the same TimeText helpers, so no raw minute count leaks in here either.
+    /// </summary>
+    public static OtherAccountRow ComposeOtherAccountRow(int accountIndex, string label, QuotaView view, DateTimeOffset now, TimeZoneInfo tz)
+    {
+        if (view.Freshness == Freshness.Unknown)
+            return new OtherAccountRow(accountIndex, label, "går inte att läsa", PanelColorRole.Unknown);
+
+        if (view.BlockedUntil is { } blockedUntil)
+            return new OtherAccountRow(accountIndex, label, $"slut · öppnar {TimeText.ClockOnly(blockedUntil, tz)}", PanelColorRole.Dead);
+
+        WindowView driver = (int)view.Session.State >= (int)view.Weekly.State ? view.Session : view.Weekly;
+        (string line, PanelColorRole role) = driver.State switch
+        {
+            QuotaState.Measuring => ("mäter takt", PanelColorRole.Measuring),
+            QuotaState.Tight => ("tajt — räcker precis", PanelColorRole.Tight),
+            QuotaState.DryEarly when driver.DepletesAt is { } dep => ($"slut {TimeText.ClockOnly(dep, tz)}", PanelColorRole.Crit),
+            QuotaState.DryEarly => ("nästan slut", PanelColorRole.Crit),
+            QuotaState.Spent when driver.ResetsAt is { } r => ($"slut · öppnar {TimeText.ClockOnly(r, tz)}", PanelColorRole.Dead),
+            QuotaState.Spent => ("slut", PanelColorRole.Dead),
+            _ => ("räcker till reset", PanelColorRole.Safe),
+        };
+
+        if (view.Freshness == Freshness.Stale) line += " · kan vara inaktuell";
+        return new OtherAccountRow(accountIndex, label, line, role);
+    }
 
     // ---- status box (docs/panel-v2.md, item 2) ----
 

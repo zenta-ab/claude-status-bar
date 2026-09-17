@@ -7,17 +7,56 @@ namespace ClaudeStatusBar.Data;
 /// the path be re-resolved on EVERY launch attempt (Codex review High #1): Claude
 /// Code auto-update replaces the binary at that path, so a path cached once at
 /// process start can go stale across a long-running supervised session.
+///
+/// EnvironmentOverrides (docs/multi-account.md) is how one account's child is
+/// pointed at a config directory other than Claude Code's own default: setting
+/// CLAUDE_CONFIG_DIR is exactly what "N accounts = N config directories = N child
+/// processes" means in practice. It is null for the default account so its child's
+/// environment is simply inherited unmodified -- CLAUDE_CONFIG_DIR is left for the
+/// child to resolve itself exactly as claude.exe always has.
 /// </summary>
-public sealed record ChildProcessSpec(Func<string> ResolveExePath, string Arguments, string WorkingDirectory)
+public sealed record ChildProcessSpec(
+    Func<string> ResolveExePath,
+    string Arguments,
+    string WorkingDirectory,
+    IReadOnlyDictionary<string, string>? EnvironmentOverrides = null)
 {
-    public static ChildProcessSpec Default() => new(
-        ResolveExePath: () => ResolveClaudeExe(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            Environment.GetEnvironmentVariable("PATH"),
-            File.Exists),
-        Arguments: "-p --input-format stream-json --output-format stream-json --verbose",
-        WorkingDirectory: Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "agent"));
+    public static ChildProcessSpec Default() => ForAccount(slot: "default", configDir: null);
+
+    /// <summary>
+    /// Builds the spec for one account slot (docs/multi-account.md). `slot` is an opaque
+    /// per-account identifier the caller controls (StatusBarApplicationContext uses "default"
+    /// for accounts[0] and the account's index for every other one); it only affects the
+    /// working directory, so two accounts never share one claude.exe session directory.
+    ///
+    /// `configDir` null means "Claude Code's own default login": CLAUDE_CONFIG_DIR is left
+    /// unset in EnvironmentOverrides entirely (not set to the resolved default path) so the
+    /// child inherits this process's own environment exactly as it always has -- if the user
+    /// already has CLAUDE_CONFIG_DIR set for their whole session, that keeps working unchanged.
+    /// A non-null configDir is a second/third account and gets CLAUDE_CONFIG_DIR pinned
+    /// explicitly so it can never drift onto whatever the default account happens to resolve to.
+    /// </summary>
+    public static ChildProcessSpec ForAccount(string slot, string? configDir)
+    {
+        string agentRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "agent");
+        string workingDirectory = string.Equals(slot, "default", StringComparison.Ordinal)
+            ? agentRoot // unchanged from the pre-multi-account layout: the sole/first account keeps its existing folder
+            : Path.Combine(agentRoot, slot);
+
+        Dictionary<string, string>? overrides = null;
+        if (!string.IsNullOrEmpty(configDir))
+            overrides = new Dictionary<string, string> { ["CLAUDE_CONFIG_DIR"] = configDir };
+
+        return new ChildProcessSpec(
+            ResolveExePath: () => ResolveClaudeExe(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                Environment.GetEnvironmentVariable("PATH"),
+                File.Exists),
+            Arguments: "-p --input-format stream-json --output-format stream-json --verbose",
+            WorkingDirectory: workingDirectory,
+            EnvironmentOverrides: overrides);
+    }
 
     /// <summary>
     /// The native installer's location first (%USERPROFILE%\.local\bin\claude.exe), then the

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks commits containing personal data. Bypass with --no-verify only if you are certain.
+exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check-privacy.ps1"

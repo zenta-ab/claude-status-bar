@@ -189,7 +189,16 @@ public static class GaugeRenderer
         return Downsample(hi, px, exhausted, dimAlpha);
     }
 
-    /// <summary>Grey outline, no fills, no arcs -- Freshness.Unknown: never show a number or a verdict colour.</summary>
+    /// <summary>
+    /// Freshness.Unknown: a grey ring (unchanged) plus an exclamation mark in the centre, so
+    /// it reads as "can't read the quota" rather than "still loading" -- the old glyph was an
+    /// empty ring, indistinguishable from a genuinely 0%-used icon. The mark is composited
+    /// directly at output resolution with no antialiasing/interpolation (see DrawUnknownMark):
+    /// at 16px it is only a 1-2px bar plus a dot, and the supersample+bicubic/bilinear
+    /// softening the rest of this pipeline uses would blur it past legibility at that size,
+    /// exactly the reason RenderExhaustedGlyph below also draws directly instead of through
+    /// Downsample.
+    /// </summary>
     public static Bitmap RenderOutline(int px)
     {
         int s = px * SS;
@@ -202,7 +211,53 @@ public static class GaugeRenderer
             using var pen = new Pen(Color.FromArgb(170, Palette.Dead), band * 0.45f);
             g.DrawEllipse(pen, ringRect);
         }
-        return Downsample(hi, px, exhausted: false, dimAlpha: 1f);
+        Bitmap ring = Downsample(hi, px, exhausted: false, dimAlpha: 1f);
+        return DrawUnknownMark(ring, px);
+    }
+
+    /// <summary>
+    /// Composites the "!" onto the already-downsampled ring bitmap (consumes and disposes
+    /// it): a rounded bar over a dot, every dimension pixel-snapped (Math.Round) and sized as
+    /// a fraction of px, so it stays a crisp two-part mark at every tray size (16/20/24/32)
+    /// instead of softening into a grey smear the way scaled vector text would at 16px.
+    /// </summary>
+    static Bitmap DrawUnknownMark(Bitmap ring, int px)
+    {
+        try
+        {
+            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
+            try
+            {
+                using (var g = Graphics.FromImage(outBmp))
+                {
+                    g.SmoothingMode = SmoothingMode.None;
+                    g.Clear(Color.Transparent);
+                    g.DrawImage(ring, 0, 0, px, px);
+
+                    float barW = MathF.Max(1f, MathF.Round(px * 0.11f));
+                    float barH = MathF.Max(3f, MathF.Round(px * 0.33f));
+                    float gap = MathF.Max(1f, MathF.Round(px * 0.07f));
+                    float dotD = MathF.Max(1f, MathF.Round(px * 0.13f));
+                    float totalH = barH + gap + dotD;
+                    float cx = MathF.Round(px / 2f);
+                    float top = MathF.Round((px - totalH) / 2f);
+
+                    using var brush = new SolidBrush(Color.FromArgb(235, Palette.Dead));
+                    g.FillRectangle(brush, MathF.Round(cx - barW / 2f), top, barW, barH);
+                    g.FillEllipse(brush, MathF.Round(cx - dotD / 2f), top + barH + gap, dotD, dotD);
+                }
+                return outBmp;
+            }
+            catch
+            {
+                outBmp.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            ring.Dispose();
+        }
     }
 
     /// <summary>
@@ -264,12 +319,12 @@ public static class GaugeRenderer
     {
         if (p.Outline) return RenderOutline(p.Px);
 
-        // The doc names 0.85 as the dark-taskbar target, but measured (IconContrastTests):
-        // #9AA3AE at exactly 0.85 alpha over #202020 tops out at ~4.98:1 -- a hair under the
-        // required 5:1, and that is the *ceiling* (a fully opaque, non-antialiased pixel);
-        // any real edge softening only pulls it lower. 0.90 clears 5:1 with real margin
-        // (measured ~5.3:1) while still reading as "dimmed" against a dark taskbar.
-        float dimAlpha = p.TaskbarDark ? 0.90f : 0.42f;
+        // 0.85 on a dark taskbar, per docs/forecast-and-states.md "Exhausted": with the real
+        // critical red (not a lightened tint) and a >= 3:1 target (not >= 5:1 -- this state
+        // must read as quieter than an active one, not merely legible), 0.85 clears 3:1 with a
+        // real margin (measured ~3.1:1; see IconContrastTests) while dimming it well below the
+        // undimmed Tight/Safe glyphs.
+        float dimAlpha = p.TaskbarDark ? 0.85f : 0.42f;
         Bitmap bmp = p.Exhausted
             ? RenderExhaustedGlyph(p.Px, p.PieFrac, Color.FromArgb(p.RingArgb), dimAlpha)
             : Render(p.Px, p.RingFrac, p.PieFrac, p.ForecastFrac, p.SessionForecastFrac, Color.FromArgb(p.RingArgb), Color.FromArgb(p.PieArgb), exhausted: false, p.TaskbarDark, dimAlpha);
@@ -278,17 +333,19 @@ public static class GaugeRenderer
     }
 
     /// <summary>
-    /// The exhausted glyph (dashed ring + countdown pie, docs/forecast-and-states.md
-    /// "Exhausted"), drawn directly at output resolution rather than through the
-    /// supersample+downsample pipeline the other renders use. Measured reason: at
-    /// 16px the dashed ring's stroke is only ~2px wide, and downsampling a
-    /// supersampled version of it (bicubic OR bilinear) never lets its interior
-    /// reach true alpha 255 -- every "solid" pixel stayed partially blended with
-    /// the transparent supersampled edges, capping contrast on #202020 around
-    /// 4.5:1, short of the required 5:1 (see IconContrastTests). Drawing directly
-    /// at 16px with GDI+'s own edge-only antialiasing leaves the stroke's actual
-    /// interior at full alpha, which the dimAlpha ColorMatrix then scales exactly
-    /// once -- no compounding, no interpolation loss.
+    /// The exhausted glyph (solid ring + countdown pie, docs/forecast-and-states.md
+    /// "Exhausted"): a FULL, continuous ring in the critical colour (dimmed), not the
+    /// earlier dashed outline -- the dashes read as a lifebuoy rather than "blocked".
+    /// Only the inner countdown pie moves; the ring's circumference never changes.
+    /// Drawn directly at output resolution rather than through the supersample+downsample
+    /// pipeline the other renders use. Measured reason: at 16px the ring's stroke is only
+    /// ~2px wide, and downsampling a supersampled version of it (bicubic OR bilinear)
+    /// never lets its interior reach true alpha 255 -- every "solid" pixel stayed
+    /// partially blended with the transparent supersampled edges, eating into the margin
+    /// above the required 3:1 (see IconContrastTests). Drawing directly at 16px with GDI+'s
+    /// own edge-only antialiasing leaves the stroke's actual interior at full alpha, which
+    /// the dimAlpha ColorMatrix then scales exactly once -- no compounding, no interpolation
+    /// loss.
     /// </summary>
     static Bitmap RenderExhaustedGlyph(int px, double pieFrac, Color color, float dimAlpha)
     {
@@ -298,11 +355,10 @@ public static class GaugeRenderer
             using (var g = Graphics.FromImage(canvas))
             {
                 // No antialiasing here: dimAlpha (0.85 on a dark taskbar) already caps every
-                // pixel's deliverable alpha well below 255, leaving almost no headroom for AA's
-                // partial pixel coverage on top of that without dropping under the required 5:1
-                // contrast (measured: even a single AA-softened ring pixel was enough to fall
-                // to ~4.5-4.8:1). A crisp edge is an acceptable look for a dashed "blocked"
-                // indicator, and it is what lets every interior pixel hit the true ceiling.
+                // pixel's deliverable alpha well below 255, leaving little headroom for AA's
+                // partial pixel coverage on top of that without dropping under the required 3:1
+                // contrast. A crisp edge is an acceptable look for a solid "blocked" ring, and
+                // it is what lets every interior pixel hit the true ceiling.
                 g.SmoothingMode = SmoothingMode.None;
                 g.CompositingQuality = CompositingQuality.HighQuality;
                 g.Clear(Color.Transparent);
@@ -312,8 +368,8 @@ public static class GaugeRenderer
                 using (var trackPen = new Pen(Color.FromArgb(40, 255, 255, 255), band))
                     g.DrawArc(trackPen, ringRect, 0, 360);
 
-                using (var dash = new Pen(color, Math.Max(1.6f, band * 0.95f)) { DashStyle = DashStyle.Custom, DashPattern = new[] { 2.2f, 2.0f } })
-                    g.DrawArc(dash, ringRect, 0, 360);
+                using (var ring = new Pen(color, Math.Max(1.6f, band * 0.95f)))
+                    g.DrawEllipse(ring, ringRect);
 
                 float gap = band * 0.42f;
                 float rPieOuter = rOuter - band * 0.5f - gap;

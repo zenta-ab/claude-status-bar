@@ -225,10 +225,25 @@ countdown shows "Återställs nu…", and freshness is Stale via the `resets_at 
 ## Exhausted (any window Spent)
 
 - `BlockedUntil` = the latest `resets_at` among spent windows.
-- The whole icon dims (brightness 0.85 on a dark taskbar, 0.42 on light), the ring becomes a dashed outline,
-  and the inner pie becomes a countdown: `(BlockedUntil − now) / W` of the blocking window,
-  drawn in `#9AA3AE`. It must measure **≥ 5:1 contrast at 16 px on `#202020`**. The earlier
-  `#6C7480` at 42 % measured 1.71:1 and was invisible.
+- The whole icon dims (brightness 0.85 on a dark taskbar, 0.42 on light -- see GaugeRenderer.
+  RenderQuota's own note), the ring is a FULL, continuous ring in the real critical colour
+  `Palette.Crit` (`#E23D28`), dimmed -- not the earlier dashed grey outline, which read as a
+  lifebuoy rather than "blocked", and not a lightened tint either (an earlier round used
+  `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST
+  glyph of all of them, the opposite of "reads as disabled"). The inner pie becomes a
+  countdown in the same colour, also dimmed: `(BlockedUntil − now) / W` of the blocking
+  window. Only the pie moves; the ring's circumference never changes.
+- Target is **≥ 3:1 contrast at 16 px on `#202020`**, not the ≥ 5:1 used for other states: a
+  spent/exhausted state must read as visibly QUIETER than an active one (Tight/Safe), not
+  merely legible, and real critical red tops out around ~3.8:1 fully opaque on a dark taskbar
+  -- it can never clear 5:1 at any alpha without being lightened away from "red". 3:1 is the
+  standard minimum for non-text UI components and leaves real room to dim the colour while
+  keeping it recognisably red. Measured ~3.1:1 at the 0.85 dimAlpha above (see
+  IconContrastTests, which also asserts the ring has no gaps around its circumference, and
+  that the Spent glyph measures strictly darker/quieter than both the Tight and Safe glyphs
+  so nobody "fixes" this back to a brighter red later). The earlier grey `#9AA3AE` dashed ring
+  cleared 5:1 too, but read as a lifebuoy; the even earlier `#6C7480` at 42 % measured 1.71:1
+  and was invisible.
 - The icon re-renders at most every 15 s in this state (the pie changes slowly).
 
 ## Poll cadence

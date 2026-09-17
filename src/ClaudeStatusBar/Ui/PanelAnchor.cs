@@ -27,7 +27,7 @@ public static class PanelAnchor
     /// is no need to track a live monitor move the way a draggable window would),
     /// and the on-screen location for the resulting physical-pixel size.
     /// </summary>
-    public static (Point Location, Size Size, float Scale) Resolve(NotifyIcon notifyIcon, Size logicalSize)
+    public static (Point Location, Size Size, float Scale) Resolve(NotifyIcon? notifyIcon, Size logicalSize)
     {
         Rectangle? iconRect = TryGetIconRect(notifyIcon, out Rectangle r) ? r : null;
         Screen screen = iconRect is { } ir ? Screen.FromRectangle(ir) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
@@ -123,10 +123,17 @@ public static class PanelAnchor
     /// bottom-right fallback rather than throwing; an anchor lookup must never
     /// be able to crash the app.
     /// </summary>
-    /// <summary>Internal (not just private): DismissWatcher/PanelForm reuse this same lookup to exclude the tray icon's own rectangle from click-away dismissal (Codex review Medium #13).</summary>
-    internal static bool TryGetIconRect(NotifyIcon notifyIcon, out Rectangle rect)
+    /// <summary>
+    /// Internal (not just private): DismissWatcher/PanelForm reuse this same lookup to exclude
+    /// the tray icon's own rectangle from click-away dismissal (Codex review Medium #13).
+    /// notifyIcon is nullable (docs/multi-account.md): PanelForm's anchor icon can be unset for
+    /// an instant while icons are being reconciled (e.g. every account momentarily disabled) --
+    /// that degrades to "no rect", never a null-reference.
+    /// </summary>
+    internal static bool TryGetIconRect(NotifyIcon? notifyIcon, out Rectangle rect)
     {
         rect = default;
+        if (notifyIcon is null) return false;
         try
         {
             FieldInfo? windowField = typeof(NotifyIcon).GetField("_window", BindingFlags.NonPublic | BindingFlags.Instance);

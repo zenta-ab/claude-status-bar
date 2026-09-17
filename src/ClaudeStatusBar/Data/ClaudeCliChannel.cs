@@ -81,6 +81,15 @@ public sealed class ClaudeCliChannel : IDisposable
             StandardInputEncoding = Encoding.UTF8,
         };
 
+        // Per-account identity (docs/multi-account.md): CLAUDE_CONFIG_DIR is the only thing
+        // that tells claude.exe which login to use. Left untouched (inherited) for the default
+        // account -- see ChildProcessSpec.ForAccount's doc comment for why.
+        if (spec.EnvironmentOverrides is { } overrides)
+        {
+            foreach ((string key, string value) in overrides)
+                psi.Environment[key] = value;
+        }
+
         // Job Object is created and configured BEFORE the process starts (Codex review High
         // #2): the previous ordering left the child able to run entirely unsandboxed if job
         // creation/configuration itself failed after the process was already live. Failing

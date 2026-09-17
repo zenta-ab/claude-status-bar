@@ -37,10 +37,16 @@ public readonly record struct QuotaIconParams(
 
         if (view.BlockedUntil is { } blockedUntil)
         {
+            // docs/forecast-and-states.md "Exhausted": the solid ring and the countdown pie it
+            // encloses are both the real critical colour, dimmed -- not Palette.Dead (grey),
+            // which the dashed-outline look used, and not a lightened tint (see git history):
+            // the target here is >= 3:1 contrast (not >= 5:1), specifically so this state reads
+            // as quieter/duller than the active Tight/Safe glyphs -- see IconContrastTests'
+            // relative-brightness assertion. Only the pie moves; the ring itself never changes.
             double countdown = Quantize(CountdownFrac(view, blockedUntil, utcNow));
             return new QuotaIconParams(
                 Outline: false, Exhausted: true, RingFrac: 1.0, PieFrac: countdown, ForecastFrac: 0, SessionForecastFrac: countdown,
-                RingArgb: Palette.Dead.ToArgb(), PieArgb: Palette.Dead.ToArgb(), Stale: stale, px, taskbarDark);
+                RingArgb: Palette.Crit.ToArgb(), PieArgb: Palette.Crit.ToArgb(), Stale: stale, px, taskbarDark);
         }
 
         double ringFrac = Quantize((view.Weekly.UsedPct ?? 0.0) / 100.0);

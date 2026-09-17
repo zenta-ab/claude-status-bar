@@ -35,7 +35,14 @@ public sealed class IconSlot : IDisposable
         _notifyIcon = notifyIcon;
     }
 
-    public void Update(QuotaView view)
+    /// <param name="view">What to render.</param>
+    /// <param name="accountLabel">
+    /// docs/multi-account.md "Display": when set, the tooltip is prefixed with this account's
+    /// label (truncating the LABEL, never the verdict, to stay within NotifyIcon.Text's 63-char
+    /// cap). Null (the default) keeps the exact single-account tooltip this app has always shown
+    /// -- required so a single-account install's icon is unchanged.
+    /// </param>
+    public void Update(QuotaView view, string? accountLabel = null)
     {
         try
         {
@@ -54,7 +61,7 @@ public sealed class IconSlot : IDisposable
 
             if (!sizeOrThemeChanged && (throttledExhausted || unchanged))
             {
-                _notifyIcon.Text = BuildTooltip(view);
+                _notifyIcon.Text = BuildTooltip(view, accountLabel);
                 return;
             }
 
@@ -81,7 +88,7 @@ public sealed class IconSlot : IDisposable
 
             _lastParams = p;
             _lastRenderAtMonoMs = nowMonoMs;
-            _notifyIcon.Text = BuildTooltip(view);
+            _notifyIcon.Text = BuildTooltip(view, accountLabel);
         }
         catch (Exception ex)
         {
@@ -91,6 +98,8 @@ public sealed class IconSlot : IDisposable
         }
     }
 
+    const int TooltipMaxLength = 63;
+
     /// <summary>
     /// Tray tooltip (docs/panel-v2.md, "Tray tooltip"): the same verdict and time as
     /// the panel's status box, condensed to fit NotifyIcon.Text's 63-character hard
@@ -98,11 +107,28 @@ public sealed class IconSlot : IDisposable
     /// silently). Driven by whichever window is most severe, same tie-break as
     /// PanelText.Compose (session wins ties), built entirely through TimeText so
     /// no raw minute count can leak into it either.
+    ///
+    /// Multi-account (docs/multi-account.md "Display"): with a non-null accountLabel, the
+    /// tooltip starts with it ("{label} · {verdict}"), so the wearer can tell which account an
+    /// icon is. If that would overflow the 63-char cap, the LABEL is truncated, never the
+    /// verdict -- the verdict is the part answering "will I hit a wall", the label is just which
+    /// account, so it is the one that can lose characters.
     /// </summary>
-    static string BuildTooltip(QuotaView view)
+    internal static string BuildTooltip(QuotaView view, string? accountLabel)
     {
-        string text = ComposeTooltip(view);
-        return text.Length > 63 ? text[..63] : text;
+        string verdict = ComposeTooltip(view);
+        string truncatedVerdict = verdict.Length > TooltipMaxLength ? verdict[..TooltipMaxLength] : verdict;
+        if (string.IsNullOrEmpty(accountLabel)) return truncatedVerdict;
+
+        const string separator = " · ";
+        string full = $"{accountLabel}{separator}{verdict}";
+        if (full.Length <= TooltipMaxLength) return full;
+
+        int labelBudget = TooltipMaxLength - separator.Length - verdict.Length;
+        if (labelBudget < 1) return truncatedVerdict; // verdict alone already fills (or exceeds) the cap -- drop the label entirely rather than mangle the verdict
+
+        string truncatedLabel = accountLabel.Length > labelBudget ? accountLabel[..labelBudget] : accountLabel;
+        return $"{truncatedLabel}{separator}{verdict}";
     }
 
     static string ComposeTooltip(QuotaView view)

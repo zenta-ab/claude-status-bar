@@ -71,6 +71,29 @@ not metered. Nothing about your account is stored by the app; the login stays wi
   hooks) never touches your repositories. If it crashes or Claude Code auto-updates, the app restarts
   it with backoff.
 
+## Several accounts
+
+If you hold more than one Claude plan (a personal Pro/Max, a Team seat, ...), Status Bar can
+track all of them at once — each with its own tray icon and its own claude.exe child, so one
+account's quota, forecast and history never mixes with another's.
+
+- **Add an account**: `.\scripts\add-account.ps1`. It creates a fresh login directory, runs an
+  interactive `claude` login pointed at it, adds it to `accounts.json`, and restarts the app.
+  `-List` shows configured accounts and their slot numbers; `-Remove <n>` drops one (its login
+  stays on disk, only the app forgets about it). The first time you add a second account, also
+  run `-PinDefault` — it explains why and copies your current default login into its own fixed
+  directory, so it can't later start following a different account you log into.
+- **Two display modes**, toggled from the tray icon's right-click menu or in `accounts.json`:
+  `perAccount` (default) shows one icon per account, up to `maxIcons` (3); `binding` shows a
+  single icon for whichever account is closest to being blocked. Either way, left-clicking an
+  icon opens the panel for that account, and the panel's "other accounts" list lets you switch to
+  any account that isn't showing an icon right now.
+- **Cost**: one resident `claude.exe` child (~230 MB) and one poll cycle per account. Control
+  requests are unmetered, so accounts never consume each other's quota, and one account failing
+  or logged out only degrades its own icon and panel row.
+
+See `docs/multi-account.md` for the full design (labels, identity handling, configuration shape).
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -91,10 +114,25 @@ dotnet run --project src\ClaudeStatusBar -- --selftest   # icon pipeline GDI/USE
 
 A running installed copy locks nothing in the repo; a running `dotnet run` copy locks `bin\Debug`.
 
+## Privacy guard
+
+This repo is public and the app reads account data, so nothing personal may land in it.
+Before committing, run:
+
+```powershell
+.\scripts\check-privacy.ps1 -All        # scan every tracked file
+.\scripts\check-privacy.ps1 -Install    # enable the pre-commit hook for this clone
+```
+
+It blocks email addresses, UUIDs, user paths and API tokens, allowing only obvious
+placeholders (reserved example domains, repeated-character UUIDs). Git hooks are per clone,
+so each contributor runs `-Install` once.
+
 ## Docs
 
 - `docs/forecast-and-states.md` — forecast model, states, freshness, decision record
 - `docs/panel-v2.md` — panel layout and copy rules
+- `docs/multi-account.md` — multiple accounts: labels, identity handling, configuration shape
 - `docs/reviews/` — independent Codex reviews and the decisions taken on each finding
 - `docs/backlog.md` — open ideas, e.g. learning your working-hours pattern for the forecast
 

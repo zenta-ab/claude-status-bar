@@ -144,7 +144,15 @@ public sealed class QuotaModel : IQuotaModel
     /// for the first snapshot that actually contributes usable data), on a
     /// missing/locked CSV, or when a window's resets_at is not yet known.
     /// </summary>
-    public void WarmStart(UsageSnapshot snapshot, DateTimeOffset utcNow, string? csvPath = null)
+    /// <param name="logDirOverride">
+    /// docs/multi-account.md: AccountRuntime passes its own account's
+    /// <c>logs\&lt;identityKey&gt;</c> directory here (identityKey = AccountIdentity.StateKey, the
+    /// accountUuid+organizationUuid pair -- see that type's doc comment) so warm start replays
+    /// that account's own history, never another account's, and never another plan under the
+    /// same person's accountUuid. Null (the single-account default) keeps reading the top-level
+    /// logs directory exactly as before.
+    /// </param>
+    public void WarmStart(UsageSnapshot snapshot, DateTimeOffset utcNow, string? csvPath = null, string? logDirOverride = null)
     {
         if (_liveDataIngested) return;
 
@@ -155,7 +163,7 @@ public sealed class QuotaModel : IQuotaModel
         // production default now reads the log directory and merges the current + previous
         // month's files, since a window can straddle a month boundary.
         IReadOnlyList<CsvReplay.RawRow> rows = csvPath is null
-            ? CsvReplay.ReadRowsForWarmStart(DefaultLogDir(), utcNow)
+            ? CsvReplay.ReadRowsForWarmStart(logDirOverride ?? DefaultLogDir(), utcNow)
             : CsvReplay.ReadRows(csvPath);
         if (rows.Count == 0) return;
 

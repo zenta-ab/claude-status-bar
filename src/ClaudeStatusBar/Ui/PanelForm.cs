@@ -41,6 +41,8 @@ public sealed class PanelForm : Form
     const float SidePadding = 14f;
     const float RingPx = 28f;
     const float BarHeight = 8f;
+    const float RefreshGlyphSize = 13f;
+    const float RefreshHitSize = 22f; // bigger than the glyph itself -- easier to click, Fitts's-law style
 
     // Same literal as PanelText's AwaitingResetText -- QuotaModel/DemoQuotaSource's
     // MeasuringReason is a plain string, not an enum, and this is the one place
@@ -71,7 +73,7 @@ public sealed class PanelForm : Form
     static readonly string DisplayFamily = ResolveFamily("Segoe UI Variable Display", "Segoe UI");
     static readonly string TextFamily = ResolveFamily("Segoe UI Variable Text", "Segoe UI");
 
-    readonly NotifyIcon _trayIcon;
+    NotifyIcon? _trayIcon;
     readonly DismissWatcher _dismissWatcher;
     readonly System.Windows.Forms.Timer _tickTimer;
     readonly Bitmap _measureBmp = new(1, 1);
@@ -93,8 +95,27 @@ public sealed class PanelForm : Form
     QuotaView _view = QuotaView.Initial;
     bool _demo;
     float _lastHeight = -1f;
+    string? _accountLabel;
+    IReadOnlyList<OtherAccountRow> _otherAccounts = Array.Empty<OtherAccountRow>();
+    bool _refreshInFlight;
 
-    public PanelForm(NotifyIcon trayIcon)
+    /// <summary>
+    /// docs/multi-account.md "Panel": fired when the user clicks one of the "other accounts"
+    /// rows, with that row's AccountIndex -- the caller (StatusBarApplicationContext) owns what
+    /// that index means and switches the panel to it.
+    /// </summary>
+    public event Action<int>? OtherAccountClicked;
+
+    /// <summary>
+    /// The task's reload button, header row: fired when the user clicks the refresh control
+    /// while it is not already busy. The caller (StatusBarApplicationContext) owns which
+    /// account is currently shown and triggers that account's AccountRuntime.
+    /// RequestImmediateRefresh -- this form only knows "the user asked to refresh right now",
+    /// never which account that means.
+    /// </summary>
+    public event Action? RefreshRequested;
+
+    public PanelForm(NotifyIcon? trayIcon = null)
     {
         _trayIcon = trayIcon;
         _dismissWatcher = new DismissWatcher(this);
@@ -171,13 +192,32 @@ public sealed class PanelForm : Form
         base.WndProc(ref m);
     }
 
-    /// <summary>Called from StatusBarApplicationContext through the same SynchronizationContext.Post path the tray icon uses, at 1Hz.</summary>
-    public void UpdateView(QuotaView view, bool demo)
+    /// <summary>
+    /// Called from StatusBarApplicationContext through the same SynchronizationContext.Post path
+    /// the tray icon uses, at 1Hz.
+    /// </summary>
+    /// <param name="accountLabel">
+    /// docs/multi-account.md "Panel": the shown account's label for the header, or null to keep
+    /// the panel pixel-identical to the single-account layout -- StatusBarApplicationContext only
+    /// passes a non-null label when more than one account is configured.
+    /// </param>
+    /// <param name="otherAccounts">The compact "other accounts" rows at the bottom, empty when there is only one account.</param>
+    /// <param name="refreshInFlight">
+    /// The task's reload button: true while a poll for the SHOWN account is in flight (whether
+    /// started by the button or by the account's own timer) -- the caller reads this off
+    /// AccountRuntime.IsPolling for whichever account it just passed in `view`. The control
+    /// renders dimmed and ignores clicks while this is true, so it can never start a second
+    /// concurrent poll for the same account.
+    /// </param>
+    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false)
     {
         try
         {
             _view = view;
             _demo = demo;
+            _accountLabel = accountLabel;
+            _otherAccounts = otherAccounts ?? Array.Empty<OtherAccountRow>();
+            _refreshInFlight = refreshInFlight;
 
             if (Visible)
             {
@@ -198,6 +238,58 @@ public sealed class PanelForm : Form
     public void Toggle()
     {
         if (Visible) HidePanel(); else ShowPanel();
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Display": with per-account icons, the panel should anchor near
+    /// whichever icon it is currently showing the account for, not a single icon fixed at
+    /// construction. Called from StatusBarApplicationContext whenever the shown account (or its
+    /// icon) changes; safe to call with null (e.g. every account momentarily has no icon) --
+    /// PanelAnchor then falls back to the work area's bottom-right corner.
+    /// </summary>
+    public void SetAnchorIcon(NotifyIcon? trayIcon) => _trayIcon = trayIcon;
+
+    /// <summary>
+    /// docs/multi-account.md "Panel": clicking an "other accounts" row switches the panel to
+    /// that account. WS_EX_NOACTIVATE/ShowWithoutActivation only suppress activation -- ordinary
+    /// mouse messages (WM_LBUTTONDOWN) are still delivered to whichever window is under the
+    /// cursor, so this fires normally without the panel ever taking focus.
+    /// </summary>
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        try
+        {
+            if (e.Button != MouseButtons.Left || _scale <= 0f) return;
+            var logicalPoint = new PointF(e.X / _scale, e.Y / _scale);
+
+            PanelLayout layout = BuildLayout(DateTimeOffset.UtcNow);
+
+            // Checked first regardless of _otherAccounts: the reload button lives in the header,
+            // well above the other-accounts rows, so there is no coordinate overlap to arbitrate.
+            // Ignored while already busy -- this is the actual guard against a click starting a
+            // second concurrent poll for the shown account (StatusBarApplicationContext.IsPolling
+            // is the other half, for the timer-driven case).
+            if (!_refreshInFlight && layout.RefreshHitRect.Contains(logicalPoint))
+            {
+                RefreshRequested?.Invoke();
+                return;
+            }
+
+            if (_otherAccounts.Count == 0) return;
+            for (int i = 0; i < layout.OtherAccountRowRects.Count && i < _otherAccounts.Count; i++)
+            {
+                if (layout.OtherAccountRowRects[i].Contains(logicalPoint))
+                {
+                    OtherAccountClicked?.Invoke(_otherAccounts[i].AccountIndex);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"PanelForm.OnMouseDown threw: {ex.Message}");
+        }
     }
 
     public void ShowPanel()
@@ -246,9 +338,10 @@ public sealed class PanelForm : Form
     // ---- layout: single source of truth for every section's Y-offset (and, via DrawFitText, every wrap decision) ----
 
     readonly record struct PanelLayout(
-        PanelTextResult Text, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
+        PanelTextResult Text, float LabelY, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
         float SessionY, float SessionHeight, float WeeklyY, float WeeklyHeight,
-        float RuleY, float FooterY, float TotalHeight);
+        float RuleY, float FooterY, float OtherAccountsRuleY, float OtherAccountsY,
+        IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, float TotalHeight);
 
     float ContentWidth => LogicalWidth - 2 * SidePadding;
 
@@ -258,8 +351,21 @@ public sealed class PanelForm : Form
 
         float y = 12f;
         y += 20f; // title
+
+        float labelY = -1f;
+        if (_accountLabel is { } label)
+        {
+            labelY = y;
+            y += DrawFitText(_measureG, label, _fontSectionTitle, TextPrimary, 0, 0, ContentWidth, draw: false) + 4f;
+        }
+
         float freshnessY = y;
-        y += 22f;
+        const float freshnessRowHeight = 22f;
+        var refreshHitRect = new RectangleF(
+            LogicalWidth - SidePadding - RefreshHitSize,
+            freshnessY + (freshnessRowHeight - RefreshHitSize) / 2f,
+            RefreshHitSize, RefreshHitSize);
+        y += freshnessRowHeight;
 
         float statusBoxY = y;
         float statusBoxHeight = MeasureStatusBox(text.StatusBox);
@@ -278,7 +384,29 @@ public sealed class PanelForm : Form
         float footerY = y;
         y += 20f;
 
-        return new PanelLayout(text, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight, weeklyY, weeklyHeight, ruleY, footerY, y);
+        float otherAccountsRuleY = -1f;
+        float otherAccountsY = -1f;
+        var rowRects = new List<RectangleF>();
+        if (_otherAccounts.Count > 0)
+        {
+            y += 10f;
+            otherAccountsRuleY = y;
+            y += 10f;
+            otherAccountsY = y;
+            y += DrawFitText(_measureG, "ANDRA KONTON", _fontBarCaption, TextTertiary, 0, 0, ContentWidth, draw: false) + 4f;
+
+            foreach (OtherAccountRow row in _otherAccounts)
+            {
+                string rowText = $"{row.Label}  {row.Line}";
+                float rowTop = y;
+                float rowHeight = DrawFitText(_measureG, rowText, _fontBarLabel, TextPrimary, 0, 0, ContentWidth, draw: false);
+                rowRects.Add(new RectangleF(SidePadding, rowTop, ContentWidth, rowHeight));
+                y += rowHeight + 6f;
+            }
+        }
+
+        return new PanelLayout(text, labelY, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight,
+            weeklyY, weeklyHeight, ruleY, footerY, otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, y);
     }
 
     float MeasureStatusBox(StatusBoxText box)
@@ -339,6 +467,8 @@ public sealed class PanelForm : Form
 
             using (var footerBrush = new SolidBrush(TextTertiary))
                 g.DrawString(BuildFooter(_view), _fontFooter, footerBrush, SidePadding, layout.FooterY);
+
+            DrawOtherAccounts(g, layout);
         }
         catch (Exception ex)
         {
@@ -368,9 +498,94 @@ public sealed class PanelForm : Form
             g.DrawString("DEMO", _fontDemoBadge, textBrush, badgeRect, fmt);
         }
 
+        if (_accountLabel is { } label)
+            DrawFitText(g, label, _fontSectionTitle, TextPrimary, SidePadding, layout.LabelY, ContentWidth);
+
         var (text, color) = BuildFreshnessLine(_view);
         using var freshBrush = new SolidBrush(color);
         g.DrawString(text, _fontFreshness, freshBrush, SidePadding, layout.FreshnessY);
+
+        DrawRefreshGlyph(g, layout.RefreshHitRect);
+    }
+
+    /// <summary>
+    /// The task's reload button: a plain painted hit-rect (never a real WinForms Button --
+    /// that would risk the panel's own no-activation guarantee), next to the freshness line.
+    /// Drawn as a circular-arrow "refresh" glyph, dimmed and click-inert while _refreshInFlight
+    /// (see OnMouseDown and UpdateView's refreshInFlight parameter).
+    /// </summary>
+    void DrawRefreshGlyph(Graphics g, RectangleF hitRect)
+    {
+        var glyphRect = new RectangleF(
+            hitRect.X + (hitRect.Width - RefreshGlyphSize) / 2f,
+            hitRect.Y + (hitRect.Height - RefreshGlyphSize) / 2f,
+            RefreshGlyphSize, RefreshGlyphSize);
+
+        Color color = _refreshInFlight ? TextTertiary : TextSecondary;
+        float thickness = Math.Max(1.2f, RefreshGlyphSize * 0.16f);
+
+        using (var pen = new Pen(color, thickness) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+        {
+            const float startAngle = -210f;
+            const float sweepAngle = 240f; // leaves a gap at the end for the arrowhead
+            g.DrawArc(pen, glyphRect, startAngle, sweepAngle);
+
+            // Arrowhead tangent to the arc's end, pointing in its direction of travel
+            // (clockwise): a small triangle built pointing along +X, then rotated/translated
+            // into place -- simpler and less error-prone than composing the wing vectors by hand.
+            const float endAngle = startAngle + sweepAngle;
+            float r = glyphRect.Width / 2f;
+            float cx = glyphRect.X + r, cy = glyphRect.Y + r;
+            double endRad = endAngle * Math.PI / 180.0;
+            float tipX = cx + r * (float)Math.Cos(endRad);
+            float tipY = cy + r * (float)Math.Sin(endRad);
+
+            float headSize = RefreshGlyphSize * 0.42f;
+            using var head = new GraphicsPath();
+            head.AddPolygon(new[]
+            {
+                new PointF(0, -headSize * 0.55f),
+                new PointF(headSize, 0),
+                new PointF(0, headSize * 0.55f),
+            });
+            using (var m = new Matrix())
+            {
+                // Default MatrixOrder.Prepend: the LAST-called operation is applied to the local
+                // shape first, so this rotates the triangle (defined around its own origin) to
+                // the tangent direction, THEN moves it to the arc's end point -- not the reverse.
+                m.Translate(tipX, tipY);
+                m.Rotate(endAngle + 90f); // tangent direction at this point on the circle (see DrawArc's angle convention)
+                head.Transform(m);
+            }
+
+            using var headBrush = new SolidBrush(color);
+            g.FillPath(headBrush, head);
+        }
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Panel": the compact "other accounts" list at the bottom, only when
+    /// there is more than one account (StatusBarApplicationContext passes an empty list
+    /// otherwise). Each row's screen rectangle was already computed in BuildLayout -- OnMouseDown
+    /// rebuilds the same layout to hit-test against it, so painting and hit-testing can never
+    /// disagree about where a row is.
+    /// </summary>
+    void DrawOtherAccounts(Graphics g, PanelLayout layout)
+    {
+        if (_otherAccounts.Count == 0) return;
+
+        using (var rulePen = new Pen(RuleColor))
+            g.DrawLine(rulePen, SidePadding, layout.OtherAccountsRuleY, LogicalWidth - SidePadding, layout.OtherAccountsRuleY);
+
+        DrawFitText(g, "ANDRA KONTON", _fontBarCaption, TextTertiary, SidePadding, layout.OtherAccountsY, ContentWidth);
+
+        for (int i = 0; i < _otherAccounts.Count; i++)
+        {
+            OtherAccountRow row = _otherAccounts[i];
+            string rowText = $"{row.Label}  {row.Line}";
+            Color color = RoleColor(row.Role);
+            DrawFitText(g, rowText, _fontBarLabel, color, SidePadding, layout.OtherAccountRowRects[i].Y, ContentWidth);
+        }
     }
 
     /// <summary>Status box (docs/panel-v2.md, item 2) -- ALWAYS shown. Line 1 is the verdict in the role colour; line 2 always states when.</summary>

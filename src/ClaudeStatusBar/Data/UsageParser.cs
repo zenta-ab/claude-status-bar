@@ -38,9 +38,10 @@ public static class UsageParser
             var weekly = FindWeeklyAllModelsNode(response);
             double? weeklyUtil = weekly is { } w ? ReadUtilization(w) : null;
             string? weeklyResets = weekly is { } w2 ? ReadResetsAt(w2) : null;
+            string? subscriptionType = ReadSubscriptionType(response);
 
             error = weekly is null ? "no weekly 'all models' node found (ring will render empty)" : null;
-            return new UsageSnapshot(sessionUtil, sessionResets, weeklyUtil, weeklyResets, DateTimeOffset.UtcNow);
+            return new UsageSnapshot(sessionUtil, sessionResets, weeklyUtil, weeklyResets, DateTimeOffset.UtcNow, subscriptionType);
         }
         catch (Exception ex)
         {
@@ -74,6 +75,21 @@ public static class UsageParser
             if (!ContainsModelQualifier(key)) return value;
         }
         return matches[0].Value;
+    }
+
+    /// <summary>
+    /// docs/multi-account.md: get_usage carries subscription_type (max, team, ...) for the
+    /// account that child is logged into -- used only for account labelling
+    /// (Model/AccountLabel.cs), never for the quota model itself. Same DFS-by-key-substring
+    /// approach as the rate_limits fields above, for the same reason: this node's exact
+    /// position is undocumented and not worth hardcoding a path for.
+    /// </summary>
+    static string? ReadSubscriptionType(JsonElement response)
+    {
+        var matches = new List<(string Key, JsonElement Value)>();
+        CollectBySubstring(response, "subscription_type", matches);
+        if (matches.Count == 0) return null;
+        return matches[0].Value.ValueKind == JsonValueKind.String ? matches[0].Value.GetString() : null;
     }
 
     static bool ContainsModelQualifier(string key) =>

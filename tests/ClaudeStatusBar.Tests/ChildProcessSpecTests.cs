@@ -41,4 +41,44 @@ public class ChildProcessSpecTests
         Assert.Equal(NativeInstall, ChildProcessSpec.ResolveClaudeExe(Profile, null, _ => false));
         Assert.Equal(NativeInstall, ChildProcessSpec.ResolveClaudeExe(Profile, ";; ;", _ => false));
     }
+
+    // ---- docs/multi-account.md: per-account environment and working directory ----
+
+    [Fact]
+    public void ForAccount_DefaultAccount_ConfigDirNull_DoesNotSetClaudeConfigDirEnvVar()
+    {
+        ChildProcessSpec spec = ChildProcessSpec.ForAccount("default", configDir: null);
+
+        Assert.Null(spec.EnvironmentOverrides);
+    }
+
+    [Fact]
+    public void ForAccount_NonDefaultAccount_SetsClaudeConfigDirEnvVar()
+    {
+        const string configDir = @"C:\Users\someone\AppData\Local\ClaudeStatusBar\accounts\1\config";
+        ChildProcessSpec spec = ChildProcessSpec.ForAccount("1", configDir);
+
+        Assert.NotNull(spec.EnvironmentOverrides);
+        Assert.Equal(configDir, spec.EnvironmentOverrides!["CLAUDE_CONFIG_DIR"]);
+    }
+
+    [Fact]
+    public void ForAccount_DefaultSlot_KeepsThePreMultiAccountWorkingDirectory()
+    {
+        ChildProcessSpec spec = ChildProcessSpec.ForAccount("default", configDir: null);
+        ChildProcessSpec legacyDefault = ChildProcessSpec.Default();
+
+        Assert.Equal(legacyDefault.WorkingDirectory, spec.WorkingDirectory);
+        Assert.EndsWith(Path.Combine("ClaudeStatusBar", "agent"), spec.WorkingDirectory);
+    }
+
+    [Fact]
+    public void ForAccount_NonDefaultSlot_GetsItsOwnWorkingDirectorySubfolder()
+    {
+        ChildProcessSpec defaultSpec = ChildProcessSpec.ForAccount("default", configDir: null);
+        ChildProcessSpec secondSpec = ChildProcessSpec.ForAccount("1", @"C:\somewhere\config");
+
+        Assert.NotEqual(defaultSpec.WorkingDirectory, secondSpec.WorkingDirectory);
+        Assert.EndsWith(Path.Combine("agent", "1"), secondSpec.WorkingDirectory);
+    }
 }

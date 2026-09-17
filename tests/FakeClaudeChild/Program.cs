@@ -31,15 +31,21 @@ using System.Text.Json;
 //                                   launch that finds PATH already there behaves like --mode=normal.
 //                                   Simulates "the child died and a relaunch works" for the
 //                                   supervisor's relaunch-with-backoff test.
+//   --mode=slow --delay-ms=N       behaves like --mode=normal, but sleeps N ms after reading each
+//                                   request before writing its response -- gives a test a
+//                                   deterministic window in which a poll is genuinely in flight,
+//                                   e.g. AccountRuntimeTests' forced-refresh concurrency guard.
 string mode = "normal";
 int count = int.MaxValue;
 string? marker = null;
+int delayMs = 0;
 
 foreach (string arg in args)
 {
     if (arg.StartsWith("--mode=", StringComparison.Ordinal)) mode = arg["--mode=".Length..];
     else if (arg.StartsWith("--count=", StringComparison.Ordinal)) int.TryParse(arg["--count=".Length..], out count);
     else if (arg.StartsWith("--marker=", StringComparison.Ordinal)) marker = arg["--marker=".Length..];
+    else if (arg.StartsWith("--delay-ms=", StringComparison.Ordinal)) int.TryParse(arg["--delay-ms=".Length..], out delayMs);
 }
 
 if (mode == "die-once")
@@ -85,14 +91,15 @@ switch (mode)
     case "die-after":
     case "normal":
     case "null-response":
-        return RunRequestLoop(stdin, stdout, mode, count);
+    case "slow":
+        return RunRequestLoop(stdin, stdout, mode, count, delayMs);
 
     default:
         Console.Error.WriteLine($"FakeClaudeChild: unknown --mode={mode}");
         return 1;
 }
 
-static int RunRequestLoop(StreamReader stdin, StreamWriter stdout, string mode, int dieAfter)
+static int RunRequestLoop(StreamReader stdin, StreamWriter stdout, string mode, int dieAfter, int delayMs = 0)
 {
     int served = 0;
     string? line;
@@ -102,6 +109,8 @@ static int RunRequestLoop(StreamReader stdin, StreamWriter stdout, string mode, 
 
         string? requestId = TryExtractRequestId(line);
         if (requestId is null) continue; // not a control_request we understand; ignore
+
+        if (mode == "slow" && delayMs > 0) Thread.Sleep(delayMs);
 
         string response = mode == "null-response"
             ? """{"type":"control_response","response":null}"""

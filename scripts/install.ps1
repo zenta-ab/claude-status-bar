@@ -32,7 +32,7 @@ Stop-StatusBar
 Push-Location $repo
 try {
     # Property form on purpose: '--self-contained false' has produced a 116 MB binary here.
-    dotnet publish src\ClaudeStatusBar\ClaudeStatusBar.csproj -c Release -r win-x64 `
+    dotnet publish src\Windows\ClaudeStatusBar.csproj -c Release -r win-x64 `
         -p:SelfContained=false -p:PublishSingleFile=true -o $installDir --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 } finally {

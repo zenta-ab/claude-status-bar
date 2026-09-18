@@ -12,6 +12,7 @@ namespace ClaudeStatusBar.Tests;
 /// same async-completion shape WindowsFormsSynchronizationContext has in production) stands in
 /// for the UI thread.
 /// </summary>
+[Collection("process")]
 public class AccountRuntimeTests
 {
     static string ExePath => Path.Combine(AppContext.BaseDirectory, "FakeClaudeChild.exe");

@@ -17,14 +17,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ClaudeStatusBar\ClaudeStatusBar.csproj" />
+    <ProjectReference Include="..\..\src\Windows\ClaudeStatusBar.csproj" />
     <!-- Copies FakeClaudeChild.exe next to the test assembly so integration tests can
          launch it as a stand-in claude.exe child (see tests/FakeClaudeChild). -->
     <ProjectReference Include="..\FakeClaudeChild\FakeClaudeChild.csproj" ReferenceOutputAssembly="false" OutputItemType="Content" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="fixtures\**\*.csv" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\fixtures\**\*.csv" Link="fixtures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

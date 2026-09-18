@@ -1,6 +1,6 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/ClaudeStatusBar/ClaudeStatusBar.csproj" />
+    <Project Path="src/Windows/ClaudeStatusBar.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ClaudeStatusBar.Tests/ClaudeStatusBar.Tests.csproj" />

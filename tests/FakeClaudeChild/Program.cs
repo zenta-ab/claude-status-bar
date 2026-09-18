@@ -141,5 +141,10 @@ static string? TryExtractRequestId(string line)
 static string BuildUsageResponse(string requestId) =>
     "{\"type\":\"control_response\",\"response\":{\"request_id\":\"" + requestId + "\"," +
     "\"subtype\":\"success\"," +
-    "\"five_hour\":{\"utilization\":42,\"resets_at\":\"2026-09-11T11:20:00.000000+00:00\"}," +
-    "\"seven_day\":{\"utilization\":13.5,\"resets_at\":\"2026-09-18T05:00:00.000000+00:00\"}}}";
+    "\"five_hour\":{\"utilization\":42,\"resets_at\":\"" + Iso(TimeSpan.FromHours(3)) + "\"}," +
+    "\"seven_day\":{\"utilization\":13.5,\"resets_at\":\"" + Iso(TimeSpan.FromDays(5)) + "\"}}}";
+
+// Reset times must be relative to now: the model rejects resets_at outside [now - 1 d, now + 8 d]
+// as garbled, so hardcoded dates turn the whole suite red the moment the calendar passes them.
+static string Iso(TimeSpan ahead) =>
+    (DateTimeOffset.UtcNow + ahead).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffff+00:00");

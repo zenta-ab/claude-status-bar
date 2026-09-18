@@ -1,7 +1,7 @@
 # Forecast, states and panel — v1 spec
 
 Decision record for milestones M3–M7 (forecast, state machine, freshness, exhausted
-state, complete panel). Code contract: `src/ClaudeStatusBar/Model/QuotaContracts.cs`.
+state, complete panel). Code contract: `src/Windows/Model/QuotaContracts.cs`.
 
 ## Evidence this rests on
 

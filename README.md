@@ -108,8 +108,8 @@ See `docs/multi-account.md` for the full design (labels, identity handling, conf
 ```powershell
 dotnet build ClaudeStatusBar.slnx
 dotnet test ClaudeStatusBar.slnx
-dotnet run --project src\ClaudeStatusBar -- --demo       # cycles through every state, no Claude child
-dotnet run --project src\ClaudeStatusBar -- --selftest   # icon pipeline GDI/USER handle leak check
+dotnet run --project src\Windows -- --demo       # cycles through every state, no Claude child
+dotnet run --project src\Windows -- --selftest   # icon pipeline GDI/USER handle leak check
 ```
 
 A running installed copy locks nothing in the repo; a running `dotnet run` copy locks `bin\Debug`.

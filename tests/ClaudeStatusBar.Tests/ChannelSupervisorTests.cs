@@ -12,6 +12,7 @@ namespace ClaudeStatusBar.Tests;
 /// doesn't kill the pump, an oversized line is discarded, and no process is left running
 /// after the test (asserted by PID, scoped to processes this test itself started).
 /// </summary>
+[Collection("process")]
 public class ChannelSupervisorTests
 {
     static string ExePath => Path.Combine(AppContext.BaseDirectory, "FakeClaudeChild.exe");

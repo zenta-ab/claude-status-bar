@@ -128,6 +128,26 @@ OAuth refresh token, which invalidates the copy within minutes — observed live
 ever creates a fresh directory and runs an interactive login in it. If a run is interrupted before the
 account is saved, re-run it with `-Register <slot>` to register the directory that was already logged in.
 
+## macOS — verified 2026-09-19
+
+Everything above was written from the Windows implementation. It has now been run on macOS with
+two real accounts (a Team seat and a personal Max seat), and holds unchanged, with two additions:
+
+- **The config directory's PATH is part of the account's identity on macOS.** Claude Code derives
+  the login's Keychain service name from `sha256(NFC(configDir))`, so `/a/b` and `/a/b/` are two
+  different accounts as far as it is concerned, and a login performed under one spelling reads as
+  logged out under the other. `ChildProcessSpec.canonicalConfigDirectory` is the single place that
+  decides the spelling, and `scripts/add-account.sh` writes the same canonical string into
+  `accounts.json`. See `docs/mac-port.md` §2 for the decompiled selector.
+- **`CLAUDE_SECURESTORAGE_CONFIG_DIR` outranks `CLAUDE_CONFIG_DIR`** in that selector. A stray one
+  inherited from the user's environment would collapse every account onto a single keychain
+  namespace while each still looked isolated, so a pinned account now pins both variables.
+
+The label ladder was exercised against real data for the first time here: the Team account
+resolves at step 2 (its `organizationName`), and the personal Max account's `organizationName` is
+Anthropic's auto-generated `<emailAddress>'s Organization`, which step 2 correctly skips, so it
+resolves at step 3 to its plan — "Max".
+
 ## Cost and limits
 
 Each account costs one resident `claude.exe` child (~230 MB) and one poll cycle; control requests are

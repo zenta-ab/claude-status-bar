@@ -19,7 +19,12 @@ public final class PanelView: NSView {
 
     /// The width to lay out against: whatever this view actually IS, falling back to the
     /// requested width before the first layout pass.
-    private var contentWidth: CGFloat { bounds.width > 1 ? bounds.width : Self.width }
+    private var contentWidth: CGFloat { layoutWidth ?? (bounds.width > 1 ? bounds.width : Self.width) }
+
+    /// Set only while measuring. `intrinsicContentSize` is called by Auto Layout *while* it is
+    /// deciding this view's bounds, so measuring against `bounds` is one pass stale and can
+    /// oscillate. Measurement pins the width explicitly instead.
+    private var layoutWidth: CGFloat?
 
     private var text: PanelTextResult?
     private var view: QuotaView = .initial
@@ -59,7 +64,7 @@ public final class PanelView: NSView {
     }
 
     public override var intrinsicContentSize: NSSize {
-        NSSize(width: Self.width, height: measuredHeight())
+        NSSize(width: Self.width, height: measuredHeight(for: Self.width))
     }
 
     // MARK: - Drawing
@@ -84,7 +89,10 @@ public final class PanelView: NSView {
         _ = drawFooter(at: y)
     }
 
-    private func measuredHeight() -> CGFloat {
+    /// Height the content needs at `width`. Pure: it sets no state beyond the measuring pin.
+    func measuredHeight(for width: CGFloat) -> CGFloat {
+        layoutWidth = width
+        defer { layoutWidth = nil }
         guard let text else { return 200 }
         var y = margin
         y = drawHeader(at: y, measureOnly: true)
@@ -375,7 +383,7 @@ public final class PanelView: NSView {
         guard !otherAccounts.isEmpty else { return }
         let point = convert(event.locationInWindow, from: nil)
         // The rows are the last block before the footer; find which one was hit.
-        var y = measuredHeight() - margin
+        var y = measuredHeight(for: contentWidth) - margin
         y -= height("x", font: .systemFont(ofSize: 10), width: 100)   // footer
         y -= sectionGap
         let rowsBottom = y

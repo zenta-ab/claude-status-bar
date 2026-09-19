@@ -19,6 +19,17 @@ state, complete panel). Code contract: `src/Windows/Model/QuotaContracts.cs`.
 - **Replica skew.** Usage regresses within a window (15→14, 19→18, 37→34), sometimes with
   a previously seen fingerprint coming back. Real consumption never decreases inside a
   tumbling window, so every drop is noise.
+- **Re-measured on macOS, 2026-09-18, CLI 2.1.271** (56 polls / 14 min — full detail in
+  `docs/mac-port.md`, "Phase 1 — evidence measured on macOS"). The tumbling window is
+  confirmed independently: all 56 replies carried the same `resets_at` *to the second* while
+  usage rose 68 % → 78 %. The two bullets above still hold, but the **fingerprint carries less
+  of the load than the wording implies**, and a port written from this section alone would
+  over-trust it: only 2 of 26 distinct fingerprints repeated (each for one ~5 min cached hold),
+  while between those holds runs of 8–16 consecutive replies each returned a *novel* microsecond
+  value. Of the two usage regressions observed, the fingerprint dedup (ingest rule 2) caught one
+  and missed the other — **the monotone envelope (ingest rule 3) is the primary defence against
+  replica skew; dedup is an optimisation on top of it.** Both mechanisms stay as specified. The
+  20-min fingerprint-stale rule is unaffected (longest unchanged run observed: ~5 min).
 - **Staircase jumps.** After a frozen stretch, usage can jump 11 points in one step.
 
 ## Ingest (per window; session W = 300 min, weekly W = 10 080 min)
@@ -164,6 +175,23 @@ The alarm is never a function of `P` alone. At 90 % with 5 min left and no furth
 `rem = 10 ≤ 10` already reads Tight from the raw table itself — grace has nothing left to lower
 it to Safe even if it still could. At 60 % burning 0.6 %/min with 4 h left, the shortfall is
 ~173 min, so that's DryEarly.
+
+**No-shortfall clamp** (added 2026-09-19, from the running macOS app; applied live like grace,
+before it): a committed **DryEarly whose current forecast shows no shortfall at all** is
+contradicted by its own live numbers, and rendering it unchanged states a falsehood. Observed in
+the app as "⚠ Kvoten tar slut sön kl 00:52" over "**0 s** före reset kl 23:20" — a depletion
+falling *after* the reset, paired with a shortfall of zero, while hysteresis still held DryEarly
+from an earlier, faster pace.
+
+Hysteresis is right to hold the verdict (the pace really was that high, and flapping is worse),
+so the clamp does not clear it: it lowers DryEarly one step to **Tight**, which is exactly "the
+pace is straining but on current numbers it reaches the reset". Like every cap here it can only
+lower severity, never raise it, and it never produces Safe. It applies only when there is
+genuinely no blockage — `shortfall < 1 min` **and** `rem > 3` — so DryEarly's other trigger
+(`rem ≤ 3`) is untouched.
+
+**Windows has the same gap** (`PanelText.ComposeDryEarly` formats `Shortfall` unconditionally)
+and is not yet fixed; the Swift side is (`GraceCap.ApplyNoShortfall`).
 
 **Hysteresis** (on *accepted* observations, never on a poll tick, a duplicate/deduped sample, or
 a transport failure):

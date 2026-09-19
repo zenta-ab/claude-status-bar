@@ -73,3 +73,66 @@ struct StatusItemControllerTests {
                         state: .safe, freshness: .live)
     }
 }
+
+/// The panel must lay out against whatever width it is GIVEN, not a hardcoded one. Drawing
+/// against the constant while `NSPopover` sized the view itself is what produced a left margin
+/// and a right margin that did not match — and, once the popover and a hand-set frame started
+/// fighting over the size on every 1 Hz tick, a panel that visibly jumped between the two.
+@Suite("Panel layout")
+@MainActor
+struct PanelLayoutTests {
+
+    private func panel(width: CGFloat) -> PanelView {
+        let view = PanelView(frame: NSRect(x: 0, y: 0, width: width, height: 400))
+        view.update(label: "Konto", view: .initial, others: [], now: Date(), timeZone: .current)
+        view.frame = NSRect(x: 0, y: 0, width: width, height: view.measuredHeight(for: width))
+        return view
+    }
+
+    /// Render and find the leftmost and rightmost drawn pixel. Both margins must match, at every
+    /// width — that is the property the bug violated.
+    private func inkMargins(_ view: PanelView) -> (left: CGFloat, right: CGFloat)? {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let width = rep.pixelsWide, height = rep.pixelsHigh
+        var leftmost = width, rightmost = -1
+        for y in 0..<height {
+            for x in 0..<width {
+                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.05 else { continue }
+                leftmost = min(leftmost, x)
+                rightmost = max(rightmost, x)
+            }
+        }
+        guard rightmost >= 0 else { return nil }
+        let scale = CGFloat(width) / view.bounds.width
+        return (CGFloat(leftmost) / scale, (CGFloat(width - 1 - rightmost)) / scale)
+    }
+
+    @Test("the left and right margins match, at every width it might be given",
+          arguments: [300.0, 340.0, 380.0, 420.0])
+    func marginsMatchAtAnyWidth(_ width: Double) throws {
+        let view = panel(width: CGFloat(width))
+        let margins = try #require(inkMargins(view))
+        #expect(abs(margins.left - margins.right) <= 1.5,
+                "asymmetric at \(width) pt: left \(margins.left), right \(margins.right)")
+        #expect(margins.left >= 8, "content is flush against the left edge at \(width) pt")
+    }
+
+    /// Height must follow the width it is measured for, not a cached one — otherwise the popover
+    /// is told a size that does not match what gets drawn, and the content is clipped or floats.
+    @Test("measured height responds to the width it is given")
+    func heightFollowsWidth() {
+        let view = panel(width: 340)
+        let narrow = view.measuredHeight(for: 240)
+        let wide = view.measuredHeight(for: 460)
+        #expect(narrow >= wide, "narrower should wrap to at least as tall, got \(narrow) vs \(wide)")
+    }
+
+    @Test("measuring leaves no state behind that changes the next drawing")
+    func measuringIsPure() {
+        let view = panel(width: 340)
+        let first = view.measuredHeight(for: 340)
+        _ = view.measuredHeight(for: 200)
+        #expect(view.measuredHeight(for: 340) == first, "a measurement at another width leaked")
+    }
+}

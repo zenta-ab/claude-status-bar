@@ -10,3 +10,11 @@ obj/
 
 ## Misc
 *.log
+
+## Swift / SwiftPM (src/Mac)
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+Package.resolved

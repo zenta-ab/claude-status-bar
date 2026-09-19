@@ -1,3 +1,19 @@
 #!/bin/sh
 # Blocks commits containing personal data. Bypass with --no-verify only if you are certain.
-exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check-privacy.ps1"
+#
+# Runs whichever checker this machine can actually execute. The hook used to exec powershell
+# unconditionally, so on a Mac it failed open and committed unchecked -- see docs/mac-port.md,
+# "Phase 1 ... Repo hygiene".
+set -e
+REPO=$(git rev-parse --show-toplevel)
+
+if command -v powershell >/dev/null 2>&1; then
+    exec powershell -NoProfile -ExecutionPolicy Bypass -File "$REPO/scripts/check-privacy.ps1"
+elif command -v pwsh >/dev/null 2>&1; then
+    exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$REPO/scripts/check-privacy.ps1"
+elif [ -x "$REPO/scripts/check-privacy.sh" ]; then
+    exec "$REPO/scripts/check-privacy.sh"
+else
+    echo "pre-commit: no privacy checker available (need powershell/pwsh or scripts/check-privacy.sh)." >&2
+    exit 1
+fi

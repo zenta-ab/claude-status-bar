@@ -74,22 +74,34 @@ public static class AccountLabel
     /// appended in parentheses; any label still colliding after that (same org, same plan) gets
     /// the email local part appended too. Order is preserved; accounts whose base label was
     /// already unique come back unchanged.
+    ///
+    /// <paramref name="isDuplicate"/> (docs/multi-account.md "Duplicate accounts", Model/
+    /// AccountDuplicates.cs): accounts flagged true never participate in the collision counting
+    /// in EITHER direction -- they can't collide with anything, and nothing else is considered
+    /// colliding with them. This pass exists for DIFFERENT accounts that happen to share a
+    /// label, never for two rows tracking the SAME login; a true duplicate's row is replaced
+    /// entirely by StatusBarApplicationContext (Ui/PanelText.ComposeDuplicateAccountRow), so its
+    /// own returned label here is never actually shown. Null (the default) treats every account
+    /// as a normal participant, exactly like before this parameter existed.
     /// </summary>
-    public static IReadOnlyList<string> Disambiguate(IReadOnlyList<AccountLabelInput> accounts)
+    public static IReadOnlyList<string> Disambiguate(IReadOnlyList<AccountLabelInput> accounts, IReadOnlyList<bool>? isDuplicate = null)
     {
         int n = accounts.Count;
         var baseLabels = new string[n];
         for (int i = 0; i < n; i++)
             baseLabels[i] = Resolve(accounts[i], i);
 
-        bool[] dup = DuplicateMask(baseLabels);
+        var participates = new bool[n];
+        for (int i = 0; i < n; i++) participates[i] = isDuplicate is null || !isDuplicate[i];
+
+        bool[] dup = DuplicateMask(baseLabels, participates);
         if (!Array.Exists(dup, x => x)) return baseLabels;
 
         var withPlan = new string[n];
         for (int i = 0; i < n; i++)
             withPlan[i] = dup[i] ? Suffix(baseLabels[i], TitleCasePlan(accounts[i].SubscriptionType)) : baseLabels[i];
 
-        bool[] stillDup = DuplicateMask(withPlan);
+        bool[] stillDup = DuplicateMask(withPlan, participates);
         if (!Array.Exists(stillDup, x => x)) return withPlan;
 
         var final = new string[n];
@@ -107,10 +119,15 @@ public static class AccountLabel
 
     static string Suffix(string label, string? extra) => string.IsNullOrEmpty(extra) ? label : $"{label} ({extra})";
 
-    static bool[] DuplicateMask(string[] labels)
+    static bool[] DuplicateMask(string[] labels, bool[] participates)
     {
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (string l in labels) counts[l] = counts.GetValueOrDefault(l) + 1;
-        return Array.ConvertAll(labels, l => counts[l] > 1);
+        for (int i = 0; i < labels.Length; i++)
+            if (participates[i]) counts[labels[i]] = counts.GetValueOrDefault(labels[i]) + 1;
+
+        var result = new bool[labels.Length];
+        for (int i = 0; i < labels.Length; i++)
+            result[i] = participates[i] && counts.GetValueOrDefault(labels[i]) > 1;
+        return result;
     }
 }

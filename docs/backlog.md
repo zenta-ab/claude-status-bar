@@ -28,3 +28,15 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
   taskbar is dark; low priority).
 - `PanelAnchor` reads `NotifyIcon` private fields via reflection. It falls back to bottom-right if a
   .NET update breaks it.
+
+## From the statistics round (2026-09-21)
+- **Canonical window key in the live tracker.** Codex statistics finding #19 (the ±120 s jitter
+  tolerance can ratchet if every new key is compared to the latest one) was fixed in backfill only.
+  `WindowTracker`'s live rollover classification still compares against the most recent deadline.
+  Real jitter is sub-second, so this needs a deliberately drifting server to fire, but the two paths
+  should agree.
+- **Cross-process writer lock.** `CsvFileLock` is in-process. Backfill and a running app are kept
+  apart by stopping the app first; a second app instance (or the Mac app on a shared folder) is not
+  covered. A named mutex or a lock file would close it.
+- **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
+  and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.

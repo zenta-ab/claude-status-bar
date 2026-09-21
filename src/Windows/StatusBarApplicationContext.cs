@@ -62,8 +62,20 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     static readonly TimeSpan ShutdownDeadline = TimeSpan.FromSeconds(5);
     const int DemoMaxIcons = 3;
 
-    /// <summary>One account as the display/icon-selection layer needs it: a label (null keeps the single-account panel/tooltip pixel-identical) and its last QuotaView.</summary>
-    readonly record struct DisplayAccount(string? Label, QuotaView View);
+    /// <summary>
+    /// One account as the display/icon-selection layer needs it: a label (null keeps the
+    /// single-account panel/tooltip pixel-identical) and its last QuotaView.
+    ///
+    /// IsDuplicate/DuplicateRow (docs/multi-account.md "Duplicate accounts", live mode only --
+    /// demo frames never contain a duplicate): when IsDuplicate is true this account never gets a
+    /// tray icon or becomes the binding/default account (RenderAccounts/
+    /// EffectiveDefaultPanelAccountIndex both treat it as ineligible), and DuplicateRow is the
+    /// pre-built explanatory row (Ui/PanelText.ComposeDuplicateAccountRow) RenderAccounts uses in
+    /// its "other accounts" list INSTEAD OF the normal verdict row. DuplicateSuffix is the short
+    /// tooltip-only note the account THIS ONE duplicates gets appended to its icon tooltip
+    /// (never its panel header label -- see RenderAccounts' icon-update loop).
+    /// </summary>
+    readonly record struct DisplayAccount(string? Label, QuotaView View, bool IsDuplicate = false, OtherAccountRow? DuplicateRow = null, string? DuplicateSuffix = null);
 
     /// <summary>One step of the --demo / --capture-states cycle: either a legacy single-account state (Accounts.Count == 1, Label null) or a MultiAccountDemoSource frame.</summary>
     readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex);
@@ -77,6 +89,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     readonly Dictionary<int, TrayIconHandle> _iconsByIndex = new();
     readonly ContextMenuStrip _trayMenu;
     readonly ToolStripMenuItem _toggleModeItem;
+    StatisticsForm? _statisticsForm;
 
     AccountsConfig _accountsConfig = AccountsConfig.Default();
     AccountDisplayMode _displayMode = AccountDisplayMode.PerAccount;
@@ -99,6 +112,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         _panel = new PanelForm();
         _panel.OtherAccountClicked += FocusAccount;
         _panel.RefreshRequested += OnRefreshRequested;
+        _panel.AdviceClicked += () => OpenStatisticsWindow();
 
         _evalTimer = new System.Windows.Forms.Timer { Interval = (int)EvalTickInterval.TotalMilliseconds };
         _evalTimer.Tick += (_, _) => SafeTick();
@@ -118,6 +132,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             _maxIcons = Math.Max(1, _accountsConfig.MaxIcons);
             UpdateToggleModeItemText();
 
+            RunStatisticsBackfillOnceInBackground();
+
             int index = 0;
             foreach (AccountEntry entry in _accountsConfig.Accounts)
             {
@@ -134,7 +150,12 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             // going missing must never stop any other account's polling or eval loop.
             foreach (AccountRuntime account in _accounts) account.Start();
 
-            RenderAccounts(_accounts.Select(a => new DisplayAccount(null, a.LastView)).ToList(), _displayMode, _maxIcons);
+            // AccountRuntime's constructor already reads Identity synchronously, so two accounts
+            // configured to the same already-logged-in identity are detectable before the first
+            // eval tick -- run the duplicate pass once here too, or the very first render would
+            // briefly show two identical icons before Tick() caught up a second later.
+            RefreshDuplicates();
+            RenderAccounts(BuildLiveDisplayAccounts(), _displayMode, _maxIcons);
         }
 
         _evalTimer.Start();
@@ -155,6 +176,37 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// docs/statistics.md, decision 5: derives cycles.csv/hourly-*.csv from the window-shape
+    /// history already on disk, once per install/update -- gated by a marker file so an ordinary
+    /// restart (this app relaunches often) never re-scans months of CSVs. Re-running is always
+    /// safe regardless (StatisticsBackfill.Run merges by key, never duplicates), so a missing or
+    /// corrupt marker just means it runs again next launch -- never a correctness problem, only
+    /// a bit of wasted work. Runs on a background thread and never touches the UI: a slow disk
+    /// scan must not delay the first poll or the first icon paint.
+    /// </summary>
+    static void RunStatisticsBackfillOnceInBackground()
+    {
+        string baseLogDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "logs");
+        string marker = Path.Combine(baseLogDir, ".statistics-backfilled");
+        if (File.Exists(marker)) return;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(baseLogDir);
+                StatisticsBackfill.Run(baseLogDir);
+                File.WriteAllText(marker, DateTimeOffset.UtcNow.ToString("O"));
+            }
+            catch
+            {
+                // best-effort, like every other disk-logging path in this app.
+            }
+        });
+    }
+
     // ---- tray menu (docs/multi-account.md, the task's "Tray context menu" item) ----
 
     (ContextMenuStrip Menu, ToolStripMenuItem ToggleItem) BuildTrayMenu()
@@ -172,13 +224,96 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         var toggleItem = new ToolStripMenuItem { ForeColor = DarkMenuColors.Foreground };
         toggleItem.Click += (_, _) => ToggleDisplayMode();
 
+        var statisticsItem = new ToolStripMenuItem("Statistik…") { ForeColor = DarkMenuColors.Foreground };
+        statisticsItem.Click += (_, _) => OpenStatisticsWindow();
+
         var exitItem = new ToolStripMenuItem("Exit") { ForeColor = DarkMenuColors.Foreground };
         exitItem.Click += (_, _) => ExitApp();
 
         menu.Items.Add(showPanelItem);
         menu.Items.Add(toggleItem);
+        menu.Items.Add(statisticsItem);
         menu.Items.Add(exitItem);
         return (menu, toggleItem);
+    }
+
+    /// <summary>
+    /// docs/statistics.md decision 4, the task's item 1: opens the statistics window (a real,
+    /// focusable top-level window, unlike the panel) for whichever accounts are currently
+    /// configured -- demo mode gets the two synthetic scenarios (Model/StatisticsDemoData)
+    /// written to a scratch log directory so the window's own IO-reading code path (Data/
+    /// StatisticsDataLoader) never needs a demo-only branch; live mode points it at every real
+    /// account's own log directory. Reuses one instance across opens (recreated only if the
+    /// account set changed shape or the previous instance was closed/disposed).
+    /// </summary>
+    public void OpenStatisticsWindow(int? forcedAccountIndex = null)
+    {
+        try
+        {
+            if (_statisticsForm is null || _statisticsForm.IsDisposed)
+                _statisticsForm = BuildStatisticsForm();
+
+            if (!_statisticsForm.Visible) _statisticsForm.Show();
+            _statisticsForm.WindowState = FormWindowState.Normal;
+            _statisticsForm.Activate();
+            _statisticsForm.Reload();
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"OpenStatisticsWindow failed: {ex.Message}");
+        }
+    }
+
+    StatisticsForm BuildStatisticsForm()
+    {
+        // The task's duplicate-aware fix: a duplicate account (docs/multi-account.md, same
+        // AccountIdentity.StateKey as an earlier one in config order -- Model/AccountDuplicates.cs)
+        // must show up exactly once here too, the same "keep only the first" rule the tray/panel
+        // already apply via AccountRuntime.IsDuplicate -- never a second identical selector entry
+        // for what is really one login.
+        IReadOnlyList<StatisticsForm.AccountRef> refs = _demoMode
+            ? BuildDemoStatisticsAccountRefs(DateTimeOffset.UtcNow)
+            : _accounts
+                .Select((a, i) => (Account: a, Index: i))
+                .Where(x => !x.Account.IsDuplicate)
+                .Select(x => new StatisticsForm.AccountRef(
+                    StatisticsDataLoader.ResolveAccountLabel(x.Account.Label, new AccountLabelInput(x.Account.OverrideLabel, x.Account.Identity, x.Account.SubscriptionType), x.Account.CurrentLogDir, x.Index),
+                    x.Account.CurrentLogDir, x.Account.IdentityKey ?? "_pending"))
+                .ToList();
+        return new StatisticsForm(refs, TimeZoneInfo.Local);
+    }
+
+    /// <summary>
+    /// The task's demo/capture item: writes Model/StatisticsDemoData's two synthetic scenarios to
+    /// a scratch directory under Path.GetTempPath() (never the user's real %LOCALAPPDATA%\
+    /// ClaudeStatusBar\logs) via the exact same CycleArchiveCsv/HourlyRollupCsv writers the live
+    /// app uses, so the statistics window's normal disk-reading path (StatisticsDataLoader) is
+    /// exercised unchanged -- no demo-only branch inside the window itself.
+    /// </summary>
+    static IReadOnlyList<StatisticsForm.AccountRef> BuildDemoStatisticsAccountRefs(DateTimeOffset utcNow)
+    {
+        TimeZoneInfo tz = TimeZoneInfo.Local;
+        string scratchRoot = Path.Combine(Path.GetTempPath(), "ClaudeStatusBarDemoStats", Guid.NewGuid().ToString("N"));
+
+        string freshDir = Path.Combine(scratchRoot, "fresh-install");
+        WriteDemoAccount(freshDir, StatisticsDemoData.BuildFreshInstall(utcNow, tz));
+
+        string yearDir = Path.Combine(scratchRoot, "full-year");
+        WriteDemoAccount(yearDir, StatisticsDemoData.BuildFullYear(utcNow, tz));
+
+        return new[]
+        {
+            new StatisticsForm.AccountRef("Nyinstallerad (2 veckor)", freshDir, StatisticsDemoData.AccountKey),
+            new StatisticsForm.AccountRef("Ett år av data", yearDir, StatisticsDemoData.AccountKey),
+        };
+    }
+
+    static void WriteDemoAccount(string dir, StatisticsDemoData.DemoAccountData data)
+    {
+        Directory.CreateDirectory(dir);
+        CycleArchiveCsv.WriteAllAtomically(Path.Combine(dir, CycleArchiveCsv.FileName), data.Cycles);
+        foreach (IGrouping<int, HourlyRollupCsv.Row> yearGroup in data.Hours.GroupBy(h => h.HourStartUtc.UtcDateTime.Year))
+            HourlyRollupCsv.WriteAllAtomically(dir, yearGroup.Key, yearGroup);
     }
 
     /// <summary>Which account "Visa panel" opens on when it wasn't reached through a specific icon's own right-click: whichever icon was last right-clicked, else the current display-mode default.</summary>
@@ -192,7 +327,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     IReadOnlyList<DisplayAccount> CurrentDisplayAccounts() =>
         _demoMode
             ? (_demoFrames.Count > 0 ? _demoFrames[_demoIndex % _demoFrames.Count].Accounts : Array.Empty<DisplayAccount>())
-            : _accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList();
+            : BuildLiveDisplayAccounts();
 
     /// <summary>docs/multi-account.md's context-menu toggle: writes displayMode to accounts.json and applies immediately.</summary>
     void ToggleDisplayMode()
@@ -200,7 +335,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         _displayMode = _displayMode == AccountDisplayMode.PerAccount ? AccountDisplayMode.Binding : AccountDisplayMode.PerAccount;
         UpdateToggleModeItemText();
         PersistDisplayMode();
-        if (!_demoMode) RenderAccounts(_accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList(), _displayMode, _maxIcons);
+        if (!_demoMode) RenderAccounts(BuildLiveDisplayAccounts(), _displayMode, _maxIcons);
     }
 
     /// <summary>Shows the ACTION the click would perform (what mode you'd switch TO), the common toggle-item idiom.</summary>
@@ -254,10 +389,73 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         long monoMs = Environment.TickCount64;
         foreach (AccountRuntime account in _accounts) account.Evaluate(utcNow, monoMs);
+        RefreshDuplicates();
         RefreshDisambiguatedLabels();
 
-        var current = _accounts.Select(a => new DisplayAccount(_accounts.Count > 1 ? a.Label : null, a.LastView)).ToList();
-        RenderAccounts(current, _displayMode, _maxIcons);
+        RenderAccounts(BuildLiveDisplayAccounts(), _displayMode, _maxIcons);
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Duplicate accounts": detects every account whose AccountIdentity.
+    /// StateKey now matches an earlier one in config order (Model/AccountDuplicates.Detect, the
+    /// pure grouping rule) and applies the verdict to each AccountRuntime.SetDuplicate. A
+    /// duplicate's own poll (and therefore its own SyncIdentityIfChanged) is stopped while it
+    /// stays marked, so its identity is refreshed straight from disk here instead -- otherwise a
+    /// login change made directly in its config directory could never be noticed, and the
+    /// duplicate could never resolve on its own. No-op with 0 or 1 accounts (nothing to compare).
+    /// </summary>
+    void RefreshDuplicates()
+    {
+        if (_accounts.Count < 2) return;
+
+        foreach (AccountRuntime account in _accounts)
+            if (account.IsDuplicate) account.RefreshIdentityOnly();
+
+        IReadOnlyList<AccountDuplicates.Result> results =
+            AccountDuplicates.Detect(_accounts.Select(a => a.Identity?.StateKey).ToList());
+        for (int i = 0; i < _accounts.Count; i++)
+            _accounts[i].SetDuplicate(results[i].IsDuplicate, results[i].DuplicateOfIndex);
+    }
+
+    /// <summary>
+    /// Builds the live-mode DisplayAccount list RenderAccounts/CurrentDisplayAccounts consume:
+    /// label (single-account-shaped when there is only one), last view, and -- for a confirmed
+    /// duplicate (docs/multi-account.md "Duplicate accounts") -- the pre-built explanatory
+    /// "other accounts" row plus, for whichever account IT duplicates, a short tooltip-only
+    /// suffix (never touching that account's panel-header Label).
+    /// </summary>
+    List<DisplayAccount> BuildLiveDisplayAccounts()
+    {
+        bool multi = _accounts.Count > 1;
+        var result = new List<DisplayAccount>(_accounts.Count);
+        for (int i = 0; i < _accounts.Count; i++)
+        {
+            AccountRuntime a = _accounts[i];
+            OtherAccountRow? dupRow = a.IsDuplicate
+                ? PanelText.ComposeDuplicateAccountRow(i, a.DuplicateOfIndex ?? 0, KeptAccountLabel(a.DuplicateOfIndex), a.ConfigDir)
+                : null;
+            string? suffix = a.IsDuplicate ? null : BuildDuplicateSuffix(i);
+            result.Add(new DisplayAccount(multi ? a.Label : null, a.LastView, a.IsDuplicate, dupRow, suffix));
+        }
+        return result;
+    }
+
+    string KeptAccountLabel(int? index) =>
+        index is { } k && k >= 0 && k < _accounts.Count ? (_accounts[k].Label ?? $"Konto {k + 1}") : "okänt konto";
+
+    /// <summary>The short tooltip-only note ("first account's tooltip gets a short suffix noting the duplicate") for whichever account at `keptIndex` one or more other accounts currently duplicate. Null when nothing duplicates it.</summary>
+    string? BuildDuplicateSuffix(int keptIndex)
+    {
+        List<int>? dupIndices = null;
+        for (int i = 0; i < _accounts.Count; i++)
+        {
+            if (!_accounts[i].IsDuplicate || _accounts[i].DuplicateOfIndex != keptIndex) continue;
+            (dupIndices ??= new List<int>()).Add(i);
+        }
+        if (dupIndices is null) return null;
+
+        string list = string.Join(", ", dupIndices.Select(i => (i + 1).ToString(CultureInfo.InvariantCulture)));
+        return dupIndices.Count == 1 ? $" · dublett: konto {list}" : $" · dubbletter: konto {list}";
     }
 
     void PushCurrentDemoFrame()
@@ -284,9 +482,16 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        if (_explicitPanelAccountIndex is { } exp && exp >= current.Count) _explicitPanelAccountIndex = null;
+        // A duplicate (docs/multi-account.md "Duplicate accounts") is never a valid explicit
+        // panel target -- it has no separate icon to have been reached through, and nothing of
+        // its own worth pinning the panel to; fall back to the display mode's own default,
+        // exactly like an out-of-range index already does.
+        if (_explicitPanelAccountIndex is { } exp && (exp >= current.Count || current[exp].IsDuplicate))
+            _explicitPanelAccountIndex = null;
 
-        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(true, a.View)).ToList();
+        // Candidate.Enabled doubles as "eligible for a tray icon" here: a confirmed duplicate is
+        // never one, in EITHER display mode (it can never win binding selection either).
+        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(!a.IsDuplicate, a.View)).ToList();
         IReadOnlyList<int> desired = current.Count == 0
             ? Array.Empty<int>()
             : AccountDisplayPlan.SelectIconAccounts(candidates, mode, Math.Max(1, maxIcons), now);
@@ -310,7 +515,15 @@ public sealed class StatusBarApplicationContext : ApplicationContext
 
         bool multi = current.Count > 1;
         foreach ((int idx, TrayIconHandle handle) in _iconsByIndex)
-            handle.Slot.Update(current[idx].View, multi ? current[idx].Label : null);
+        {
+            // The kept account of a duplicate group gets a short tooltip-only suffix (docs/
+            // multi-account.md "Duplicate accounts") -- appended here, never to current[idx].Label
+            // itself, so the panel header (which reuses that same Label) stays unaffected.
+            string? tooltipLabel = multi && current[idx].Label is { } label
+                ? label + current[idx].DuplicateSuffix
+                : null;
+            handle.Slot.Update(current[idx].View, tooltipLabel);
+        }
 
         if (current.Count == 0)
         {
@@ -328,7 +541,10 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             ? current
                 .Select((a, i) => (a, i))
                 .Where(t => t.i != panelIndex)
-                .Select(t => PanelText.ComposeOtherAccountRow(t.i, t.a.Label ?? $"Konto {t.i + 1}", t.a.View, now, TimeZoneInfo.Local))
+                // A duplicate's pre-built DuplicateRow (docs/multi-account.md "Duplicate
+                // accounts") replaces the normal verdict row entirely -- there is nothing to poll
+                // for it any more, so there is no verdict to show.
+                .Select(t => t.a.DuplicateRow ?? PanelText.ComposeOtherAccountRow(t.i, t.a.Label ?? $"Konto {t.i + 1}", t.a.View, now, TimeZoneInfo.Local))
                 .ToList()
             : Array.Empty<OtherAccountRow>();
 
@@ -339,7 +555,11 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         // just started is actually still running.
         bool refreshInFlight = !_demoMode && panelIndex < _accounts.Count && _accounts[panelIndex].IsPolling;
 
-        _panel.UpdateView(shown.View, _demoMode, multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null, otherRows, refreshInFlight);
+        // docs/statistics.md decision 4 "Proactive advice": never in demo mode (there is no
+        // AccountRuntime driving it there) or with no account shown.
+        string? adviceLine = !_demoMode && panelIndex < _accounts.Count ? _accounts[panelIndex].AdviceLine : null;
+
+        _panel.UpdateView(shown.View, _demoMode, multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null, otherRows, refreshInFlight, adviceLine);
         _panel.SetAnchorIcon(_iconsByIndex.TryGetValue(panelIndex, out TrayIconHandle? anchorHandle)
             ? anchorHandle.NotifyIcon
             : _iconsByIndex.Values.Select(h => h.NotifyIcon).FirstOrDefault());
@@ -360,17 +580,22 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         if (_shownAccountIndex is not { } idx || idx < 0 || idx >= _accounts.Count) return;
 
         AccountRuntime account = _accounts[idx];
+        // Defensive (docs/multi-account.md "Duplicate accounts"): _shownAccountIndex should never
+        // point at a duplicate -- RenderAccounts resets _explicitPanelAccountIndex away from one
+        // -- but a duplicate account can never be usefully refreshed (AccountRuntime.PollAsync's
+        // own IsDuplicate guard would just no-op it anyway), so skip even scheduling the call.
+        if (account.IsDuplicate) return;
         if (!account.IsPolling) _ = account.RequestImmediateRefresh();
         Tick();
     }
 
-    /// <summary>docs/multi-account.md "Display": in binding mode the default focus is the binding account itself; otherwise the first configured account.</summary>
+    /// <summary>docs/multi-account.md "Display": in binding mode the default focus is the binding account itself; otherwise the first configured account. A confirmed duplicate (Model/AccountDuplicates.cs) is never eligible in either mode -- see RenderAccounts' own candidates list for why config order's index 0 itself can never be one.</summary>
     static int? EffectiveDefaultPanelAccountIndex(IReadOnlyList<DisplayAccount> current, AccountDisplayMode mode, DateTimeOffset now)
     {
         if (current.Count == 0) return null;
         if (mode != AccountDisplayMode.Binding) return 0;
 
-        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(true, a.View)).ToList();
+        var candidates = current.Select(a => new AccountDisplayPlan.Candidate(!a.IsDuplicate, a.View)).ToList();
         return AccountDisplayPlan.SelectBinding(candidates, now) ?? 0;
     }
 
@@ -379,9 +604,20 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// account; clicking an "other accounts" row switches to that account. If the panel is
     /// already open on this exact account, this click closes it instead (the existing
     /// single-icon toggle behaviour), so a click doesn't reopen what it just closed.
+    ///
+    /// docs/multi-account.md "Duplicate accounts": a duplicate's own "other accounts" row is the
+    /// explanatory message, not a normal navigation target -- clicking it redirects to the
+    /// account it duplicates instead of focusing a stopped, unpolled account that has nothing to
+    /// show.
     /// </summary>
     void FocusAccount(int accountIndex)
     {
+        if (accountIndex >= 0 && accountIndex < _accounts.Count
+            && _accounts[accountIndex] is { IsDuplicate: true, DuplicateOfIndex: { } keptIndex })
+        {
+            accountIndex = keptIndex;
+        }
+
         if (_panel.Visible && _explicitPanelAccountIndex == accountIndex) { _panel.Toggle(); return; }
         _explicitPanelAccountIndex = accountIndex;
         if (!_panel.Visible) _panel.ShowPanel();
@@ -399,7 +635,13 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         var inputs = _accounts
             .Select(a => new AccountLabelInput(a.OverrideLabel, a.Identity, a.SubscriptionType))
             .ToList();
-        IReadOnlyList<string> labels = AccountLabel.Disambiguate(inputs);
+        // isDuplicate (docs/multi-account.md "Duplicate accounts"): a true duplicate never needs
+        // a distinguishing label -- it isn't a second account that happens to share a label with
+        // another, it's the SAME login, and its row is replaced entirely by
+        // Ui/PanelText.ComposeDuplicateAccountRow, so whatever label it comes back with here is
+        // never shown anyway.
+        var isDuplicate = _accounts.Select(a => a.IsDuplicate).ToList();
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(inputs, isDuplicate);
         for (int i = 0; i < _accounts.Count; i++) _accounts[i].ApplyDisambiguatedLabel(labels[i]);
     }
 
@@ -498,6 +740,78 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         bmp.Save(Path.Combine(dir, $"{name}.png"), ImageFormat.Png);
     }
 
+    /// <summary>
+    /// The task's demo/capture item: renders the statistics window to in-memory bitmaps via
+    /// DrawToBitmap (never CopyFromScreen -- a locked/inactive session cannot be screen-captured
+    /// at all, which is exactly what broke the earlier attempt this task's own notes describe).
+    /// Demo mode captures BOTH required scenarios (a fresh install, mostly in the learning state,
+    /// and a full year, fully unlocked) as "learning.png"/"unlocked.png"; live mode captures the
+    /// real window for the real account(s) as "real.png" -- the honest result with however little
+    /// history actually exists on this machine. Exits the app when done, mirroring
+    /// RunAutomatedCapture's own capture-then-exit contract.
+    /// </summary>
+    public void RunStatisticsCapture(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+            if (!_demoMode) WaitForFirstPollsToLand();
+            using StatisticsForm form = BuildStatisticsForm();
+            if (_demoMode)
+            {
+                form.SelectAccount(0); // fresh install -- default "2 veckor" preset is exactly the scenario's own story
+                SaveStatisticsCapture(form, Path.Combine(dir, "learning.png"));
+                form.SelectAccount(1); // a full year of data -- "År" is the period that actually shows everything unlocked
+                form.SelectPeriod(StatisticsPeriod.Year);
+                SaveStatisticsCapture(form, Path.Combine(dir, "unlocked.png"));
+            }
+            else
+            {
+                SaveStatisticsCapture(form, Path.Combine(dir, "real.png"));
+            }
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"RunStatisticsCapture failed: {ex.Message}");
+        }
+        ExitApp();
+    }
+
+    static void SaveStatisticsCapture(StatisticsForm form, string path)
+    {
+        using Bitmap bmp = form.CaptureFullContent();
+        bmp.Save(path, ImageFormat.Png);
+    }
+
+    /// <summary>
+    /// Task item 4's other half of the fix: RunStatisticsCapture runs BEFORE Application.Run ever
+    /// pumps a message (this class's own RunStatisticsCapture doc comment explains why --
+    /// DrawToBitmap doesn't need a message loop). But AccountRuntime.PollAsync's completion DOES:
+    /// it lands on the UI thread via _uiContext.Post (a queued window message), which only ever
+    /// runs while something pumps the queue. Without this wait, every capture ran before ANY
+    /// account's first poll could apply its SubscriptionType, so AccountLabel.Resolve had no
+    /// plan tier to fall back on and produced the email-local-part label the task's real
+    /// screenshot caught -- while the tray/panel, which always run under a real Application.Run
+    /// pump, never hit this. Pumps with Application.DoEvents (never Application.Run -- that would
+    /// start a second, nested message loop this method's caller does not expect) for up to the
+    /// same ~3s the --show-panel path already waits (README: first get_usage takes ~1.1-1.6s),
+    /// then applies the whole-set disambiguation pass so a multi-account capture also matches the
+    /// tray's own disambiguated labels, not just each account's un-disambiguated base label. Best
+    /// effort: an account whose channel never comes up within the wait still gets captured (its
+    /// label falls back to on-disk data instead -- see StatisticsDataLoader.ResolveAccountLabel).
+    /// </summary>
+    void WaitForFirstPollsToLand()
+    {
+        if (_accounts.Count == 0) return;
+        DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline && _accounts.Any(a => a.SubscriptionType == null))
+        {
+            Application.DoEvents();
+            System.Threading.Thread.Sleep(50);
+        }
+        RefreshDisambiguatedLabels();
+    }
+
     /// <summary>All 8 demo states x 4 sizes x 2 backgrounds, 8x nearest-neighbour scaled, composed in-memory (no window, no screen capture needed). Icon renders are single-account-shaped by design -- unrelated to the multi-account panel captures above.</summary>
     static void SaveIconSheet(IReadOnlyList<DemoQuotaSource.DemoState> states, string path)
     {
@@ -581,6 +895,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         // finishes the rest (tick timer, fonts) before anything below can block.
         try { _panel.HidePanel(); } catch (Exception ex) { SafeLog.Warn($"HidePanel during shutdown threw: {ex.Message}"); }
         try { _panel.Dispose(); } catch (Exception ex) { SafeLog.Warn($"Panel.Dispose during shutdown threw: {ex.Message}"); }
+        try { _statisticsForm?.Dispose(); } catch (Exception ex) { SafeLog.Warn($"StatisticsForm.Dispose during shutdown threw: {ex.Message}"); }
 
         try { _evalTimer.Stop(); _evalTimer.Dispose(); } catch { /* best effort */ }
         try { _demoTimer?.Stop(); _demoTimer?.Dispose(); } catch { /* best effort */ }

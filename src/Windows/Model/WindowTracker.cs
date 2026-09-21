@@ -11,6 +11,11 @@ public enum MeasuringReasonCode
     TooLittleUsage, // P &lt; 3
     AwaitingReset, // resets_at has passed but no new window has been observed yet (review decision, "sleep across a reset")
     DataMissing,   // this window was absent/invalid in the latest successful poll (decision 13)
+    /// The server reported this window as CLOSED: a valid percentage, no resets_at, is_active
+    /// false. Distinct from DataMissing -- the data is present and says "nothing is running",
+    /// which is an answer, not an absence (docs/forecast-and-states.md, "A closed window is an
+    /// answer, not an absence").
+    WindowInactive,
     ClockJump,     // utcNow is inconsistent with the monotonic anchor (decision 6)
 }
 
@@ -100,6 +105,68 @@ public sealed class WindowTracker
     DateTimeOffset? _pendingRolloverKey;
     int _pendingRolloverCount;
 
+    // ---- Cycle archive bookkeeping (docs/statistics.md), live-tracked only (never during
+    // isReplay=true: warm start seeds the live envelope/rate state, not the archive -- the
+    // archive's own history comes from the dedicated backfill pass over the same CSVs instead,
+    // so replay must not produce a phantom closed cycle/hour or corrupt live coverage timing). ----
+
+    /// <summary>
+    /// Codex review #3/#17: the cadence-based continuity allowance. A gap between two
+    /// consecutive polls (window coverage, hour coverage, OR the envelope/consumption
+    /// re-baseline check below) no larger than this is genuine, continuous observation and
+    /// counts in full; a gap LARGER than this contributes NOTHING -- never capped down to this
+    /// value either (that used to fabricate up to 10 minutes of "coverage" for an outage of any
+    /// length, and used to credit an unobserved jump in the envelope to whichever hour the app
+    /// happened to resume in). Comfortably above every real poll cadence (idle 150s, spent 300s)
+    /// but small enough that a genuine multi-hour gap still shows as (mostly) uncovered.
+    /// </summary>
+    const double ContinuityAllowanceMinutes = 10.0;
+
+    double _coveredMinutes;
+    DateTimeOffset? _lastPollUtcForCoverage;
+    DateTimeOffset? _ceilingReachedAtUtc; // first UTC this window's envelope reached >=100
+    bool _ceilingCensored; // Codex review #14: true when that crossing was only observed after a re-baseline gap -- the true crossing instant is unknown, somewhere inside the gap
+    ClosedWindowInfo? _pendingClosedWindow;
+
+    DateTimeOffset? _hourBucketStartUtc;
+    DateTimeOffset? _hourLastPollUtc;
+    double _hourConsumedPct;
+    int _hourSamples;
+    double _hourCoveredMinutes;
+    ClosedHourInfo? _pendingClosedHour;
+
+    /// <summary>
+    /// docs/statistics.md: one closed WINDOW (session or weekly rollover), as WindowTracker
+    /// itself can observe it -- everything the archive needs that is purely a function of this
+    /// tracker's own envelope/timing. QuotaModel adds the calibration fields (plan tier,
+    /// warned_dry_early, predicted_peak_pct) only it knows, and account_key, which belongs to
+    /// whichever caller owns the account's identity.
+    /// </summary>
+    public readonly record struct ClosedWindowInfo(
+        DateTimeOffset ResetUtc, double WindowMinutes, double PeakPct, double FinalPct,
+        bool HitCeiling, double BlockedMinutes, double CoveredMinutes,
+        DateTimeOffset? CeilingReachedAtUtc = null, bool CeilingReachedCensored = false);
+
+    /// <summary>docs/statistics.md: one closed CLOCK HOUR for this window kind.</summary>
+    public readonly record struct ClosedHourInfo(
+        DateTimeOffset HourStartUtc, double ConsumedPct, int Samples, double CoveredMinutes);
+
+    /// <summary>Returns and clears the window closed by the most recent Ingest call, if any.</summary>
+    public ClosedWindowInfo? TakePendingClosedWindow()
+    {
+        ClosedWindowInfo? result = _pendingClosedWindow;
+        _pendingClosedWindow = null;
+        return result;
+    }
+
+    /// <summary>Returns and clears the clock hour closed by the most recent Ingest call, if any.</summary>
+    public ClosedHourInfo? TakePendingClosedHour()
+    {
+        ClosedHourInfo? result = _pendingClosedHour;
+        _pendingClosedHour = null;
+        return result;
+    }
+
     public WindowTracker(double windowMinutes, double halfLifeMinutes, bool isWeekly = false)
     {
         WindowMinutes = windowMinutes;
@@ -141,6 +208,14 @@ public sealed class WindowTracker
         // nothing else has mutated yet -- fingerprint dedup and the dt check come first.
         bool isRollover = outcome is WindowKeyOutcome.Rollover or WindowKeyOutcome.SafetyValveRollover;
 
+        // Coverage/hour bookkeeping runs for every poll that reaches this point (Cold,
+        // SameWindow or Rollover) -- including one that fingerprint dedup or the ordering
+        // check below will still reject -- because a deduped/out-of-order reply still proves
+        // the app was up and polling at utcNow. A RegressedIgnore/ImplausibleIgnored reply
+        // (already returned above) is rarer replica noise that never advances any window's
+        // clock anyway. Never runs during replay -- see the field block's doc comment.
+        if (!isReplay) TrackPollForCoverageAndHour(utcNow, isRollover);
+
         // Fingerprint dedup only makes sense against the CURRENT window's set, which a
         // rollover is about to clear -- so a rollover's own fingerprint can never collide.
         if (!isRollover && _seenFingerprints.Contains(fingerprint)) return false; // stale cache / replica revert
@@ -172,6 +247,16 @@ public sealed class WindowTracker
 
         ResetsAt = resetsAt;
 
+        // Codex review #3: the first observation of a window (LastAcceptedUtc is still null here
+        // -- either truly cold, or just-rolled-over via ClearForRollover above), and the first
+        // observation after a gap beyond the continuity allowance, re-baselines the envelope: the
+        // jump is real (it still feeds EnvelopeP/PeakPct below) but WHEN within the unobserved
+        // interval it actually happened is unknown, so it must never be credited to this poll's
+        // clock hour as "consumption that happened now". Read BEFORE LastAcceptedUtc is
+        // overwritten at the end of this method; correctly null after ClearForRollover ran above.
+        bool rebaseline = LastAcceptedUtc is not { } lastAcceptedForGap
+            || (utcNow - lastAcceptedForGap).TotalMinutes > ContinuityAllowanceMinutes;
+
         double previousP = EnvelopeP;
         EnvelopeP = Math.Max(EnvelopeP, pct); // monotone envelope: drops are replica skew, never applied
         double dP = EnvelopeP - previousP;
@@ -181,7 +266,23 @@ public sealed class WindowTracker
             if (!isReplay) LastRiseMono = monoMs;
         }
         if (!isReplay)
+        {
             ConfirmedIdleMinutes = LastRiseMono is { } lrm ? Math.Max(0.0, (monoMs - lrm) / 60_000.0) : 0.0;
+
+            // docs/statistics.md: hourly-*.csv's consumed_pct is the sum of positive envelope
+            // deltas in the clock hour, samples counts accepted observations, and the ceiling
+            // timestamp feeds cycles.csv's blocked_minutes. A re-baselining jump (see above)
+            // contributes zero to _hourConsumedPct -- it still counts as a sample, though: the
+            // app WAS observed to be running at utcNow, even if the size of the jump it revealed
+            // cannot be attributed to this specific hour.
+            if (!rebaseline) _hourConsumedPct += Math.Max(0.0, dP);
+            _hourSamples++;
+            if (_ceilingReachedAtUtc is null && EnvelopeP >= 100.0)
+            {
+                _ceilingReachedAtUtc = utcNow;
+                _ceilingCensored = rebaseline; // Codex review #14: exact only under continuous observation, else interval-censored
+            }
+        }
 
         SampleCount++;
 
@@ -213,6 +314,80 @@ public sealed class WindowTracker
     {
         _pendingRolloverKey = null;
         _pendingRolloverCount = 0;
+    }
+
+    /// <summary>
+    /// docs/statistics.md: window-level coverage/closed-window and hour-bucket bookkeeping, run
+    /// for every live poll that reaches this point in Ingest (see the call site's comment for
+    /// exactly which outcomes that is). Two independent concerns share one method only because
+    /// they are both driven by the same utcNow and the same "did a boundary just pass" question:
+    /// </summary>
+    void TrackPollForCoverageAndHour(DateTimeOffset utcNow, bool isRollover)
+    {
+        // ---- window-level: coverage minutes, and the just-closed window if this poll rolled over ----
+        if (isRollover)
+        {
+            if (WindowKey is { } oldKey)
+            {
+                _pendingClosedWindow = new ClosedWindowInfo(
+                    // Codex review #15: FinalPct is the final ENVELOPE value (EnvelopeP), never
+                    // the raw last-accepted reading -- the envelope is exactly what the monotone-
+                    // regression rule already exists to protect, so "final" must go through it too.
+                    ResetUtc: oldKey, WindowMinutes: WindowMinutes, PeakPct: EnvelopeP,
+                    FinalPct: EnvelopeP, HitCeiling: EnvelopeP >= 100.0,
+                    BlockedMinutes: _ceilingReachedAtUtc is { } ca ? Math.Max(0.0, (oldKey - ca).TotalMinutes) : 0.0,
+                    CoveredMinutes: _coveredMinutes,
+                    CeilingReachedAtUtc: _ceilingReachedAtUtc,
+                    CeilingReachedCensored: _ceilingCensored);
+            }
+            _coveredMinutes = 0.0;
+            _ceilingReachedAtUtc = null;
+            _ceilingCensored = false;
+            _lastPollUtcForCoverage = utcNow; // the new window's clock starts now
+        }
+        else
+        {
+            // Codex review #17: a gap no larger than the continuity allowance counts in full;
+            // a LARGER gap contributes zero -- never capped down to the allowance, which used to
+            // fabricate coverage for a real outage of any length.
+            if (_lastPollUtcForCoverage is { } lastPoll && utcNow >= lastPoll)
+            {
+                double gapMinutes = (utcNow - lastPoll).TotalMinutes;
+                if (gapMinutes <= ContinuityAllowanceMinutes) _coveredMinutes += gapMinutes;
+            }
+            if (_lastPollUtcForCoverage is null || utcNow >= _lastPollUtcForCoverage)
+                _lastPollUtcForCoverage = utcNow;
+        }
+
+        // ---- clock-hour bucket: independent of rollover -- a window can roll over mid-hour
+        // and the hour bucket keeps accumulating across it (docs/statistics.md, hourly-*.csv is
+        // "per window kind and clock hour", not per window instance) ----
+        DateTimeOffset hourStart = TruncateToHour(utcNow);
+        if (_hourBucketStartUtc is { } currentHour && currentHour != hourStart)
+        {
+            _pendingClosedHour = new ClosedHourInfo(currentHour, _hourConsumedPct, _hourSamples, _hourCoveredMinutes);
+            _hourBucketStartUtc = hourStart;
+            _hourConsumedPct = 0.0;
+            _hourSamples = 0;
+            _hourCoveredMinutes = 0.0;
+            _hourLastPollUtc = utcNow;
+        }
+        else
+        {
+            _hourBucketStartUtc ??= hourStart;
+            if (_hourLastPollUtc is { } lastHourPoll && utcNow >= lastHourPoll)
+            {
+                double gapMinutes = (utcNow - lastHourPoll).TotalMinutes;
+                if (gapMinutes <= ContinuityAllowanceMinutes) _hourCoveredMinutes += gapMinutes;
+            }
+            _hourLastPollUtc = utcNow;
+        }
+    }
+
+    static DateTimeOffset TruncateToHour(DateTimeOffset utc)
+    {
+        DateTime u = utc.UtcDateTime;
+        return new DateTimeOffset(new DateTime(u.Year, u.Month, u.Day, u.Hour, 0, 0, DateTimeKind.Utc));
     }
 
     enum WindowKeyOutcome { Cold, SameWindow, Rollover, ImplausibleIgnored, SafetyValveRollover, RegressedIgnore }

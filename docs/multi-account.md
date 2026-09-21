@@ -105,6 +105,71 @@ half of a composite `StateKey` independently — `AccountIdentity.KeyPrefixOf` t
 `11111111_22222222`), so two organisations for the same person still produce two distinct log-safe
 prefixes instead of collapsing back onto one.
 
+## Duplicate accounts
+
+A follower entry (`configDir: null`, "whatever you're logged into") plus a pinned entry can end
+up pointing at the SAME identity — most commonly because the user's terminal login gets switched
+to an account that is already pinned to its own config directory. Before this was handled, that
+produced two identical tray icons, one redundant `claude.exe` polling the exact same account for
+no reason, and — because the old whole-set label pass treated the two rows as merely SHARING a
+label rather than being the same login — a statistics window that disambiguated them into
+something like `Max (Max, alex)`. Nothing told the user any of this was happening.
+
+**The rule:** two enabled accounts are duplicates when their `AccountIdentity.StateKey` — the
+same accountUuid+organizationUuid pair "Identity guard" above defines, never accountUuid alone —
+is equal. `Model/AccountDuplicates.Detect` is the pure grouping function (unit-tested on its own,
+the same way `Model/AccountDisplayPlan.cs` is): within a group of equal keys, only the FIRST
+account in config order is kept; every later one is a duplicate of it.
+`StatusBarApplicationContext.RefreshDuplicates` re-runs this every eval tick (1Hz) and applies the
+verdict via `AccountRuntime.SetDuplicate`.
+
+**What changes for a duplicate account:**
+
+- No tray icon (`AccountDisplayPlan.Candidate.Enabled` is fed `!IsDuplicate`, so it can also never
+  win binding-mode selection).
+- No poll child: `SetDuplicate(true)` stops the poll timer and tears down the
+  `ClaudeCliChannelSupervisor` — there is no reason to keep a second `claude.exe` running against
+  an identity another child already polls. `AccountRuntime.PollAsync` also refuses outright while
+  `IsDuplicate` is true, so even a stray direct call (a reload-button race, for instance) can never
+  restart it.
+- Its place in the panel's "other accounts" list is replaced by an explanatory row
+  (`Ui/PanelText.ComposeDuplicateAccountRow`), e.g. "Konto 2 är samma inloggning som konto 1
+  (Max). Ta bort det: `.\scripts\add-account.ps1 -Remove 2` — eller logga in med ett annat konto i
+  dess mapp och starta om appen." (The default entry, which has no scripted slot, gets a
+  login-only instruction instead.) Clicking that row focuses the KEPT account instead of a
+  stopped, unpolled one with nothing to show.
+- The account it duplicates gets a short suffix on its TRAY TOOLTIP only ("· dublett: konto 2") —
+  never on the panel header label, which stays exactly what it would show for a single account.
+- `AccountLabel.Disambiguate` is told which accounts are duplicates and excludes them from its
+  collision counting in both directions: this pass exists for DIFFERENT accounts that happen to
+  share a label, not for two rows tracking the SAME login, which is exactly the bug that produced
+  `Max (Max, alex)`.
+
+**Never merged or deleted:** a duplicate's on-disk state (`logs\<stateKey>\...`) is left exactly
+as it is. Once its identity matches the kept account's, both runtimes naturally point at the same
+`logs\<sharedStateKey>\` directory (the identity-keyed state system already works this way
+regardless of duplicates) — only the kept account keeps writing to it.
+
+**Resolves on its own:** the kept account keeps re-reading its own identity every poll, same as
+always. A duplicate's own polling is stopped, so `AccountRuntime.RefreshIdentityOnly` (a plain
+file read, no channel involved) keeps ITS identity current too, every eval tick — otherwise a
+login change made directly in its config directory could never be noticed. The moment the two
+keys diverge again, `RefreshDuplicates` stops marking either one a duplicate and the paused
+account resumes polling exactly like a freshly started one, immediately, not on the next timer
+tick.
+
+**`scripts\add-account.ps1`** checks for this too, before ever registering a new slot: after the
+interactive login, it reads the new directory's `accountUuid`/`organizationUuid` (via a scoped
+regex over the `oauthAccount` block, deliberately NOT `ConvertFrom-Json` — a real `.claude.json`
+can contain case-differing duplicate keys, and Windows PowerShell 5.1's `ConvertFrom-Json` throws
+on that instead of picking one) and compares it against every already-configured account,
+including the default `%USERPROFILE%\.claude.json` login when an entry follows it. A match means
+the browser most likely reused an existing claude.ai session instead of letting the user pick a
+different account — the script refuses to register, leaves the new login directory on disk, and
+prints which slot already has it plus how to log in with a genuinely different account (a private
+browser window, or signing out of claude.ai first) and re-register. The same check runs on
+`-Register`, the recovery path, so a retried recovery can't hit the same problem silently either.
+
 ## Display
 
 **perAccount** (default): one tray icon per enabled account, in config order, capped at `maxIcons`

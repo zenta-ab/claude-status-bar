@@ -2,6 +2,13 @@
 # creates %LOCALAPPDATA%\ClaudeStatusBar\accounts\<n>\config, runs an interactive `claude` login
 # pointed at it (CLAUDE_CONFIG_DIR), appends the entry to accounts.json, and restarts the app.
 #
+# DUPLICATE CHECK (docs/multi-account.md "Duplicate accounts"): after the login, this script
+# reads the new directory's accountUuid+organizationUuid and compares it against every already-
+# configured account (including the default %USERPROFILE%\.claude.json login when an entry
+# follows it). If another entry already tracks that exact identity, nothing is registered -- the
+# browser most likely reused an existing claude.ai session instead of letting you pick a
+# different account. The new login directory is left on disk either way.
+#
 #   .\scripts\add-account.ps1                 Add a new account (interactive login)
 #   .\scripts\add-account.ps1 -Label "Team"   ...with a display-name override
 #   .\scripts\add-account.ps1 -Register <n>   Register a directory that is already logged in
@@ -25,6 +32,79 @@ $installDir     = Join-Path $env:LOCALAPPDATA 'Programs\ClaudeStatusBar'
 $exe            = Join-Path $installDir 'ClaudeStatusBar.exe'
 $defaultClaudeDir  = Join-Path $env:USERPROFILE '.claude'
 $defaultClaudeJson = Join-Path $env:USERPROFILE '.claude.json'
+
+# ---- identity reading (docs/multi-account.md "Duplicate accounts") ----
+#
+# Deliberately NOT ConvertFrom-Json: a real .claude.json can contain case-differing duplicate
+# keys, and Windows PowerShell 5.1's ConvertFrom-Json throws on that (its backing hashtable is
+# case-insensitive) instead of just picking one -- the same reason add-account.sh reads this
+# file with its own dedicated parser rather than a generic JSON one. A plain regex scoped to the
+# oauthAccount block is good enough for the two fields this script needs.
+
+function Read-Identity([string]$claudeJsonPath) {
+    if (-not (Test-Path $claudeJsonPath)) { return $null }
+    $raw = Get-Content $claudeJsonPath -Raw
+    $oauthMatch = [regex]::Match($raw, '"oauthAccount"\s*:\s*\{')
+    if (-not $oauthMatch.Success) { return $null }
+
+    # Scan forward from the oauthAccount key to its matching closing brace, so a same-named field
+    # anywhere else in the file (there is none today, but this is cheap insurance) can never be
+    # picked up by mistake.
+    $start = $oauthMatch.Index + $oauthMatch.Length
+    $depth = 1
+    $i = $start
+    while ($i -lt $raw.Length -and $depth -gt 0) {
+        if ($raw[$i] -eq '{') { $depth++ }
+        elseif ($raw[$i] -eq '}') { $depth-- }
+        $i++
+    }
+    $block = $raw.Substring($start, [Math]::Max(0, $i - $start - 1))
+
+    $accountUuidMatch = [regex]::Match($block, '"accountUuid"\s*:\s*"([^"]+)"')
+    if (-not $accountUuidMatch.Success) { return $null }
+    $orgUuidMatch = [regex]::Match($block, '"organizationUuid"\s*:\s*"([^"]+)"')
+
+    return [PSCustomObject]@{
+        AccountUuid      = $accountUuidMatch.Groups[1].Value
+        OrganizationUuid = if ($orgUuidMatch.Success) { $orgUuidMatch.Groups[1].Value } else { $null }
+    }
+}
+
+# Mirrors AccountIdentity.StateKey (docs/multi-account.md "Identity guard"): accountUuid alone
+# identifies the PERSON, not the plan, so accountUuid+organizationUuid is the actual identity.
+function Get-StateKey($identity) {
+    if (-not $identity) { return $null }
+    if ($identity.OrganizationUuid) { return "$($identity.AccountUuid)_$($identity.OrganizationUuid)" }
+    return $identity.AccountUuid
+}
+
+# Where Claude Code itself keeps one account entry's identity file: the DEFAULT entry
+# (configDir null) reads %USERPROFILE%\.claude.json (a SIBLING of %USERPROFILE%\.claude, not
+# inside it -- verified on a real installation, see docs/multi-account.md), every other entry
+# reads <configDir>\.claude.json.
+function Get-IdentityFilePath([string]$configDir) {
+    if ([string]::IsNullOrEmpty($configDir)) { return $defaultClaudeJson }
+    return Join-Path $configDir '.claude.json'
+}
+
+# Does any OTHER configured account already track this identity? Returns the matching account's
+# [index, slot label], or $null. $excludeConfigDir lets a re-registration check skip comparing a
+# directory against itself.
+function Find-DuplicateAccount($config, [string]$stateKey, $excludeConfigDir) {
+    if (-not $stateKey) { return $null }
+    $i = 0
+    foreach ($acct in $config.accounts) {
+        if ($acct.configDir -ne $excludeConfigDir) {
+            $existingKey = Get-StateKey (Read-Identity (Get-IdentityFilePath $acct.configDir))
+            if ($existingKey -and $existingKey -eq $stateKey) {
+                $slot = if ([string]::IsNullOrEmpty($acct.configDir)) { 'default' } else { Get-SlotNumber $acct.configDir }
+                return [PSCustomObject]@{ Index = $i; Slot = $slot }
+            }
+        }
+        $i++
+    }
+    return $null
+}
 
 function Get-AccountsConfig {
     if (-not (Test-Path $accountsJson)) {
@@ -110,11 +190,31 @@ if ($Register -and -not $List -and $Remove -le 0) {
         Write-Host "No login found in $dir -- nothing to register." -ForegroundColor Yellow
         return
     }
+    $newIdentity = Read-Identity (Join-Path $dir ".claude.json")
+    if (-not $newIdentity) {
+        Write-Host "No oauthAccount found in $dir -- the login did not take. Nothing was registered." -ForegroundColor Yellow
+        return
+    }
+
     $config = Get-AccountsConfig
     if (@($config.accounts) | Where-Object { $_.configDir -eq $dir }) {
         Write-Host "$dir is already registered."
         return
     }
+
+    # docs/multi-account.md "Duplicate accounts": a directory that is logged in doesn't
+    # necessarily mean it holds a DIFFERENT account -- the browser can reuse an existing
+    # claude.ai session instead of letting the user pick another one.
+    $dup = Find-DuplicateAccount $config (Get-StateKey $newIdentity) $dir
+    if ($dup) {
+        Write-Host ""
+        Write-Host "This login is already tracked as account [$($dup.Index)] (slot $($dup.Slot)) -- not registering a duplicate." -ForegroundColor Yellow
+        Write-Host "Your browser probably reused an existing claude.ai session instead of letting you choose a"
+        Write-Host "different account. Log in with a different account in $dir (open a private/incognito"
+        Write-Host "browser window, or sign out of claude.ai first), then re-run this command."
+        return
+    }
+
     $config.accounts = @($config.accounts) + [PSCustomObject]@{ configDir = $dir; label = $null; enabled = $true }
     Save-AccountsConfig $config
     Write-Host "Registered $dir."
@@ -152,7 +252,37 @@ if (-not (Test-Path $identityFile)) {
     return
 }
 
+$newIdentity = Read-Identity $identityFile
+if (-not $newIdentity) {
+    Write-Host "No oauthAccount found at $identityFile -- the login did not take. Re-run this script to try again." -ForegroundColor Yellow
+    return
+}
+
 $config = Get-AccountsConfig
+
+# docs/multi-account.md "Duplicate accounts": also checks the default login
+# (%USERPROFILE%\.claude.json) via Find-DuplicateAccount/Get-IdentityFilePath whenever an
+# existing entry follows it (configDir null) -- the same login can just as easily collide with
+# "whatever you're logged into" as with another scripted slot.
+$dup = Find-DuplicateAccount $config (Get-StateKey $newIdentity) $configDir
+if ($dup) {
+    Write-Host ""
+    Write-Host "This is the SAME login as account [$($dup.Index)] (slot $($dup.Slot)) -- not adding it as a new account." -ForegroundColor Yellow
+    Write-Host "Your browser probably reused an existing claude.ai session instead of letting you choose a"
+    Write-Host "different account. Nothing was registered, but the new login directory is left on disk at:"
+    Write-Host "  $configDir"
+    Write-Host ""
+    Write-Host "To track a genuinely different account there:"
+    Write-Host "  1. Open a private/incognito browser window (or sign out of claude.ai first)."
+    Write-Host "  2. Log into that directory directly:"
+    Write-Host "       `$env:CLAUDE_CONFIG_DIR = `"$configDir`""
+    Write-Host "       claude"
+    Write-Host "     ...then /login inside Claude Code, choosing the other account, then /exit."
+    Write-Host "  3. Register it:"
+    Write-Host "       .\scripts\add-account.ps1 -Register $slot"
+    return
+}
+
 $config.accounts = @($config.accounts) + [PSCustomObject]@{
     configDir = $configDir
     label     = if ($Label) { $Label } else { $null }

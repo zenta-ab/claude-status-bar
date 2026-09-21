@@ -131,4 +131,185 @@ public class ParsingTests
         DateTimeOffset now = new(2026, 1, 1, 2, 0, 0, TimeSpan.Zero);
         Assert.Equal(now.AddSeconds(3), QuotaTimeUtil.SafeAdd(now, TimeSpan.FromSeconds(3)));
     }
+
+    // ==================== A2: weekly/session node selection order (2026-09-21) ====================
+    // docs/mac-port.md, "the weekly-node heuristic is one key-reorder from wrong": rate_limits
+    // carries many seven_day-ish siblings with no model qualifier either
+    // (seven_day_oauth_apps/cowork/omelette/breakdown), so "first unqualified match" was only
+    // ever saved by wire order. Fix order, matching src/Mac's UsageParser exactly: limits[] by
+    // kind, then the exact keys (exact match, not substring), then the substring search last.
+
+    [Fact]
+    public void UsageParser_ExactKeys_QualifierLessDecoyBeforeSevenDay_StillPicksSevenDay()
+    {
+        // seven_day_cowork carries no opus/sonnet/haiku qualifier either, and comes BEFORE
+        // seven_day on the wire here -- the old substring-DFS heuristic would have picked it.
+        // The exact-key match must not be fooled by wire order at all.
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 10, "resets_at": "2026-09-11T11:20:00.524090+00:00" },
+            "seven_day_cowork": { "utilization": 99, "resets_at": "2026-09-18T05:00:00.999999+00:00" },
+            "seven_day": { "utilization": 41, "resets_at": "2026-09-18T05:00:00.524116+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(41.0, snapshot!.WeeklyUtilization);
+        Assert.Equal("2026-09-18T05:00:00.524116+00:00", snapshot.WeeklyResetsAt);
+    }
+
+    [Fact]
+    public void UsageParser_LimitsArrayPresent_PreferredOverExactKeysAndDecoys()
+    {
+        // docs/mac-port.md's exact wire example: limits[] is self-describing and matches the
+        // exact keys bit-for-bit (including microseconds) whenever both are present.
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 76, "resets_at": "2026-09-11T11:20:00.650307+00:00" },
+            "seven_day_cowork": { "utilization": 5, "resets_at": "2026-09-18T05:00:00.999999+00:00" },
+            "seven_day": { "utilization": 41, "resets_at": "2026-09-18T05:00:00.650340+00:00" },
+            "limits": [
+              { "group": "session", "kind": "session", "percent": 76, "resets_at": "2026-09-11T11:20:00.650307+00:00", "is_active": true },
+              { "group": "weekly", "kind": "weekly_all", "percent": 41, "resets_at": "2026-09-18T05:00:00.650340+00:00", "is_active": true },
+              { "group": "weekly", "kind": "weekly_scoped", "percent": 0 }
+            ]
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Null(error);
+        Assert.Equal(76.0, snapshot!.SessionUtilization);
+        Assert.Equal(41.0, snapshot.WeeklyUtilization);
+        Assert.True(snapshot.SessionIsActive);
+        Assert.True(snapshot.WeeklyIsActive);
+    }
+
+    [Fact]
+    public void UsageParser_LimitsArrayAbsent_FallsBackToExactKeys_IgnoringDecoys()
+    {
+        string json = """
+        {
+          "response": {
+            "seven_day_omelette": { "utilization": 2, "resets_at": "2026-09-18T05:00:00.111111+00:00" },
+            "five_hour": { "utilization": 22, "resets_at": "2026-09-11T11:20:00.524090+00:00" },
+            "seven_day": { "utilization": 33, "resets_at": "2026-09-18T05:00:00.524116+00:00" },
+            "seven_day_breakdown": { "utilization": 4, "resets_at": "2026-09-18T05:00:00.222222+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(22.0, snapshot!.SessionUtilization);
+        Assert.Equal(33.0, snapshot.WeeklyUtilization);
+    }
+
+    [Fact]
+    public void UsageParser_LimitsArrayDisagreesWithExactKeys_RefusesRatherThanGuessing()
+    {
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 76, "resets_at": "2026-09-11T11:20:00.650307+00:00" },
+            "seven_day": { "utilization": 41, "resets_at": "2026-09-18T05:00:00.650340+00:00" },
+            "limits": [
+              { "kind": "session", "percent": 12, "resets_at": "2026-09-11T11:20:00.650307+00:00" },
+              { "kind": "weekly_all", "percent": 41, "resets_at": "2026-09-18T05:00:00.650340+00:00" }
+            ]
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.Null(snapshot);
+        Assert.NotNull(error);
+        Assert.Contains("disagree", error);
+    }
+
+    [Fact]
+    public void UsageParser_SubstringFallback_StillWorks_WhenNeitherLimitsNorExactKeysMatch()
+    {
+        // Neither "limits" nor an exact "five_hour" key exists -- only a key that CONTAINS
+        // "five_hour" -- so strategies 1 and 2 both miss and this must fall through to the
+        // substring search, unchanged in spirit from before the fix.
+        string json = """
+        {
+          "response": {
+            "five_hour_data": { "utilization": 15, "resets_at": "2026-09-11T11:20:00.524090+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(15.0, snapshot!.SessionUtilization);
+        Assert.Contains("substring fallback", error);
+    }
+
+    // ---- A1: is_active flows through the parser (docs/forecast-and-states.md, "A closed
+    // window is an answer, not an absence") ----
+
+    [Fact]
+    public void UsageParser_ClosedWindow_IsActiveFalse_NoResetsAt_ParsesAsInactiveNotAsError()
+    {
+        // The exact real shape from the idle account: utilization 0, resets_at null,
+        // is_active false. Read via the exact-keys strategy (no limits[] in this response).
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 0, "resets_at": null, "is_active": false },
+            "seven_day": { "utilization": 0, "resets_at": null, "is_active": false }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(0.0, snapshot!.SessionUtilization);
+        Assert.Null(snapshot.SessionResetsAt);
+        Assert.False(snapshot.SessionIsActive);
+        Assert.False(snapshot.WeeklyIsActive);
+    }
+
+    [Fact]
+    public void UsageParser_ClosedWindow_ViaLimitsArray_ReadsIsActiveDirectly()
+    {
+        string json = """
+        {
+          "response": {
+            "limits": [
+              { "kind": "session", "percent": 0, "resets_at": null, "is_active": false },
+              { "kind": "weekly_all", "percent": 17, "resets_at": "2026-09-18T05:00:00.524116+00:00", "is_active": true }
+            ]
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.False(snapshot!.SessionIsActive);
+        Assert.Null(snapshot.SessionResetsAt);
+        Assert.True(snapshot.WeeklyIsActive);
+        Assert.Equal(17.0, snapshot.WeeklyUtilization);
+    }
 }

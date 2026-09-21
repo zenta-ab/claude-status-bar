@@ -25,6 +25,15 @@ namespace ClaudeStatusBar.Data;
 /// state; an unreadable/missing file is treated as "no new information" (never as an implicit
 /// logout) so a transient read race while the CLI is mid-write can never tear down a perfectly
 /// good in-memory model.
+///
+/// Duplicate accounts (docs/multi-account.md "Duplicate accounts"): two configured accounts can
+/// resolve to the same StateKey -- most commonly the "whatever you're logged into" default entry
+/// converging onto an already-pinned account. StatusBarApplicationContext.RefreshDuplicates
+/// (Model/AccountDuplicates.cs) detects this every eval tick and calls SetDuplicate on whichever
+/// account is not first in config order: it stops that account's poll timer and child (never its
+/// on-disk state) so there is no redundant claude.exe and no duplicate tray icon, while
+/// RefreshIdentityOnly keeps its identity current from disk alone so the duplicate can still
+/// resolve on its own once the identities diverge again.
 /// </summary>
 public sealed class AccountRuntime : IAsyncDisposable
 {
@@ -52,6 +61,26 @@ public sealed class AccountRuntime : IAsyncDisposable
     public string? OverrideLabel => _config.Label;
     public string? IdentityKey => _state.IdentityKey;
     public string CurrentLogDir => _state.CurrentLogDir;
+
+    /// <summary>This account's raw accounts.json configDir (null for the default "whatever you're logged into" entry) -- exposed for Ui/PanelText.ComposeDuplicateAccountRow, which needs it to name the right add-account.ps1 -Remove slot.</summary>
+    public string? ConfigDir => _config.ConfigDir;
+
+    /// <summary>docs/multi-account.md "Duplicate accounts": true once StatusBarApplicationContext.RefreshDuplicates (Model/AccountDuplicates.cs) has confirmed this account resolves to the same AccountIdentity.StateKey as an earlier one in config order. See SetDuplicate for what changing this does.</summary>
+    public bool IsDuplicate { get; private set; }
+
+    /// <summary>The earlier account's config-order index this one duplicates, or null when IsDuplicate is false.</summary>
+    public int? DuplicateOfIndex { get; private set; }
+
+    /// <summary>
+    /// docs/statistics.md decision 4 "Proactive advice": the latest line StatusBarApplicationContext
+    /// should show in the panel for this account, or null when nothing has newly cleared its
+    /// threshold. Latches -- keeps returning the same line on every render until a NEW closed
+    /// cycle produces a genuinely different one (Model/StatisticsAdvice.Decide's own signature
+    /// check) -- it does not expire on its own; "shown once" means the underlying pattern is
+    /// only ever announced once (persisted in StatisticsAdviceStore), not that the panel line
+    /// vanishes after one frame.
+    /// </summary>
+    public string? AdviceLine { get; private set; }
 
     /// <summary>
     /// True from the moment a poll (timer-driven or a forced one, see RequestImmediateRefresh)
@@ -127,7 +156,12 @@ public sealed class AccountRuntime : IAsyncDisposable
     /// </summary>
     public async Task PollAsync()
     {
-        if (_polling || _shuttingDown) return;
+        // IsDuplicate (docs/multi-account.md "Duplicate accounts"): SetDuplicate(true) already
+        // stops the poll timer, but this guard is the actual, unconditional enforcement of "no
+        // poll child for a confirmed duplicate" -- it must hold even against a stray direct call
+        // (e.g. a reload-button click racing the exact tick that just marked this account a
+        // duplicate), never just against the timer being stopped.
+        if (_polling || _shuttingDown || IsDuplicate) return;
         _polling = true;
         try
         {
@@ -145,6 +179,62 @@ public sealed class AccountRuntime : IAsyncDisposable
         {
             _polling = false;
         }
+    }
+
+    /// <summary>
+    /// Installs or clears this account's duplicate status (docs/multi-account.md "Duplicate
+    /// accounts") -- the only caller is StatusBarApplicationContext.RefreshDuplicates, applying
+    /// Model/AccountDuplicates.Detect's verdict for this account's config-order position every
+    /// eval tick. Idempotent on the IsDuplicate transition itself (repeated calls with the same
+    /// flag only update DuplicateOfIndex, e.g. because an earlier account in the group was
+    /// disabled and the group's "first" shifted -- they never re-stop or re-start anything).
+    ///
+    /// Becoming a duplicate stops the poll timer and tears down the channel supervisor -- "no
+    /// poll child -- do not keep a redundant claude.exe running" -- but never touches
+    /// AccountKeyedState/DiskLogSink: this identity's on-disk history is left exactly as it is,
+    /// ready for the moment this resolves (never merge or delete state on disk). Resolving
+    /// (ceasing to be a duplicate) restarts exactly like Start() would for a brand new account,
+    /// including an immediate poll rather than waiting for the timer's first tick.
+    /// </summary>
+    public void SetDuplicate(bool isDuplicate, int? duplicateOfIndex = null)
+    {
+        bool wasDuplicate = IsDuplicate;
+        IsDuplicate = isDuplicate;
+        DuplicateOfIndex = isDuplicate ? duplicateOfIndex : null;
+
+        if (isDuplicate && !wasDuplicate)
+        {
+            _pollTimer.Stop();
+            ClaudeCliChannelSupervisor old = _channelSupervisor;
+            _channelSupervisor = new ClaudeCliChannelSupervisor(_spec, _state.LogSink); // idle placeholder -- never Started while duplicate
+            _ = old.DisposeAsync();
+            SafeLog.Info($"account {_slot}: marked duplicate of index {duplicateOfIndex} -- child stopped");
+        }
+        else if (!isDuplicate && wasDuplicate && !_shuttingDown)
+        {
+            _channelSupervisor.Start();
+            _pollTimer.Start();
+            _ = PollAsync();
+            SafeLog.Info($"account {_slot}: duplicate resolved -- resuming polling");
+        }
+    }
+
+    /// <summary>
+    /// Cheap identity-only refresh, no channel/poll timer involved: reads &lt;configDir&gt;\
+    /// .claude.json directly (the same file AccountIdentity.ReadFrom always reads), so a
+    /// duplicate account's identity keeps advancing even though SetDuplicate(true) has stopped
+    /// its own polling -- otherwise a duplicate could never resolve on its own once the user logs
+    /// a different account into its directory (docs/multi-account.md's "resolves on its own"
+    /// requirement). StatusBarApplicationContext.RefreshDuplicates calls this every eval tick for
+    /// every currently-duplicate account; a plain file read is cheap enough for 1Hz. An
+    /// unreadable/missing file is "no new information", exactly like SyncIdentityIfChanged.
+    /// </summary>
+    public void RefreshIdentityOnly()
+    {
+        AccountIdentity? identity = AccountIdentity.ReadFrom(_configDir);
+        if (identity is null) return;
+        Identity = identity;
+        RefreshLabel();
     }
 
     void SyncIdentityIfChanged()
@@ -197,6 +287,7 @@ public sealed class AccountRuntime : IAsyncDisposable
                 _state.MarkWarmStarted();
             }
             _state.Model.Ingest(snapshot, utcNow, monoMs);
+            ArchiveClosedWindowsAndHours();
         }
 
         TimeSpan next = _state.Model.NextPollDelay(utcNow);
@@ -204,6 +295,71 @@ public sealed class AccountRuntime : IAsyncDisposable
 
         LastView = _state.Model.Evaluate(utcNow, monoMs);
         LogCommittedState();
+    }
+
+    /// <summary>
+    /// docs/statistics.md: drains any windows/clock hours QuotaModel just closed and enqueues
+    /// them to this account's own cycles.csv/hourly-YYYY.csv, via the same per-account DiskLogSink
+    /// (and its own async, non-blocking, drop-and-log queue) window-shape.csv already goes
+    /// through. account_key mirrors the directory this account's own state already lives under
+    /// (AccountKeyedState.ResolveDir) so a reader never has to cross-reference the two.
+    /// </summary>
+    void ArchiveClosedWindowsAndHours()
+    {
+        string accountKey = _state.IdentityKey ?? "_pending";
+
+        IReadOnlyList<CycleClosed> closedCycles = _state.Model.TakeClosedCycles();
+        foreach (CycleClosed closed in closedCycles)
+        {
+            _state.LogSink.EnqueueCycle(new CycleArchiveCsv.Row(
+                accountKey, closed.Kind, closed.StartedUtc, closed.ResetUtc,
+                closed.PeakPct, closed.FinalPct, closed.HitCeiling, closed.BlockedMinutes,
+                closed.CoveredMinutes, closed.PlanTier, closed.WarnedDryEarly,
+                closed.PredictedPeakPct, closed.PredictedAtUtc,
+                closed.CeilingReachedAtUtc, closed.CeilingReachedCensored));
+        }
+
+        foreach (HourClosed closed in _state.Model.TakeClosedHours())
+        {
+            _state.LogSink.EnqueueHourly(new HourlyRollupCsv.Row(
+                accountKey, closed.Kind, closed.HourStartUtc, closed.ConsumedPct,
+                closed.Samples, closed.CoveredMinutes));
+        }
+
+        // docs/statistics.md decision 4: recomputing the two recommendations is only worth
+        // doing right when a new cycle just closed (they read cycles.csv/hourly-*.csv fully off
+        // disk) -- a session/weekly rollover is rare (at most a handful a day), so this never
+        // runs on the 1Hz eval tick or even every poll, only when there is genuinely new data
+        // that could change either recommendation's answer.
+        if (closedCycles.Count > 0) RecomputeAdvice(accountKey);
+    }
+
+    /// <summary>
+    /// Reads this account's own archive back (the same on-disk files EnqueueCycle/EnqueueHourly
+    /// just wrote through the DiskLogSink queue -- a small race where this read runs just before
+    /// those writes land is harmless: it simply means the newest cycle isn't reflected until the
+    /// NEXT close, never a wrong/crashing read), runs it through the real engine in local time,
+    /// and lets Model/StatisticsAdvice decide whether either recommendation is newly worth
+    /// announcing. Best-effort: a failure here must never affect polling or archiving.
+    /// </summary>
+    void RecomputeAdvice(string accountKey)
+    {
+        try
+        {
+            StatisticsEngine.Result result = StatisticsEngine.ComputeForAccount(_state.CurrentLogDir, accountKey, TimeZoneInfo.Local);
+            StatisticsAdvice.LastShown last = StatisticsAdviceStore.LoadAll().GetValueOrDefault(accountKey, StatisticsAdvice.LastShown.Empty);
+            (StatisticsAdvice.Advice? advice, StatisticsAdvice.LastShown next) =
+                StatisticsAdvice.Decide(result.CeilingRecommendation, result.WeeklyBudgetRecommendation, last);
+            if (advice is { } a)
+            {
+                AdviceLine = a.Line;
+                StatisticsAdviceStore.SaveOne(accountKey, next);
+            }
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"account {_slot}: proactive-advice recompute failed: {ex.Message}");
+        }
     }
 
     /// <summary>Same one-line-per-poll diagnostic the single-account app already wrote, now per account (best-effort, never allowed to affect the poll path).</summary>

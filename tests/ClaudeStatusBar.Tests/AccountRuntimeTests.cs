@@ -281,4 +281,105 @@ public class AccountRuntimeTests
             Directory.Delete(workDir, recursive: true);
         }
     }
+
+    /// <summary>
+    /// docs/multi-account.md "Duplicate accounts", the task's item 1: marking an account a
+    /// duplicate must stop its polling outright (never just leave it running unseen), and
+    /// resolving it must restart polling exactly like a fresh account would, with no manual
+    /// nudge beyond SetDuplicate(false) itself.
+    /// </summary>
+    [Fact]
+    public async Task SetDuplicate_True_StopsPolling_False_ResumesItAndPollsAgain()
+    {
+        string baseLogDir = NewTempDir("runtime-dup-logs");
+        string configDir = NewConfigDirWithIdentity("runtime-dup-cfg", "eeeeeeee-0000-0000-0000-000000000000");
+        string workDir = NewTempDir("runtime-dup-work");
+        var uiContext = new SynchronizationContext();
+
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec("normal", workDir), configDirOverride: configDir);
+
+        try
+        {
+            runtime.Start();
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return runtime.LastView.Freshness == Freshness.Live;
+            }, TimeSpan.FromSeconds(10));
+
+            DateTimeOffset? pollTimeBeforePause = runtime.LastView.LastPollAt;
+
+            runtime.SetDuplicate(true, duplicateOfIndex: 0);
+            Assert.True(runtime.IsDuplicate);
+            Assert.Equal(0, runtime.DuplicateOfIndex);
+
+            // The task's "no poll child" rule: even a direct PollAsync call while marked
+            // duplicate must be a no-op -- AccountRuntime.PollAsync's own IsDuplicate guard, not
+            // just the (already-stopped) timer.
+            await runtime.PollAsync();
+            Assert.False(runtime.IsPolling);
+            Assert.Equal(pollTimeBeforePause, runtime.LastView.LastPollAt);
+
+            DateTimeOffset beforeResume = DateTimeOffset.UtcNow;
+            runtime.SetDuplicate(false);
+            Assert.False(runtime.IsDuplicate);
+            Assert.Null(runtime.DuplicateOfIndex);
+
+            // SetDuplicate(false) itself kicks off an immediate poll (never waits for the timer's
+            // next tick) -- proven by a genuinely NEW LastPollAt landing after the resume call,
+            // not merely freshness staying Live (which would also hold true if resume did nothing).
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return runtime.LastView.LastPollAt > beforeResume;
+            }, TimeSpan.FromSeconds(10));
+            Assert.Equal(Freshness.Live, runtime.LastView.Freshness);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Duplicate accounts": a duplicate's own poll (and therefore its own
+    /// SyncIdentityIfChanged) is stopped, so RefreshIdentityOnly is the ONLY thing that can still
+    /// notice a login change made directly in its config directory -- without it, a duplicate
+    /// could never resolve on its own once the user fixed the underlying login.
+    /// </summary>
+    [Fact]
+    public async Task RefreshIdentityOnly_ReadsANewIdentityFromDisk_WithoutTouchingPollingState()
+    {
+        string configDir = NewConfigDirWithIdentity("runtime-refreshid-cfg", "11111111-0000-0000-0000-000000000000");
+        string baseLogDir = NewTempDir("runtime-refreshid-logs");
+        string workDir = NewTempDir("runtime-refreshid-work");
+        var uiContext = new SynchronizationContext();
+
+        // .Start() is never called here -- this test only exercises the identity file read, not
+        // the channel, matching what a paused (SetDuplicate(true)) account actually does.
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec("normal", workDir), configDirOverride: configDir);
+
+        try
+        {
+            Assert.Equal("11111111-0000-0000-0000-000000000000", runtime.Identity?.AccountUuid);
+
+            WriteIdentity(configDir, "22222222-0000-0000-0000-000000000000", organizationUuid: null);
+            runtime.RefreshIdentityOnly();
+
+            Assert.Equal("22222222-0000-0000-0000-000000000000", runtime.Identity?.AccountUuid);
+            Assert.False(runtime.IsPolling); // no channel/poll activity was ever started by this call
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
 }

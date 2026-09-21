@@ -189,4 +189,47 @@ public class AccountLabelTests
         var accounts = new[] { new AccountLabelInput(null, Identity("Acme"), "max") };
         Assert.Equal(new[] { "Acme" }, AccountLabel.Disambiguate(accounts));
     }
+
+    /// <summary>
+    /// docs/multi-account.md "Duplicate accounts": a true duplicate (same AccountIdentity.
+    /// StateKey, see Model/AccountDuplicates.cs) must never be treated as a DIFFERENT account
+    /// that happens to share a label -- its collision with the account it duplicates must not
+    /// force either one into the "(plan)"/"(plan, email)" suffixing this pass exists for.
+    /// </summary>
+    [Fact]
+    public void Disambiguate_TrueDuplicate_ExcludedFromCollisionCounting_KeptAccountLabelStaysPlain()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(orgName: null, email: "alex@example.com"), "max"),
+            new AccountLabelInput(null, Identity(orgName: null, email: "alex@example.com"), "max"),
+        };
+        var isDuplicate = new[] { false, true };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts, isDuplicate);
+
+        // Without the duplicate flag this would come back "Max (Max, alex)" for both (three
+        // colliding accounts' worth of suffixing logic firing for what is really only one) --
+        // the real symptom docs/multi-account.md's live scenario hit. With it, the kept account
+        // (index 0) is never told it collides with anything, so it keeps its plain base label.
+        Assert.Equal("Max", labels[0]);
+    }
+
+    /// <summary>A THIRD, genuinely different account sharing the kept account's label must still be disambiguated normally -- the duplicate flag only exempts the duplicate pair from each other, not the whole set from disambiguation.</summary>
+    [Fact]
+    public void Disambiguate_TrueDuplicate_DoesNotSuppressDisambiguationAgainstAGenuinelyDifferentThirdAccount()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(orgName: null, email: "alex@example.com"), "max"),
+            new AccountLabelInput(null, Identity(orgName: null, email: "alex@example.com"), "max"), // duplicate of [0]
+            new AccountLabelInput(null, Identity(orgName: null, email: "bob@example.com"), "max"),  // genuinely different Max account
+        };
+        var isDuplicate = new[] { false, true, false };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts, isDuplicate);
+
+        Assert.Equal("Max (Max, alex)", labels[0]);
+        Assert.Equal("Max (Max, bob)", labels[2]);
+    }
 }

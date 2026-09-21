@@ -32,6 +32,48 @@ state, complete panel). Code contract: `src/Windows/Model/QuotaContracts.cs`.
   20-min fingerprint-stale rule is unaffected (longest unchanged run observed: ~5 min).
 - **Staircase jumps.** After a frozen stretch, usage can jump 11 points in one step.
 
+## Parsing the response — which node is the session/weekly window (added 2026-09-21)
+
+`rate_limits`' exact shape is undocumented and has moved before (`docs/mac-port.md`, "the
+weekly-node heuristic is one key-reorder from wrong"): a response can carry many `seven_day`-ish
+sibling keys (`seven_day_oauth_apps`, `seven_day_cowork`, `seven_day_omelette`,
+`seven_day_breakdown`, ...), none of which carry an `opus`/`sonnet`/`haiku` qualifier either — so
+"first key containing `seven_day` with no model qualifier" was correct only because `seven_day`
+itself happened to come first on the wire; a server-side key reorder, or one of those siblings
+being populated, would silently select the wrong bucket. That is exactly a "confident wrong
+number", not a crash — worse, because nothing about it looks broken.
+
+Both implementations now select the session/weekly node in this order (matching exactly,
+`src/Mac/Sources/ClaudeQuotaCore/UsageParser.swift` / `src/Windows/Data/UsageParser.cs`):
+
+1. **`limits[]` by `kind`** — the response's self-describing array,
+   `{"kind":"session", "percent":…, "resets_at":…, "is_active":…}` /
+   `{"kind":"weekly_all", …}` (`weekly_scoped` is a per-model bucket, never the "all models"
+   ring, and is ignored). Found by an exact key match for `limits` anywhere in the response tree
+   (first hit in DFS/wire order), not a fixed path — the container's own nesting depth is exactly
+   what has moved before. A duplicate `kind` in the array is treated as malformed and this
+   strategy is abandoned for that response (taking the first and ignoring the rest would be a
+   silent choice between two different numbers).
+2. **The exact keys** `five_hour` and `seven_day` — found the same way (an exact, not substring,
+   DFS key match), so a sibling like `seven_day_cowork` can never be mistaken for `seven_day`.
+3. **Cross-check.** When both 1 and 2 are present and usable they must agree: the session
+   percentage within 0.5, and — only when both sides carry one — a matching `resets_at`
+   fingerprint; same for weekly. A disagreement means the response is in a shape this parser does
+   not understand (mid-migration, say), and the whole response is refused with an explanatory
+   error rather than guessed at — the project's general "Refusal → Measuring" rule applies to
+   parsing too. Where they agree, `limits[]` wins but is completed with anything it omits from
+   the exact keys (dropping a deadline that one encoding carries would make a live window look
+   closed, which costs the forecast its clock).
+4. **The substring search**, last, and only when it is unambiguous: the old "contains `five_hour`
+   / `seven_day`, no model qualifier" scan, still needed for a response shape neither of the
+   above understands. If more than one qualifier-less candidate is populated for either window,
+   there is no principled way to choose between them (and, on macOS, `JSONSerialization` does not
+   even preserve wire order) — the response is refused outright rather than picked by chance.
+
+`is_active` — see "A closed window is an answer, not an absence" below — is read directly from
+`limits[]`'s `session`/`weekly_all` entries; the exact-key and substring strategies, which have no
+such field, infer it from whether a `resets_at` was present.
+
 ## Ingest (per window; session W = 300 min, weekly W = 10 080 min)
 
 1. **Window key** = the tracked deadline, jitter-tolerant. A deadline within **±120 s** of the
@@ -213,7 +255,9 @@ Two rules were tied to acceptance and both got this wrong:
 The clock guard's UTC↔monotonic anchor is deliberately NOT widened: it needs a real timing
 baseline from a sample the tracker actually took.
 
-**Windows has the same two gaps** and is not yet fixed; the Swift side is.
+**Windows had the same two gaps; both are now fixed** (`QuotaModel._lastUsableMono` /
+`_sessionInactiveLastPoll` / `_weeklyInactiveLastPoll`, `MeasuringReasonCode.WindowInactive`),
+matching the Swift side's behaviour, including the deliberately-not-widened clock-guard anchor.
 
 **Hysteresis** (on *accepted* observations, never on a poll tick, a duplicate/deduped sample, or
 a transport failure):

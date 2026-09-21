@@ -1,0 +1,6 @@
+# Byte-exact files: never convert line endings.
+# tests/fixtures/statistics/* are golden files that the C# and Swift implementations must both
+# reproduce byte for byte (LF, no BOM); the other fixtures are recorded evidence replayed verbatim.
+# Without this, core.autocrlf=true on Windows rewrites them to CRLF on checkout and the contract
+# tests fail on every fresh Windows clone.
+tests/fixtures/** -text

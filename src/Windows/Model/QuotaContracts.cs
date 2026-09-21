@@ -82,3 +82,36 @@ public interface IQuotaModel
     QuotaView Evaluate(DateTimeOffset utcNow, long monoMs);
     TimeSpan NextPollDelay(DateTimeOffset utcNow);
 }
+
+/// <summary>
+/// docs/statistics.md: one window (session or weekly) that just closed -- a rollover QuotaModel
+/// itself observed live. Drain via QuotaModel.TakeClosedCycles() once after every Ingest call and
+/// append each to that account's cycles.csv; the overwhelmingly common case is an empty list (a
+/// session closes at most twice a day, weekly about once a week). PlanTier/WarnedDryEarly/
+/// PredictedPeakPct/PredictedAtUtc are the calibration fields only QuotaModel can supply --
+/// see docs/statistics.md for exactly when/how each is captured. AccountKey is deliberately not
+/// here: it belongs to whichever caller owns the account's identity, not to the quota model.
+/// </summary>
+public sealed record CycleClosed(
+    WindowKind Kind,
+    DateTimeOffset StartedUtc,
+    DateTimeOffset ResetUtc,
+    double PeakPct,
+    double FinalPct,
+    bool HitCeiling,
+    double BlockedMinutes,
+    double CoveredMinutes,
+    string? PlanTier,
+    bool WarnedDryEarly,
+    double? PredictedPeakPct,
+    DateTimeOffset? PredictedAtUtc,
+    DateTimeOffset? CeilingReachedAtUtc = null,
+    bool CeilingReachedCensored = false);
+
+/// <summary>docs/statistics.md: one clock hour that just closed for one window kind, drained the same way via TakeClosedHours() and appended to hourly-YYYY.csv.</summary>
+public sealed record HourClosed(
+    WindowKind Kind,
+    DateTimeOffset HourStartUtc,
+    double ConsumedPct,
+    int Samples,
+    double CoveredMinutes);

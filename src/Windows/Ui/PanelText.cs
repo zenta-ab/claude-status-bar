@@ -42,6 +42,7 @@ public static class PanelText
     // "X % använt · återställs ..." line.
     const string AwaitingResetText = "Nytt fönster väntas";
     const string TooEarlyInWeekText = "För tidigt i veckan — väntar på ett helt dygn";
+    const string WindowInactiveText = "Inget förbrukat ännu";
 
     public static PanelTextResult Compose(QuotaView view, DateTimeOffset now, TimeZoneInfo tz) => new(
         ComposeStatusBox(view, now, tz),
@@ -76,6 +77,41 @@ public static class PanelText
 
         if (view.Freshness == Freshness.Stale) line += " · kan vara inaktuell";
         return new OtherAccountRow(accountIndex, label, line, role);
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Duplicate accounts": the other-accounts row for an account
+    /// StatusBarApplicationContext.RefreshDuplicates has confirmed is the SAME login as an
+    /// earlier one in config order (Model/AccountDuplicates.cs) -- replaces the normal verdict
+    /// row entirely (there is nothing to poll any more, so there is no verdict to show) with an
+    /// explanation plus the concrete command to fix it. duplicateOfIndex/duplicateOfLabel name
+    /// the account this one duplicates; duplicateConfigDir is THIS (the duplicate) account's own
+    /// raw accounts.json configDir (null for the "whatever you're logged into" default entry),
+    /// used only to decide which fix instructions apply.
+    /// </summary>
+    public static OtherAccountRow ComposeDuplicateAccountRow(int accountIndex, int duplicateOfIndex, string duplicateOfLabel, string? duplicateConfigDir)
+    {
+        string label = $"Konto {accountIndex + 1}";
+        string fix = SlotNumberOf(duplicateConfigDir) is { } slot
+            ? $"Ta bort det: .\\scripts\\add-account.ps1 -Remove {slot} — eller logga in med ett annat konto i dess mapp och starta om appen."
+            : "Logga in med ett annat konto (claude /login i din vanliga profil), eller ta bort kontots rad i accounts.json.";
+        string line = $"är samma inloggning som konto {duplicateOfIndex + 1} ({duplicateOfLabel}). {fix}";
+        return new OtherAccountRow(accountIndex, label, line, PanelColorRole.Tight);
+    }
+
+    /// <summary>
+    /// The slot number embedded in a scripts\add-account.ps1-created config directory's own
+    /// path (...\accounts\&lt;n&gt;\config) -- the same pattern that script's own Get-SlotNumber
+    /// matches, kept in sync so the "-Remove N" this row prints is always the command that
+    /// actually removes this account. Null for the default entry (configDir null) or any
+    /// hand-configured directory that doesn't follow that layout -- ComposeDuplicateAccountRow
+    /// falls back to a login-only instruction in that case, since there is no slot to remove.
+    /// </summary>
+    static int? SlotNumberOf(string? configDir)
+    {
+        if (string.IsNullOrEmpty(configDir)) return null;
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(configDir, @"[\\/]accounts[\\/](\d+)[\\/]config$");
+        return m.Success ? int.Parse(m.Groups[1].Value) : null;
     }
 
     // ---- status box (docs/panel-v2.md, item 2) ----
@@ -247,10 +283,12 @@ public static class PanelText
 
         if (w.State == QuotaState.Measuring)
         {
-            // Gated on the reason text, same two literals as the status box, not on
-            // State alone -- the generic "för tidigt för prognos" wording covers
-            // every other reason (rollover, too-little-usage, clock jump, no data).
-            if (w.MeasuringReason is AwaitingResetText or TooEarlyInWeekText) return w.MeasuringReason;
+            // Gated on the reason text, the same two literals as the status box plus
+            // WindowInactive, not on State alone -- the generic "för tidigt för prognos"
+            // wording covers every other reason (rollover, too-little-usage, clock jump, no
+            // data). WindowInactive is NOT one of the status box's "special" literals
+            // (ComposeMeasuring) -- only this per-window label surfaces it by name.
+            if (w.MeasuringReason is AwaitingResetText or TooEarlyInWeekText or WindowInactiveText) return w.MeasuringReason;
             return $"{pct} använt · för tidigt för prognos";
         }
 

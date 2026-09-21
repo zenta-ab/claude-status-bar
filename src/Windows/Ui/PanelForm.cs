@@ -98,6 +98,7 @@ public sealed class PanelForm : Form
     string? _accountLabel;
     IReadOnlyList<OtherAccountRow> _otherAccounts = Array.Empty<OtherAccountRow>();
     bool _refreshInFlight;
+    string? _adviceLine;
 
     /// <summary>
     /// docs/multi-account.md "Panel": fired when the user clicks one of the "other accounts"
@@ -105,6 +106,9 @@ public sealed class PanelForm : Form
     /// that index means and switches the panel to it.
     /// </summary>
     public event Action<int>? OtherAccountClicked;
+
+    /// <summary>docs/statistics.md decision 4 "Proactive advice": fired when the user clicks the (at most one) advice line, so the caller can open the statistics window.</summary>
+    public event Action? AdviceClicked;
 
     /// <summary>
     /// The task's reload button, header row: fired when the user clicks the refresh control
@@ -209,7 +213,7 @@ public sealed class PanelForm : Form
     /// renders dimmed and ignores clicks while this is true, so it can never start a second
     /// concurrent poll for the same account.
     /// </param>
-    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false)
+    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null)
     {
         try
         {
@@ -218,6 +222,7 @@ public sealed class PanelForm : Form
             _accountLabel = accountLabel;
             _otherAccounts = otherAccounts ?? Array.Empty<OtherAccountRow>();
             _refreshInFlight = refreshInFlight;
+            _adviceLine = adviceLine;
 
             if (Visible)
             {
@@ -273,6 +278,12 @@ public sealed class PanelForm : Form
             if (!_refreshInFlight && layout.RefreshHitRect.Contains(logicalPoint))
             {
                 RefreshRequested?.Invoke();
+                return;
+            }
+
+            if (_adviceLine != null && layout.AdviceHitRect.Contains(logicalPoint))
+            {
+                AdviceClicked?.Invoke();
                 return;
             }
 
@@ -340,7 +351,8 @@ public sealed class PanelForm : Form
     readonly record struct PanelLayout(
         PanelTextResult Text, float LabelY, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
         float SessionY, float SessionHeight, float WeeklyY, float WeeklyHeight,
-        float RuleY, float FooterY, float OtherAccountsRuleY, float OtherAccountsY,
+        float RuleY, float FooterY, float AdviceY, float AdviceHeight, RectangleF AdviceHitRect,
+        float OtherAccountsRuleY, float OtherAccountsY,
         IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, float TotalHeight);
 
     float ContentWidth => LogicalWidth - 2 * SidePadding;
@@ -384,6 +396,18 @@ public sealed class PanelForm : Form
         float footerY = y;
         y += 20f;
 
+        float adviceY = -1f;
+        float adviceHeight = 0f;
+        var adviceHitRect = RectangleF.Empty;
+        if (_adviceLine is { } advice)
+        {
+            y += 6f;
+            adviceY = y;
+            adviceHeight = DrawFitText(_measureG, advice, _fontBarLabel, TextPrimary, 0, 0, ContentWidth - 16f, draw: false) + 12f;
+            adviceHitRect = new RectangleF(SidePadding, adviceY, ContentWidth, adviceHeight);
+            y += adviceHeight + 4f;
+        }
+
         float otherAccountsRuleY = -1f;
         float otherAccountsY = -1f;
         var rowRects = new List<RectangleF>();
@@ -406,7 +430,8 @@ public sealed class PanelForm : Form
         }
 
         return new PanelLayout(text, labelY, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight,
-            weeklyY, weeklyHeight, ruleY, footerY, otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, y);
+            weeklyY, weeklyHeight, ruleY, footerY, adviceY, adviceHeight, adviceHitRect,
+            otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, y);
     }
 
     float MeasureStatusBox(StatusBoxText box)
@@ -468,6 +493,7 @@ public sealed class PanelForm : Form
             using (var footerBrush = new SolidBrush(TextTertiary))
                 g.DrawString(BuildFooter(_view), _fontFooter, footerBrush, SidePadding, layout.FooterY);
 
+            DrawAdvice(g, layout);
             DrawOtherAccounts(g, layout);
         }
         catch (Exception ex)
@@ -561,6 +587,27 @@ public sealed class PanelForm : Form
             using var headBrush = new SolidBrush(color);
             g.FillPath(headBrush, head);
         }
+    }
+
+    /// <summary>
+    /// docs/statistics.md decision 4 "Proactive advice": at most one clickable line, only when
+    /// StatusBarApplicationContext decided (Model/StatisticsAdvice.Decide) that a recommendation
+    /// just cleared its threshold or changed since it was last shown. A small rounded chip so it
+    /// reads as a distinct, actionable element rather than another status line -- clicking it
+    /// opens the statistics window (AdviceClicked), never shown at all otherwise.
+    /// </summary>
+    void DrawAdvice(Graphics g, PanelLayout layout)
+    {
+        if (_adviceLine is not { } advice) return;
+
+        Color accent = Palette.Ok;
+        using (var path = RoundedRect(layout.AdviceHitRect, 6f))
+        using (var bg = new SolidBrush(Color.FromArgb(20, accent)))
+            g.FillPath(bg, path);
+        using (var edge = new SolidBrush(accent))
+            g.FillRectangle(edge, layout.AdviceHitRect.X, layout.AdviceHitRect.Y, 3f, layout.AdviceHitRect.Height);
+
+        DrawFitText(g, advice, _fontBarLabel, TextPrimary, layout.AdviceHitRect.X + 12f, layout.AdviceY + 6f, layout.AdviceHitRect.Width - 20f);
     }
 
     /// <summary>

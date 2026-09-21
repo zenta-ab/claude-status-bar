@@ -109,4 +109,42 @@ public class PanelOtherAccountRowTests
 
         Assert.Equal(PanelColorRole.Unknown, row.Role);
     }
+
+    // ---- ComposeDuplicateAccountRow (docs/multi-account.md "Duplicate accounts") ----
+
+    [Fact]
+    public void Duplicate_ScriptedSlotConfigDir_NamesTheRemoveCommandForThatSlot()
+    {
+        string configDir = @"C:\Users\test\AppData\Local\ClaudeStatusBar\accounts\2\config";
+
+        OtherAccountRow row = PanelText.ComposeDuplicateAccountRow(1, 0, "Max", configDir);
+
+        Assert.Equal(1, row.AccountIndex);
+        Assert.Equal("Konto 2", row.Label);
+        Assert.Equal(PanelColorRole.Tight, row.Role);
+        Assert.Contains("är samma inloggning som konto 1 (Max)", row.Line);
+        Assert.Contains("add-account.ps1 -Remove 2", row.Line);
+    }
+
+    /// <summary>The default entry (configDir null, "whatever you're logged into") has no scripted slot to remove -- the row must fall back to login-only instructions instead of naming a nonexistent -Remove target.</summary>
+    [Fact]
+    public void Duplicate_DefaultConfigDir_FallsBackToLoginInstructions_NoRemoveCommand()
+    {
+        OtherAccountRow row = PanelText.ComposeDuplicateAccountRow(0, 1, "Team", duplicateConfigDir: null);
+
+        Assert.Equal("Konto 1", row.Label);
+        Assert.Contains("är samma inloggning som konto 2 (Team)", row.Line);
+        Assert.DoesNotContain("-Remove", row.Line);
+        Assert.Contains("claude /login", row.Line);
+    }
+
+    /// <summary>A hand-configured directory that doesn't follow the accounts\&lt;n&gt;\config layout has no slot number either -- same fallback as the default entry.</summary>
+    [Fact]
+    public void Duplicate_NonScriptedConfigDir_FallsBackToLoginInstructions()
+    {
+        OtherAccountRow row = PanelText.ComposeDuplicateAccountRow(2, 0, "Max", @"C:\Users\test\my-custom-claude-dir");
+
+        Assert.DoesNotContain("-Remove", row.Line);
+        Assert.Contains("accounts.json", row.Line);
+    }
 }

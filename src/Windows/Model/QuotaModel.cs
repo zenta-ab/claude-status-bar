@@ -48,6 +48,13 @@ public sealed class QuotaModel : IQuotaModel
     bool _sessionValidLastPoll; // decision 13: was this window present/parseable in the latest successful poll
     bool _weeklyValidLastPoll;
 
+    // Present but closed. Decision 13 forces Measuring and drops global Live when a window is
+    // missing from a successful poll -- correct for missing data, wrong for a window that is
+    // reporting itself shut (docs/forecast-and-states.md, "A closed window is an answer, not an
+    // absence"). Tracked separately so the two cases can say different things.
+    bool _sessionInactiveLastPoll;
+    bool _weeklyInactiveLastPoll;
+
     // Decision 3+5 (round 1) / decision 2 (round 2): freshness deadlines frozen -- in
     // MONOTONIC milliseconds, not UTC -- at the last ACCEPTED poll (never a duplicate), using
     // the POLICY interval only (no reset cap, no backoff). Only a newer accepted poll can move
@@ -59,9 +66,59 @@ public sealed class QuotaModel : IQuotaModel
     // ACCEPTED LIVE sample only -- a duplicate/deduped reply must never re-anchor, or it
     // silently defeats clock-jump detection on the very next tick (review finding 2). Replay
     // never touches this (WarmStart calls WindowTracker.Ingest directly, bypassing
-    // QuotaModel.Ingest).
+    // QuotaModel.Ingest). Deliberately NOT widened to "usable" -- the clock guard needs a real
+    // timing baseline from a sample the tracker actually took.
     DateTimeOffset? _anchorUtc;
     long? _anchorMono;
+
+    // The last poll that delivered a CURRENTLY USABLE reading, which is a wider thing than an
+    // accepted sample and is what freshness is actually about: accepted, OR a window validly
+    // reporting itself closed (see the "usable" local in Ingest). An idle account's every window
+    // can never be accepted -- the tracker has no deadline to track -- so tying freshness to
+    // acceptance alone froze its deadlines forever and decayed it to Unknown while polling kept
+    // succeeding. An inactive window is by definition current, so it refreshes freshness too.
+    long? _lastUsableMono;
+
+    // ---- docs/statistics.md: cycle archive calibration, live-tracked only ----
+
+    string? _lastSubscriptionType; // plan_tier: carried from whichever poll last reported one, never cleared on a window close
+
+    // Did the committed hysteresis state ever reach DryEarly during the window now open? Latched
+    // in Evaluate (the state that is ACTUALLY committed, before GraceCap), reset when that
+    // window's CycleClosed is drained.
+    bool _sessionEverDryEarly;
+    bool _weeklyEverDryEarly;
+
+    // predicted_peak_pct/predicted_at_utc: the forecast's ProjectedPctAtReset, captured once,
+    // the first time Evaluate observes this window at or past 50% elapsed (see
+    // MaybeCapturePredictedPeak). Left null if the app was never running at/after that point
+    // before the window closed -- there is nothing honest to report for a prediction that was
+    // never actually computed.
+    double? _sessionPredictedPeakPct;
+    DateTimeOffset? _sessionPredictedAtUtc;
+    double? _weeklyPredictedPeakPct;
+    DateTimeOffset? _weeklyPredictedAtUtc;
+
+    readonly List<CycleClosed> _pendingClosedCycles = new();
+    readonly List<HourClosed> _pendingClosedHours = new();
+
+    /// <summary>docs/statistics.md: windows closed since the last call -- drain once after every Ingest and persist each to that account's cycles.csv.</summary>
+    public IReadOnlyList<CycleClosed> TakeClosedCycles()
+    {
+        if (_pendingClosedCycles.Count == 0) return Array.Empty<CycleClosed>();
+        CycleClosed[] result = _pendingClosedCycles.ToArray();
+        _pendingClosedCycles.Clear();
+        return result;
+    }
+
+    /// <summary>docs/statistics.md: clock hours closed since the last call -- drain once after every Ingest and persist each to that account's hourly-YYYY.csv.</summary>
+    public IReadOnlyList<HourClosed> TakeClosedHours()
+    {
+        if (_pendingClosedHours.Count == 0) return Array.Empty<HourClosed>();
+        HourClosed[] result = _pendingClosedHours.ToArray();
+        _pendingClosedHours.Clear();
+        return result;
+    }
 
     // Decision 2 (round 2): the latest monoMs the model has received via Ingest/Evaluate (NOT
     // IngestFailure -- the hard constraint names Ingest/Evaluate specifically), used so
@@ -72,6 +129,7 @@ public sealed class QuotaModel : IQuotaModel
     public void Ingest(UsageSnapshot snapshot, DateTimeOffset utcNow, long monoMs)
     {
         _lastKnownMono = monoMs;
+        if (snapshot.SubscriptionType is { } subscriptionType) _lastSubscriptionType = subscriptionType;
 
         // Decision 3 (round 2): session validity requires IsValidPct too, exactly like
         // weekly -- an invalid utilization value must not retain a stale verdict and Live.
@@ -85,10 +143,19 @@ public sealed class QuotaModel : IQuotaModel
         // default (no more "?? 0.0") -- it simply is not fed to the tracker this round, and
         // Evaluate reports that window Measuring ("data saknas") instead of a stale/blended forecast.
         bool sessionAccepted = sessionValid && _session.Ingest(snapshot.SessionUtilization, snapshot.SessionResetsAt, utcNow, monoMs);
+        DrainClosedWindow(_session, WindowKind.Session, ref _sessionEverDryEarly, ref _sessionPredictedPeakPct, ref _sessionPredictedAtUtc);
         bool weeklyAccepted = weeklyValid && _weekly.Ingest(snapshot.WeeklyUtilization!.Value, snapshot.WeeklyResetsAt, utcNow, monoMs);
+        DrainClosedWindow(_weekly, WindowKind.Weekly, ref _weeklyEverDryEarly, ref _weeklyPredictedPeakPct, ref _weeklyPredictedAtUtc);
 
         _sessionValidLastPoll = sessionValid;
         _weeklyValidLastPoll = weeklyValid;
+        // A window is "inactive" (closed, not missing) when it carries a valid percentage but
+        // no trackable deadline AND the server says it is not currently open. sessionValid is
+        // already false in this case (no resets_at), so the two are mutually exclusive.
+        _sessionInactiveLastPoll = !sessionValid && !snapshot.SessionIsActive
+            && QuotaTimeUtil.IsValidPct(snapshot.SessionUtilization);
+        _weeklyInactiveLastPoll = !weeklyValid && !snapshot.WeeklyIsActive
+            && snapshot.WeeklyUtilization is { } wUtil && QuotaTimeUtil.IsValidPct(wUtil);
 
         // Decision 11: hysteresis advances only on accepted (novel) observations -- a
         // duplicate/deduped/out-of-order sample must not count as evidence.
@@ -98,21 +165,31 @@ public sealed class QuotaModel : IQuotaModel
         bool anyAccepted = sessionAccepted || weeklyAccepted;
         if (anyAccepted) _liveDataIngested = true; // decision 6 (round 2): a wholly-unusable poll must not consume WarmStart eligibility
 
+        // "Usable" = something was accepted, OR a window is validly reporting that it is not
+        // currently open. Both are current readings; only a cached duplicate is not.
+        bool usable = anyAccepted || _sessionInactiveLastPoll || _weeklyInactiveLastPoll;
+
         _everSucceeded = true;
         _lastPollAt = utcNow;
         _consecutiveFailures = 0;
         _lastError = null;
 
-        // Decision 2 (round 2): re-anchor and re-freeze freshness deadlines ONLY when this
-        // poll actually delivered a genuinely novel observation. A cached duplicate must never
-        // renew either -- doing so silently defeats clock-jump detection on the very next tick
-        // and extends freshness/a confident verdict on data that is not actually new (review
-        // finding 2's three examples).
+        // Decision 2 (round 2): re-anchor the CLOCK GUARD only when this poll actually delivered
+        // a genuinely novel accepted observation. A cached duplicate must never renew it --
+        // doing so silently defeats clock-jump detection on the very next tick (review finding
+        // 2's three examples). Deliberately not widened to "usable": the clock guard needs a
+        // real timing baseline from a sample the tracker actually took.
         if (anyAccepted)
         {
             _anchorUtc = utcNow;
             _anchorMono = monoMs;
+        }
 
+        // Freshness moves on any USABLE reading, which includes a window validly reporting
+        // itself closed -- see _lastUsableMono's doc comment.
+        if (usable)
+        {
+            _lastUsableMono = monoMs;
             TimeSpan cPolicy = PolicyInterval(utcNow);
             _freshnessStaleAtMono = monoMs + (long)(cPolicy.TotalMilliseconds * 3);
             _freshnessUnknownAtMono = monoMs + (long)(cPolicy.TotalMilliseconds * 10);
@@ -187,6 +264,47 @@ public sealed class QuotaModel : IQuotaModel
     static string DefaultLogDir() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "logs");
 
+    /// <summary>
+    /// docs/statistics.md: converts a just-closed WindowTracker window (and/or clock hour) into
+    /// the archive's own DTOs, adding the calibration fields only QuotaModel knows, then resets
+    /// those calibration fields for the window that just opened. A no-op, cheaply, on the
+    /// overwhelmingly common call where nothing closed.
+    /// </summary>
+    void DrainClosedWindow(WindowTracker tracker, WindowKind kind, ref bool everDryEarly, ref double? predictedPeakPct, ref DateTimeOffset? predictedAtUtc)
+    {
+        if (tracker.TakePendingClosedWindow() is { } closed)
+        {
+            DateTimeOffset startedUtc = QuotaTimeUtil.SafeAddMinutes(closed.ResetUtc, -closed.WindowMinutes) ?? closed.ResetUtc;
+            _pendingClosedCycles.Add(new CycleClosed(
+                Kind: kind, StartedUtc: startedUtc, ResetUtc: closed.ResetUtc,
+                PeakPct: closed.PeakPct, FinalPct: closed.FinalPct, HitCeiling: closed.HitCeiling,
+                BlockedMinutes: closed.BlockedMinutes, CoveredMinutes: closed.CoveredMinutes,
+                PlanTier: _lastSubscriptionType, WarnedDryEarly: everDryEarly,
+                PredictedPeakPct: predictedPeakPct, PredictedAtUtc: predictedAtUtc,
+                CeilingReachedAtUtc: closed.CeilingReachedAtUtc, CeilingReachedCensored: closed.CeilingReachedCensored));
+            everDryEarly = false;
+            predictedPeakPct = null;
+            predictedAtUtc = null;
+        }
+
+        if (tracker.TakePendingClosedHour() is { } closedHour)
+        {
+            _pendingClosedHours.Add(new HourClosed(
+                kind, closedHour.HourStartUtc, closedHour.ConsumedPct, closedHour.Samples, closedHour.CoveredMinutes));
+        }
+    }
+
+    /// <summary>docs/statistics.md: captures the forecast's ProjectedPctAtReset once, the first time this window is observed at or past 50% elapsed -- never during a clock jump, whose E/t_reset are themselves suspect.</summary>
+    static void MaybeCapturePredictedPeak(ref double? predictedPct, ref DateTimeOffset? predictedAt, WindowSnapshot snap, double windowMinutes, DateTimeOffset utcNow)
+    {
+        if (predictedAt is not null) return; // already captured this window
+        if (snap.ResetsAt is not { } resetsAt || snap.Forecast is not { } f) return;
+        double elapsed = windowMinutes - (resetsAt - utcNow).TotalMinutes;
+        if (elapsed < windowMinutes / 2.0) return;
+        predictedPct = f.ProjectedPctAtReset;
+        predictedAt = utcNow;
+    }
+
     static void StepHysteresis(WindowTracker tracker, HysteresisHold hold, DateTimeOffset utcNow, long monoMs, bool isWeekly)
     {
         WindowSnapshot snap = tracker.ComputeSnapshot(utcNow, monoMs, isWeekly);
@@ -206,6 +324,16 @@ public sealed class QuotaModel : IQuotaModel
         WindowSnapshot sessionSnap = _session.ComputeSnapshot(utcNow, monoMs, isWeekly: false);
         WindowSnapshot weeklySnap = _weekly.ComputeSnapshot(utcNow, monoMs, isWeekly: true);
 
+        // docs/statistics.md calibration fields: never captured/latched off a clock jump's own
+        // suspect E/t_reset or a committed state that jump forces back to Measuring anyway.
+        if (!clockJump)
+        {
+            MaybeCapturePredictedPeak(ref _sessionPredictedPeakPct, ref _sessionPredictedAtUtc, sessionSnap, QuotaWindows.SessionMinutes, utcNow);
+            MaybeCapturePredictedPeak(ref _weeklyPredictedPeakPct, ref _weeklyPredictedAtUtc, weeklySnap, QuotaWindows.WeeklyMinutes, utcNow);
+            if (_sessionHold.Committed == QuotaState.DryEarly) _sessionEverDryEarly = true;
+            if (_weeklyHold.Committed == QuotaState.DryEarly) _weeklyEverDryEarly = true;
+        }
+
         // Decision 4 (round 2): a window stuck in Measuring commits its first verdict the
         // instant it is no longer refused, even with no new accepted sample -- covers the
         // rollover/weekly-24h gates lifting purely with elapsed time, and a WarmStart-seeded
@@ -219,9 +347,11 @@ public sealed class QuotaModel : IQuotaModel
         QuotaState weeklyFinal = clockJump ? QuotaState.Measuring : FinalState(_weeklyHold, weeklySnap, _weeklyValidLastPoll);
 
         MeasuringReasonCode? sessionForcedReason = clockJump ? MeasuringReasonCode.ClockJump
-            : !_sessionValidLastPoll ? MeasuringReasonCode.DataMissing : null;
+            : _sessionValidLastPoll ? null
+            : _sessionInactiveLastPoll ? MeasuringReasonCode.WindowInactive : MeasuringReasonCode.DataMissing;
         MeasuringReasonCode? weeklyForcedReason = clockJump ? MeasuringReasonCode.ClockJump
-            : !_weeklyValidLastPoll ? MeasuringReasonCode.DataMissing : null;
+            : _weeklyValidLastPoll ? null
+            : _weeklyInactiveLastPoll ? MeasuringReasonCode.WindowInactive : MeasuringReasonCode.DataMissing;
 
         WindowView sessionView = BuildView(WindowKind.Session, QuotaWindows.SessionMinutes, sessionSnap, sessionFinal, utcNow, sessionForcedReason);
         WindowView weeklyView = BuildView(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, weeklySnap, weeklyFinal, utcNow, weeklyForcedReason);
@@ -235,11 +365,13 @@ public sealed class QuotaModel : IQuotaModel
 
         var freshnessInputs = new FreshnessInputs(
             _everSucceeded, _freshnessStaleAtMono, _freshnessUnknownAtMono,
-            _anchorMono, sessionSnap.ResetsAt, weeklySnap.ResetsAt, clockJump);
+            _lastUsableMono, sessionSnap.ResetsAt, weeklySnap.ResetsAt, clockJump);
         Freshness freshness = FreshnessOracle.Evaluate(freshnessInputs, utcNow, monoMs);
 
-        // Decision 13: global Live requires a valid session window.
-        if (freshness == Freshness.Live && !_sessionValidLastPoll) freshness = Freshness.Stale;
+        // Decision 13: global Live requires a USABLE session window. A window reporting itself
+        // CLOSED counts -- it is an answer, not an absence -- otherwise an account nobody has
+        // used for a while reads as stale forever while its polls succeed.
+        if (freshness == Freshness.Live && !_sessionValidLastPoll && !_sessionInactiveLastPoll) freshness = Freshness.Stale;
 
         return new QuotaView(
             sessionView, weeklyView, freshness,
@@ -323,6 +455,7 @@ public sealed class QuotaModel : IQuotaModel
         MeasuringReasonCode.NoData => "Hämtar…",
         MeasuringReasonCode.AwaitingReset => "Nytt fönster väntas",
         MeasuringReasonCode.DataMissing => "Data saknas",
+        MeasuringReasonCode.WindowInactive => "Inget förbrukat ännu",
         MeasuringReasonCode.ClockJump => "Klockan ändrades, mäter om…",
         _ => "Mäter takt…",
     };

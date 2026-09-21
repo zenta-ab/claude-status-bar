@@ -1016,6 +1016,125 @@ public class QuotaModelTests
         }
     }
 
+    // ==================== A1: idle account freshness (2026-09-21) ====================
+    // Ported from src/Mac/Tests/ClaudeQuotaCoreTests/PollCadenceTests.swift's
+    // IdleAccountFreshnessTests, one-for-one: the bug that put "!" on an idle account after two
+    // days. Every window inactive (utilization 0, resets_at null, is_active false) means nothing
+    // can ever be *accepted* -- the tracker has no deadline to track -- so the freshness
+    // deadlines froze at the last accept and decayed to Unknown, while polling succeeded every
+    // 150 s and the honest answer was "0 % used, nothing running". Freshness is about whether
+    // the reading is CURRENT, not whether the tracker could track it.
+
+    static readonly TimeSpan IdleIntervalForTests = TimeSpan.FromSeconds(150);
+
+    static UsageSnapshot IdleSnapshot(DateTimeOffset now) => new(
+        SessionUtilization: 0.0, SessionResetsAt: null,
+        WeeklyUtilization: 0.0, WeeklyResetsAt: null,
+        ReceivedAt: now, SubscriptionType: "team",
+        SessionIsActive: false, WeeklyIsActive: false);
+
+    [Fact]
+    public void IdleAccount_AllWindowsInactive_StaysLive_WhilePolling()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
+        model.Ingest(IdleSnapshot(baseTime), baseTime, 0);
+        Assert.Equal(Freshness.Live, model.Evaluate(baseTime, 0).Freshness);
+
+        // Two days of successful polls at the idle cadence. Before the fix, freshness went
+        // Unknown ~25 minutes in and never came back.
+        long mono = 0;
+        DateTimeOffset now = baseTime;
+        for (int i = 0; i < 1000; i++)
+        {
+            now = now.Add(IdleIntervalForTests);
+            mono += (long)IdleIntervalForTests.TotalMilliseconds;
+            model.Ingest(IdleSnapshot(now), now, mono);
+        }
+
+        QuotaView view = model.Evaluate(now, mono);
+        Assert.Equal(Freshness.Live, view.Freshness);
+        Assert.Equal(QuotaState.Measuring, view.IconSeverity); // there is no verdict to give without a window
+        Assert.Null(view.Session.UsedPct); // no window means no percentage to show, not 0 %
+    }
+
+    [Fact]
+    public void IdleAccount_FreshnessStillDecays_WhenPollingActuallyStops()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
+        model.Ingest(IdleSnapshot(baseTime), baseTime, 0);
+        Assert.Equal(Freshness.Live, model.Evaluate(baseTime, 0).Freshness);
+
+        // No further ingest at all -- only the UI tick. 11x the idle policy interval.
+        DateTimeOffset later = baseTime.Add(TimeSpan.FromTicks(IdleIntervalForTests.Ticks * 11));
+        long mono = (long)IdleIntervalForTests.TotalMilliseconds * 11;
+        Assert.Equal(Freshness.Unknown, model.Evaluate(later, mono).Freshness);
+    }
+
+    [Fact]
+    public void IdleAccount_DuplicateOnAnActiveWindow_StillDoesNotRenewFreshness()
+    {
+        // A cached duplicate on an ACTIVE window must still not renew freshness -- round-2
+        // decision 2, and widening "usable" must not have widened it away.
+        var model = new QuotaModel();
+        DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
+        DateTimeOffset resetsAt = baseTime.AddSeconds(168 * 60); // matches the Swift port's addingTimeInterval(168*60)
+        var live = new UsageSnapshot(56.0, Raw(resetsAt), null, null, baseTime);
+        model.Ingest(live, baseTime, 0);
+
+        long mono = 0;
+        DateTimeOffset now = baseTime;
+        for (int i = 0; i < 20; i++)
+        {
+            now = now.Add(IdleIntervalForTests);
+            mono += (long)IdleIntervalForTests.TotalMilliseconds;
+            model.Ingest(live, now, mono); // same fingerprint, over and over
+        }
+
+        Assert.NotEqual(Freshness.Live, model.Evaluate(now, mono).Freshness);
+    }
+
+    [Fact]
+    public void IdleAccount_ClosedSessionWithLiveWeekly_StaysLive()
+    {
+        // A half-idle account -- session closed, weekly running -- is the common case after a
+        // session expires mid-week, and must behave like the fully idle one.
+        var model = new QuotaModel();
+        DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
+        DateTimeOffset weeklyResets = baseTime.AddDays(3);
+
+        long mono = 0;
+        DateTimeOffset now = baseTime;
+        for (int step = 0; step < 20; step++)
+        {
+            now = now.Add(IdleIntervalForTests);
+            mono += (long)IdleIntervalForTests.TotalMilliseconds;
+            // Weekly keeps a novel fingerprint; session is closed.
+            var snapshot = new UsageSnapshot(
+                SessionUtilization: 0.0, SessionResetsAt: null,
+                WeeklyUtilization: 17.0, WeeklyResetsAt: Raw(weeklyResets, jitter: step),
+                ReceivedAt: now, SubscriptionType: "max",
+                SessionIsActive: false, WeeklyIsActive: true);
+            model.Ingest(snapshot, now, mono);
+        }
+
+        Assert.Equal(Freshness.Live, model.Evaluate(now, mono).Freshness);
+    }
+
+    [Fact]
+    public void IdleAccount_ClosedSession_ReportsWindowInactive_NotDataMissing()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
+        model.Ingest(IdleSnapshot(baseTime), baseTime, 0);
+
+        QuotaView view = model.Evaluate(baseTime, 0);
+        Assert.Equal(QuotaState.Measuring, view.Session.State);
+        Assert.Equal("Inget förbrukat ännu", view.Session.MeasuringReason);
+        Assert.Equal("Inget förbrukat ännu", view.Weekly.MeasuringReason);
+    }
+
     static string WriteCsv(IEnumerable<(DateTimeOffset Utc, long Mono, double Pct, string ResetsAtRaw)> rows)
     {
         string path = Path.Combine(Path.GetTempPath(), $"warmstart-{Guid.NewGuid():N}.csv");

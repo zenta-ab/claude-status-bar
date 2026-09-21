@@ -21,6 +21,10 @@ public enum MeasuringReasonCode: Sendable {
     case tooLittleUsage  // P < 3
     case awaitingReset   // resets_at has passed but no new window has been observed yet
     case dataMissing     // absent/invalid in the latest successful poll (decision 13)
+    /// The server reported this window as **closed**: a valid percentage, no `resets_at`,
+    /// `is_active` false. Distinct from `dataMissing` — the data is present and says "nothing
+    /// is running", which is an answer, not an absence.
+    case windowInactive
     case clockJump       // utcNow is inconsistent with the monotonic anchor (decision 6)
 }
 

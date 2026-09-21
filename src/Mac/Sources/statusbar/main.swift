@@ -44,6 +44,46 @@ while let argument = arguments.first {
 /// decision 6) so a clock change cannot move a deadline or a verdict.
 func monotonicMs() -> Int64 { Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000) }
 
+/// A rolling diagnostic log.
+///
+/// Launched from a terminal the app prints to stdout; launched as a bundle — which is how it
+/// actually runs — that output goes nowhere. An "!" that appeared after two days then had to be
+/// reconstructed from the window-shape CSVs, because nothing recorded what the app itself
+/// believed. One line per state change is cheap and makes the next one answerable.
+///
+/// It records verdicts and freshness, never response bodies: this file must stay safe to read
+/// out loud.
+enum DiagnosticLog {
+    private static let maximumBytes = 2 * 1024 * 1024
+    private static let url: URL = {
+        let directory = ChildProcessSpec.applicationSupportDirectory().appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("statusbar.log")
+    }()
+
+    static func write(_ line: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let entry = "\(stamp)  \(line)\n"
+        print(line)   // still useful when run from a terminal
+        rotateIfNeeded()
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? Data(entry.utf8).write(to: url)
+            return
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(entry.utf8))
+    }
+
+    private static func rotateIfNeeded() {
+        guard let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+              size > maximumBytes else { return }
+        try? FileManager.default.removeItem(at: url.appendingPathExtension("1"))
+        try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("1"))
+    }
+}
+
 /// One account's child, model, icon and last reading.
 @MainActor
 final class AccountRuntime {
@@ -164,9 +204,11 @@ final class AccountRuntime {
                 log?.append(snapshot, at: utcNow, monoMs: mono, latencyMs: latency * 1000)
             } else {
                 model.ingestFailure(result.error ?? "inget svar", utcNow: utcNow, monoMs: mono)
+                DiagnosticLog.write("\(label): poll unusable — \(result.error ?? "inget svar")")
             }
         } catch {
             model.ingestFailure("\(error)", utcNow: utcNow, monoMs: mono)
+            DiagnosticLog.write("\(label): poll failed — \(error)")
         }
         scheduleNextPoll(from: utcNow)
     }
@@ -271,8 +313,8 @@ func settleLabels() {
 func start() {
     let config = AccountsConfig.load()
     let enabled = Array(config.enabledAccounts.prefix(max(1, config.maxIcons)))
-    print("accounts.json: \(AccountsConfig.fileURL.path)")
-    print("\(enabled.count) enabled account(s)\n")
+    DiagnosticLog.write("started — \(enabled.count) enabled account(s), "
+        + "accounts.json at \(AccountsConfig.fileURL.path)")
 
     for (index, account) in enabled.enumerated() {
         let slot = account.configDir == nil ? "default" : "\(index)"
@@ -281,7 +323,7 @@ func start() {
                                                labelOverride: account.label))
         let location = account.configDir.map { $0.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
             ?? "(Claude Code's own default login)"
-        print("  [\(index)] \(location)")
+        DiagnosticLog.write("  [\(index)] \(location)")
     }
 
     for runtime in Runtime.accounts { runtime.poll() }
@@ -313,9 +355,7 @@ func tick() {
     let line = summaries.joined(separator: "   |   ")
     if line != Runtime.lastPrinted {
         Runtime.lastPrinted = line
-        let stamp = DateFormatter()
-        stamp.dateFormat = "HH:mm:ss"
-        print("\(stamp.string(from: now))  \(line)")
+        DiagnosticLog.write(line)
     }
 }
 

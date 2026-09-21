@@ -193,6 +193,28 @@ genuinely no blockage — `shortfall < 1 min` **and** `rem > 3` — so DryEarly'
 **Windows has the same gap** (`PanelText.ComposeDryEarly` formats `Shortfall` unconditionally)
 and is not yet fixed; the Swift side is (`GraceCap.ApplyNoShortfall`).
 
+**A closed window is an answer, not an absence** (added 2026-09-21, from two days of the running
+macOS app). When no 5 h session is open — nothing run for five hours, or a weekly window just past
+its reset with nothing consumed — the server replies `{utilization: 0, resets_at: null,
+is_active: false}`. That window can never be *accepted*: the tracker has no deadline to track.
+
+Two rules were tied to acceptance and both got this wrong:
+
+- **Freshness deadlines** re-froze only on an accepted sample, so an idle account's froze at its
+  last accept and decayed to Unknown — the menu bar showed "!" for two days while polling
+  succeeded every 150 s and the honest answer was "0 % used, nothing running". Freshness now
+  follows a *usable* reading: accepted, **or** a window validly reporting itself closed. A cached
+  duplicate on an open window still does not renew it (round-2 decision 2 is unchanged).
+- **Decision 13's "global Live requires a valid session window"** treated a closed session as
+  missing data. It now accepts a closed one, and the window's reason is
+  `MeasuringReasonCode.WindowInactive` ("Inget förbrukat ännu") rather than "Data saknas" —
+  the data is present and says nothing is running.
+
+The clock guard's UTC↔monotonic anchor is deliberately NOT widened: it needs a real timing
+baseline from a sample the tracker actually took.
+
+**Windows has the same two gaps** and is not yet fixed; the Swift side is.
+
 **Hysteresis** (on *accepted* observations, never on a poll tick, a duplicate/deduped sample, or
 a transport failure):
 

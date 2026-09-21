@@ -85,6 +85,7 @@ public enum PanelText {
     // "X % använt · återställs …" line.
     static let awaitingResetText = "Nytt fönster väntas"
     static let tooEarlyInWeekText = "För tidigt i veckan — väntar på ett helt dygn"
+    static let windowInactiveText = "Inget förbrukat ännu"
 
     public static func compose(_ view: QuotaView, now: Date, timeZone: TimeZone) -> PanelTextResult {
         PanelTextResult(
@@ -334,7 +335,8 @@ public enum PanelText {
         if window.state == .measuring {
             // Gated on the reason text, the same two literals as the status box, not on state
             // alone — the generic "för tidigt för prognos" wording covers every other reason.
-            if let reason = window.measuringReason, reason == awaitingResetText || reason == tooEarlyInWeekText {
+            if let reason = window.measuringReason,
+               reason == awaitingResetText || reason == tooEarlyInWeekText || reason == windowInactiveText {
                 return reason
             }
             return "\(pct) använt · för tidigt för prognos"

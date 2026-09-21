@@ -42,6 +42,11 @@ public final class QuotaModel: QuotaModelling {
     /// Decision 13: was this window present/parseable in the latest successful poll?
     private var sessionValidLastPoll = false
     private var weeklyValidLastPoll = false
+    /// Present but closed. Decision 13 forces Measuring and drops global Live when a window is
+    /// missing from a successful poll — correct for missing data, wrong for a window that is
+    /// reporting itself shut. Tracked separately so the two cases can say different things.
+    private var sessionInactiveLastPoll = false
+    private var weeklyInactiveLastPoll = false
 
     /// Freshness deadlines, frozen in MONOTONIC milliseconds at the last ACCEPTED poll (never a
     /// duplicate), using the POLICY interval only (no reset cap, no backoff).
@@ -52,6 +57,20 @@ public final class QuotaModel: QuotaModelling {
     /// re-anchor, or it silently defeats clock-jump detection on the very next tick.
     private var anchorUtc: Date?
     private var anchorMono: Int64?
+
+    /// The last poll that delivered a **currently usable reading**, which is a wider thing than
+    /// an accepted sample and is what freshness is actually about.
+    ///
+    /// A window with no `resets_at` — an expired 5 h session, or a weekly window just after its
+    /// reset with nothing consumed — can never be accepted, because the tracker has no deadline
+    /// to track. Tying freshness to acceptance therefore froze its deadlines forever: an account
+    /// nobody had used in a while decayed to Unknown and showed "!" in the menu bar while its
+    /// polls were succeeding every 150 s and the honest answer was "0 % used, nothing running".
+    ///
+    /// An inactive window is by definition current — there is no older cached state it could be
+    /// a stale copy of — so it refreshes freshness. It does **not** re-anchor the clock guard:
+    /// that needs a real timing baseline from a sample the tracker actually took.
+    private var lastUsableMono: Int64?
 
     /// The latest monoMs received via ingest/evaluate (NOT ingestFailure), so `nextPollDelay`,
     /// whose signature carries no monoMs, can still classify "burning" monotonically.
@@ -70,6 +89,7 @@ public final class QuotaModel: QuotaModelling {
 
         // Round-2 decision 3: session validity requires a valid percentage too, exactly like
         // weekly — an invalid utilization must not retain a stale verdict and Live.
+        // "Valid" here means trackable: a percentage AND a deadline to measure it against.
         let sessionValid = QuotaTimeUtil.parseResetsAt(snapshot.sessionResetsAt) != nil
             && snapshot.sessionUtilization.map(QuotaTimeUtil.isValidPct) == true
         let weeklyValid = snapshot.weeklyUtilization.map(QuotaTimeUtil.isValidPct) == true
@@ -87,6 +107,10 @@ public final class QuotaModel: QuotaModelling {
 
         sessionValidLastPoll = sessionValid
         weeklyValidLastPoll = weeklyValid
+        sessionInactiveLastPoll = !sessionValid && !snapshot.sessionIsActive
+            && snapshot.sessionUtilization.map(QuotaTimeUtil.isValidPct) == true
+        weeklyInactiveLastPoll = !weeklyValid && !snapshot.weeklyIsActive
+            && snapshot.weeklyUtilization.map(QuotaTimeUtil.isValidPct) == true
 
         // Decision 11: hysteresis advances only on accepted (novel) observations.
         if sessionAccepted {
@@ -99,16 +123,30 @@ public final class QuotaModel: QuotaModelling {
         let anyAccepted = sessionAccepted || weeklyAccepted
         if anyAccepted { liveDataIngested = true }
 
+        // "Usable" = something was accepted, OR a window is validly reporting that it is not
+        // currently open. Both are current readings; only a cached duplicate is not.
+        let usable = anyAccepted
+            || (!sessionValid && !snapshot.sessionIsActive
+                && snapshot.sessionUtilization.map(QuotaTimeUtil.isValidPct) == true)
+            || (!weeklyValid && !snapshot.weeklyIsActive
+                && snapshot.weeklyUtilization.map(QuotaTimeUtil.isValidPct) == true)
+
         everSucceeded = true
         lastPollAt = utcNow
         consecutiveFailures = 0
         lastError = nil
 
-        // Round-2 decision 2: re-anchor and re-freeze freshness deadlines ONLY when this poll
-        // actually delivered a genuinely novel observation.
+        // Round-2 decision 2: re-anchor the CLOCK GUARD only on a genuinely novel accepted
+        // observation — a deduped reply must never renew it.
         if anyAccepted {
             anchorUtc = utcNow
             anchorMono = monoMs
+        }
+
+        // Freshness moves on any usable reading, which includes a window validly reporting
+        // itself closed. See `lastUsableMono`.
+        if usable {
+            lastUsableMono = monoMs
             let cPolicy = policyInterval(utcNow: utcNow)
             freshnessStaleAtMono = monoMs + Int64(cPolicy * 1000 * 3)
             freshnessUnknownAtMono = monoMs + Int64(cPolicy * 1000 * 10)
@@ -191,9 +229,9 @@ public final class QuotaModel: QuotaModelling {
         let weeklyFinal = clockJump ? .measuring : finalState(weeklyHold, weeklySnap, weeklyValidLastPoll)
 
         let sessionForcedReason: MeasuringReasonCode? = clockJump ? .clockJump
-            : (!sessionValidLastPoll ? .dataMissing : nil)
+            : (sessionValidLastPoll ? nil : (sessionInactiveLastPoll ? .windowInactive : .dataMissing))
         let weeklyForcedReason: MeasuringReasonCode? = clockJump ? .clockJump
-            : (!weeklyValidLastPoll ? .dataMissing : nil)
+            : (weeklyValidLastPoll ? nil : (weeklyInactiveLastPoll ? .windowInactive : .dataMissing))
 
         let sessionView = buildView(.session, QuotaWindows.sessionMinutes, sessionSnap,
                                     sessionFinal, utcNow, sessionForcedReason)
@@ -210,13 +248,15 @@ public final class QuotaModel: QuotaModelling {
 
         let inputs = FreshnessInputs(
             hasEverSucceeded: everSucceeded, staleAtMono: freshnessStaleAtMono,
-            unknownAtMono: freshnessUnknownAtMono, lastAcceptedMono: anchorMono,
+            unknownAtMono: freshnessUnknownAtMono, lastAcceptedMono: lastUsableMono,
             sessionResetsAt: sessionSnap.resetsAt, weeklyResetsAt: weeklySnap.resetsAt,
             clockDiscontinuity: clockJump)
         var freshness = FreshnessOracle.evaluate(inputs, utcNow: utcNow, monoMs: monoMs)
 
-        // Decision 13: global Live requires a valid session window.
-        if freshness == .live, !sessionValidLastPoll { freshness = .stale }
+        // Decision 13: global Live requires a usable session window. A window reporting itself
+        // CLOSED counts — it is an answer, not an absence — otherwise an account nobody has used
+        // for a while reads as stale forever while its polls succeed.
+        if freshness == .live, !sessionValidLastPoll, !sessionInactiveLastPoll { freshness = .stale }
 
         return QuotaView(
             session: sessionView, weekly: weeklyView, freshness: freshness,
@@ -294,6 +334,7 @@ public final class QuotaModel: QuotaModelling {
         case .noData: return "Hämtar…"
         case .awaitingReset: return "Nytt fönster väntas"
         case .dataMissing: return "Data saknas"
+        case .windowInactive: return "Inget förbrukat ännu"
         case .clockJump: return "Klockan ändrades, mäter om…"
         case .none: return "Mäter takt…"
         }

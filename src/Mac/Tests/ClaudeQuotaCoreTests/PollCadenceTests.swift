@@ -281,3 +281,100 @@ struct NoShortfallClampTests {
         #expect(box.line1 == "Tajt — kvoten räcker precis")
     }
 }
+
+/// The bug that put "!" on an idle account after two days: every window inactive, so nothing
+/// could ever be *accepted*, so the freshness deadlines froze at the last accept and decayed to
+/// Unknown — while polling succeeded every 150 s and the honest answer was "0 % used, nothing
+/// running". Freshness is about whether the reading is CURRENT, not whether the tracker could
+/// track it.
+@Suite("Idle account freshness")
+struct IdleAccountFreshnessTests {
+    static let base = utc("2026-09-21T10:00:00.000000+00:00")
+
+    /// Verbatim shape of the real replies: no session, no weekly, nothing consumed.
+    private func idleSnapshot() -> UsageSnapshot {
+        UsageSnapshot(sessionUtilization: 0, sessionResetsAt: nil,
+                      weeklyUtilization: 0, weeklyResetsAt: nil,
+                      subscriptionType: "team", sessionIsActive: false, weeklyIsActive: false,
+                      observedAt: Self.base, source: .limitsArray)
+    }
+
+    @Test("an account whose windows are all inactive stays Live while it is polling")
+    func idleAccountStaysLive() {
+        let model = QuotaModel()
+        model.ingest(idleSnapshot(), utcNow: Self.base, monoMs: 0)
+        #expect(model.evaluate(utcNow: Self.base, monoMs: 0).freshness == .live)
+
+        // Two days of successful polls at the idle cadence. Before the fix, freshness went
+        // Unknown ~25 minutes in and never came back.
+        var mono: Int64 = 0
+        var now = Self.base
+        for _ in 0..<1000 {
+            now = now.addingTimeInterval(QuotaModel.idleInterval)
+            mono += Int64(QuotaModel.idleInterval * 1000)
+            model.ingest(idleSnapshot(), utcNow: now, monoMs: mono)
+        }
+        let view = model.evaluate(utcNow: now, monoMs: mono)
+        #expect(view.freshness == .live, "an idle but healthy account decayed to \(view.freshness)")
+        #expect(view.iconSeverity == .measuring, "there is no verdict to give without a window")
+        #expect(view.session.usedPct == nil, "no window means no percentage to show, not 0 %")
+    }
+
+    /// The protection that motivated tying freshness to acceptance must survive: a genuinely
+    /// stale channel — polls stop entirely — still decays.
+    @Test("freshness still decays when the polls actually stop")
+    func stoppedPollingStillDecays() {
+        let model = QuotaModel()
+        model.ingest(idleSnapshot(), utcNow: Self.base, monoMs: 0)
+        #expect(model.evaluate(utcNow: Self.base, monoMs: 0).freshness == .live)
+
+        // No further ingest at all — only the UI tick. 10 × the idle policy interval.
+        let later = Self.base.addingTimeInterval(QuotaModel.idleInterval * 11)
+        let mono = Int64(QuotaModel.idleInterval * 11 * 1000)
+        #expect(model.evaluate(utcNow: later, monoMs: mono).freshness == .unknown)
+    }
+
+    /// And a cached duplicate on an ACTIVE window must still not renew freshness — that is
+    /// round-2 decision 2, and widening "usable" must not have widened it away.
+    @Test("a deduped duplicate on an active window does not renew freshness")
+    func duplicateStillDoesNotRenew() {
+        let model = QuotaModel()
+        let resetsAt = Self.base.addingTimeInterval(168 * 60)
+        let live = UsageSnapshot.make(session: 56, sessionResets: wireFormat(resetsAt))
+        model.ingest(live, utcNow: Self.base, monoMs: 0)
+
+        // The same fingerprint, over and over, for well past the Unknown deadline.
+        var mono: Int64 = 0
+        var now = Self.base
+        for _ in 0..<20 {
+            now = now.addingTimeInterval(QuotaModel.idleInterval)
+            mono += Int64(QuotaModel.idleInterval * 1000)
+            model.ingest(live, utcNow: now, monoMs: mono)
+        }
+        #expect(model.evaluate(utcNow: now, monoMs: mono).freshness != .live,
+                "a cached duplicate renewed freshness on data that was not new")
+    }
+
+    /// A half-idle account — session closed, weekly running — is the common case after a session
+    /// expires mid-week, and must behave like the fully idle one.
+    @Test("a closed session with a live weekly window stays Live")
+    func halfIdleStaysLive() {
+        let model = QuotaModel()
+        let weeklyResets = Self.base.addingTimeInterval(3 * 86_400)
+        var mono: Int64 = 0
+        var now = Self.base
+        for step in 0..<20 {
+            now = now.addingTimeInterval(QuotaModel.idleInterval)
+            mono += Int64(QuotaModel.idleInterval * 1000)
+            // Weekly keeps a novel fingerprint; session is closed.
+            let fingerprint = wireFormat(weeklyResets.addingTimeInterval(Double(step) * 0.000017))
+            model.ingest(UsageSnapshot(sessionUtilization: 0, sessionResetsAt: nil,
+                                       weeklyUtilization: 17, weeklyResetsAt: fingerprint,
+                                       subscriptionType: "max", sessionIsActive: false,
+                                       weeklyIsActive: true, observedAt: now,
+                                       source: .limitsArray),
+                         utcNow: now, monoMs: mono)
+        }
+        #expect(model.evaluate(utcNow: now, monoMs: mono).freshness == .live)
+    }
+}

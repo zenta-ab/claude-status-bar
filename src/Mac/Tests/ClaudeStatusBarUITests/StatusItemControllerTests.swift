@@ -136,3 +136,55 @@ struct PanelLayoutTests {
         #expect(view.measuredHeight(for: 340) == first, "a measurement at another width leaked")
     }
 }
+
+/// "Uppdaterad för 0 sekunder sedan — kan vara inaktuell" was two different clocks in one
+/// sentence: `lastPollAt` is when we last ASKED, staleness is about when the answer last CHANGED.
+/// The contract keeps those apart in `lastChangedAt` and `lastPollAt` precisely so the panel
+/// cannot confuse them.
+@Suite("Panel freshness line")
+@MainActor
+struct PanelFreshnessLineTests {
+
+    private func view(freshness: Freshness, changedAgo: TimeInterval?, polledAgo: TimeInterval,
+                      now: Date) -> QuotaView {
+        QuotaView(session: .empty(.session, QuotaWindows.sessionMinutes),
+                  weekly: .empty(.weekly, QuotaWindows.weeklyMinutes),
+                  freshness: freshness,
+                  lastChangedAt: changedAgo.map { now.addingTimeInterval(-$0) },
+                  lastPollAt: now.addingTimeInterval(-polledAgo),
+                  pollInterval: 150, error: nil, iconSeverity: .measuring, blockedUntil: nil)
+    }
+
+    /// This target has no access to the core suite's helper.
+    private func utc(_ text: String) -> Date { QuotaTimeUtil.parseResetsAt(text)! }
+
+    /// The contradiction, reproduced exactly: polled a moment ago, data 23 minutes old, Stale.
+    @Test("a fresh poll over stale data reports the DATA's age, not the poll's")
+    func reportsDataAgeNotPollAge() {
+        let now = utc("2026-09-21T10:00:00+00:00")
+        let quotaView = view(freshness: .stale, changedAgo: 23 * 60, polledAgo: 0, now: now)
+
+        // The status box is where the staleness is explained, with the same 23 minutes.
+        let box = PanelText.compose(quotaView, now: now, timeZone: TimeZone(secondsFromGMT: 0)!).statusBox
+        #expect(box.line3 == "Datan kan vara inaktuell — senast ändrad för 23 min sedan")
+
+        // And the two fields must not be the same value, or the test proves nothing.
+        #expect(quotaView.lastChangedAt != quotaView.lastPollAt)
+    }
+
+    @Test("an account with nothing trackable still reports an age, not Hämtar… forever")
+    func idleAccountStillReportsAnAge() {
+        let base = utc("2026-09-21T10:00:00.000000+00:00")
+        let model = QuotaModel()
+        let idle = UsageSnapshot(sessionUtilization: 0, sessionResetsAt: nil,
+                                 weeklyUtilization: 0, weeklyResetsAt: nil,
+                                 subscriptionType: "team", sessionIsActive: false,
+                                 weeklyIsActive: false, observedAt: base, source: .limitsArray)
+        model.ingest(idle, utcNow: base, monoMs: 0)
+        let quotaView = model.evaluate(utcNow: base, monoMs: 0)
+        // No window was ever accepted, so session.lastAcceptedUtc is nil — the age has to come
+        // from the last usable poll instead.
+        #expect(quotaView.lastChangedAt != nil, "a healthy idle account reported no data age at all")
+        #expect(quotaView.freshness == .live)
+    }
+}

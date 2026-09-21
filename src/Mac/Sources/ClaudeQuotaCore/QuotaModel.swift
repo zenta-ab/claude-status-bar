@@ -71,6 +71,12 @@ public final class QuotaModel: QuotaModelling {
     /// a stale copy of — so it refreshes freshness. It does **not** re-anchor the clock guard:
     /// that needs a real timing baseline from a sample the tracker actually took.
     private var lastUsableMono: Int64?
+    /// The UTC side of the same thing, for `QuotaView.lastChangedAt`. An account whose windows
+    /// are all closed never accepts a sample, so `session.lastAcceptedUtc` stays nil forever and
+    /// the panel header would read "Hämtar…" indefinitely on a perfectly healthy account. Every
+    /// poll returns the same true answer there — "nothing running" — so the last usable poll IS
+    /// the honest age of that data.
+    private var lastUsableUtc: Date?
 
     /// The latest monoMs received via ingest/evaluate (NOT ingestFailure), so `nextPollDelay`,
     /// whose signature carries no monoMs, can still classify "burning" monotonically.
@@ -147,6 +153,7 @@ public final class QuotaModel: QuotaModelling {
         // itself closed. See `lastUsableMono`.
         if usable {
             lastUsableMono = monoMs
+            lastUsableUtc = utcNow
             let cPolicy = policyInterval(utcNow: utcNow)
             freshnessStaleAtMono = monoMs + Int64(cPolicy * 1000 * 3)
             freshnessUnknownAtMono = monoMs + Int64(cPolicy * 1000 * 10)
@@ -260,7 +267,7 @@ public final class QuotaModel: QuotaModelling {
 
         return QuotaView(
             session: sessionView, weekly: weeklyView, freshness: freshness,
-            lastChangedAt: session.lastAcceptedUtc, lastPollAt: lastPollAt,
+            lastChangedAt: session.lastAcceptedUtc ?? lastUsableUtc, lastPollAt: lastPollAt,
             pollInterval: pollInterval, error: lastError,
             iconSeverity: severity, blockedUntil: blockedUntil)
     }

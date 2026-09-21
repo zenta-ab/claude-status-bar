@@ -125,16 +125,20 @@ public final class PanelView: NSView {
         return y + 10
     }
 
+    /// The age of the DATA, not of the last request.
+    ///
+    /// This read `lastPollAt` and appended "— kan vara inaktuell" when Stale, which produced
+    /// "Uppdaterad för 0 sekunder sedan — kan vara inaktuell": two different clocks in one
+    /// sentence. `lastPollAt` is when we last *asked*; staleness is about when the answer last
+    /// *changed*, and the contract keeps that in `lastChangedAt` precisely so the two are not
+    /// confused. The Windows panel uses `LastChangedAt` here and `LastPollAt` only in the footer.
+    ///
+    /// Stale is conveyed by colour alone, as on Windows; the explanation with the real age lives
+    /// in the status box's third line, where it is not competing with this one.
     private func freshnessLine() -> String {
-        switch view.freshness {
-        case .unknown: return "Ingen avläsning ännu"
-        case .stale, .live:
-            guard let last = view.lastPollAt else { return "Väntar på första avläsningen…" }
-            let age = TimeText.duration(renderedAt.timeIntervalSince(last))
-            return view.freshness == .stale
-                ? "Uppdaterad för \(age) sedan — kan vara inaktuell"
-                : "Uppdaterad för \(age) sedan"
-        }
+        if view.freshness == .unknown { return "Ingen avläsning ännu" }
+        guard let changed = view.lastChangedAt else { return "Hämtar…" }
+        return "Uppdaterad för \(TimeText.duration(renderedAt.timeIntervalSince(changed))) sedan"
     }
 
     @discardableResult

@@ -222,12 +222,14 @@ public class QuotaModelTests
         Assert.Equal(QuotaState.Measuring, view.Session.State);
         Assert.Equal("Nytt fönster väntas", view.Session.MeasuringReason);
         Assert.Null(view.Session.RatePctPerMin); // decision 12: no forecast fields while Measuring
-        // Decision 2 (round 2): freshness deadlines freeze only on an ACCEPTED poll, so the
-        // resumed (deduped) reply cannot renew them -- 110 real minutes have now passed since
-        // the one accepted sample with no new data at all, correctly past both the Stale AND
-        // the Unknown deadline (not merely Stale, which the old code -- wrongly re-freezing on
-        // every successful round trip, duplicate or not -- would have under-reported as).
-        Assert.Equal(Freshness.Unknown, view.Freshness);
+        // 2026-09-22 transport/data-age split: the resumed (deduped) reply DOES still renew the
+        // transport StaleAt/UnknownAt deadlines -- it is a valid session reading, just not a
+        // novel one -- so transport liveness alone would read Live here. But 110 real minutes
+        // have passed since the one accepted sample with no new data at all, so the 20-min
+        // fingerprint-stale rule (keyed to _lastUsableMono, untouched by a duplicate) trips
+        // first; independently, `resumed` is also past this window's own resets_at+60s. Either
+        // is enough for Stale, and both fire before the transport deadlines ever could here.
+        Assert.Equal(Freshness.Stale, view.Freshness);
         Assert.NotEqual(Freshness.Live, view.Freshness);
     }
 
@@ -304,6 +306,134 @@ public class QuotaModelTests
         QuotaView finalView = model.Evaluate(t0.AddSeconds(1500), 1_500_000);
         Assert.Equal(Freshness.Unknown, finalView.Freshness);
         Assert.NotEqual(Freshness.Live, finalView.Freshness);
+    }
+
+    // ---- 2026-09-22: transport liveness vs. data age -- the live "false stale alarm" symptom ----
+    //
+    // While the user is actively working, the panel header turned orange and read "Datan kan
+    // vara inaktuell" (data may be stale) with nothing actually wrong. Root cause: `get_usage`
+    // only produces a NOVEL sample roughly every 5 min (docs/forecast-and-states.md,
+    // "Staleness") and returns a byte-identical cached reply to every poll in between, but the
+    // transport StaleAt/UnknownAt deadlines used to re-freeze only on a NOVEL accepted sample --
+    // conflating two different questions: "are polls succeeding" (transport liveness, which a
+    // cached duplicate answers exactly as well as a novel sample) and "is the data moving" (which
+    // only a novel sample answers). At the 30s burning cadence, stale_at sat at
+    // last-novel-accept + 90s while novel samples arrived ~300s apart, so the panel read Stale
+    // for most of every refresh cycle. The fix: transport deadlines now renew on ANY poll
+    // returning a valid session reading (novel, cached duplicate, or validly closed); the 20-min
+    // fingerprint-stale rule (data age) still moves only on a novel accepted sample, or -- for an
+    // all-closed idle account -- a validly closed reading (IdleAccount_* tests below/above).
+
+    [Fact]
+    public void BurningCadence_ServerRefreshEveryFiveMinutesWithCachedDuplicatesBetween_StaysLive_ForThirtyMinutes()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset resetsAt = new(2026, 9, 22, 14, 0, 0, TimeSpan.Zero);
+        DateTimeOffset t0 = resetsAt.AddHours(-5);
+        double pct = 10.0;
+        int fingerprintJitter = 0;
+        string raw = Raw(resetsAt, fingerprintJitter);
+
+        model.Ingest(new UsageSnapshot(pct, raw, null, null, t0), t0, 0);
+        Assert.Equal(Freshness.Live, model.Evaluate(t0, 0).Freshness);
+
+        DateTimeOffset lastNovelAt = t0;
+        long mono = 0;
+        DateTimeOffset now = t0;
+        for (int poll = 1; poll <= 60; poll++) // 60 x 30s = 30 minutes of burning-cadence polling
+        {
+            now = now.Add(TimeSpan.FromSeconds(30));
+            mono += 30_000;
+
+            bool serverRefreshed = poll % 10 == 0; // a novel sample every 5 min (10 x 30s)
+            if (serverRefreshed)
+            {
+                pct += 1.0;
+                fingerprintJitter++;
+                raw = Raw(resetsAt, fingerprintJitter); // distinct fingerprint -- a genuinely new sample
+            }
+            // Every OTHER poll repeats the exact same fingerprint: the cached reply get_usage
+            // actually returns between refreshes.
+            model.Ingest(new UsageSnapshot(pct, raw, null, null, now), now, mono);
+            if (serverRefreshed) lastNovelAt = now;
+
+            QuotaView view = model.Evaluate(now, mono);
+            Assert.Equal(Freshness.Live, view.Freshness);
+            // The header's own data age (LastChangedAt) is untouched by this fix: it still holds
+            // at the last NOVEL sample and grows between refreshes, resetting only when the
+            // server actually produces new data.
+            Assert.Equal(lastNovelAt, view.LastChangedAt);
+        }
+    }
+
+    [Fact]
+    public void CachedDuplicatesOnly_ForOverTwentyMinutes_GoesStale_ViaTheFingerprintRule_DespiteTransportRenewingEveryPoll()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset resetsAt = new(2026, 9, 22, 20, 0, 0, TimeSpan.Zero);
+        DateTimeOffset t0 = resetsAt.AddHours(-5);
+        string raw = Raw(resetsAt);
+        var snapshot = new UsageSnapshot(42.0, raw, null, null, t0);
+
+        model.Ingest(snapshot, t0, 0);
+        Assert.Equal(Freshness.Live, model.Evaluate(t0, 0).Freshness);
+
+        // Nothing but the identical cached reply, polled at 30s -- fast enough that, if this
+        // were only about transport liveness, the 90s/300s transport deadlines would never lapse
+        // (each duplicate is a valid session reading and renews them). Only the 20-min
+        // fingerprint rule, which a duplicate cannot renew, can explain going Stale here.
+        long mono = 0;
+        DateTimeOffset now = t0;
+        for (int i = 0; i < 42; i++) // 42 x 30s = 21 min, just past the 20-min threshold
+        {
+            now = now.Add(TimeSpan.FromSeconds(30));
+            mono += 30_000;
+            model.Ingest(new UsageSnapshot(42.0, raw, null, null, now), now, mono);
+        }
+
+        Assert.Equal(Freshness.Stale, model.Evaluate(now, mono).Freshness);
+    }
+
+    [Fact]
+    public void ConsecutiveFailures_StillGoStaleAtThreeXAndUnknownAtTenXTheInterval_TransportChangeDidNotTouchThis()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset t0 = new(2026, 9, 22, 8, 0, 0, TimeSpan.Zero);
+        DateTimeOffset farReset = t0.AddHours(5);
+        model.Ingest(new UsageSnapshot(10.0, Raw(farReset), null, null, t0), t0, 0);
+        // Burning: cPolicy = 30s -> stale_at = t0+90s, unknown_at = t0+300s. A transport failure
+        // (unlike a successful poll without a valid session reading) never re-freezes these,
+        // exactly as before this change -- IngestFailure was not touched.
+        Assert.Equal(Freshness.Live, model.Evaluate(t0.AddSeconds(80), 80_000).Freshness);
+
+        model.IngestFailure("boom", t0.AddSeconds(95), 95_000);
+        Assert.Equal(Freshness.Stale, model.Evaluate(t0.AddSeconds(95), 95_000).Freshness); // past 3x (90s)
+
+        model.IngestFailure("boom", t0.AddSeconds(200), 200_000);
+        model.IngestFailure("boom", t0.AddSeconds(310), 310_000);
+        Assert.Equal(Freshness.Unknown, model.Evaluate(t0.AddSeconds(310), 310_000).Freshness); // past 10x (300s)
+    }
+
+    [Fact]
+    public void ResponseWithoutAValidSessionReading_DoesNotRenewTheTransportDeadlines()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset resetsAt = new(2026, 9, 22, 20, 0, 0, TimeSpan.Zero);
+        DateTimeOffset t0 = resetsAt.AddHours(-5);
+        model.Ingest(new UsageSnapshot(30.0, Raw(resetsAt), null, null, t0), t0, 0);
+        Assert.Equal(Freshness.Live, model.Evaluate(t0, 0).Freshness);
+        // Burning: stale_at = t0 + 90s, unknown_at = t0 + 300s.
+
+        // A poll that round-trips successfully (this is Ingest, not IngestFailure) but carries an
+        // unparseable resets_at -- neither a valid open reading nor a validly closed one -- must
+        // be a complete no-op for the transport deadlines, exactly like a transport failure.
+        DateTimeOffset t1 = t0.AddSeconds(60);
+        model.Ingest(new UsageSnapshot(30.0, "not-a-timestamp", null, null, t1), t1, 60_000);
+
+        // 100s after t0: past the ORIGINAL stale_at (90s) -- proving it was never pushed out to
+        // the 60s+90s=150s a renewal at t1 would have produced.
+        QuotaView view = model.Evaluate(t0.AddSeconds(100), 100_000);
+        Assert.Equal(Freshness.Stale, view.Freshness);
     }
 
     // ---- decision 1: one-second resets_at jitter must never lose consumption or fabricate a rollover ----
@@ -1075,8 +1205,13 @@ public class QuotaModelTests
     [Fact]
     public void IdleAccount_DuplicateOnAnActiveWindow_StillDoesNotRenewFreshness()
     {
-        // A cached duplicate on an ACTIVE window must still not renew freshness -- round-2
-        // decision 2, and widening "usable" must not have widened it away.
+        // A cached duplicate on an ACTIVE window must still not indefinitely renew freshness.
+        // 2026-09-22: a duplicate DOES now renew the transport StaleAt/UnknownAt deadlines (it is
+        // a valid session reading), but the 20-min fingerprint-stale rule is untouched by a
+        // duplicate -- see _lastUsableMono -- so 50 minutes of nothing but duplicates still goes
+        // non-Live via that rule. Kept at 20 duplicates (50 min, well past the 20-min threshold)
+        // so this still proves the same invariant end to end, just through the data-age half of
+        // freshness rather than the transport half.
         var model = new QuotaModel();
         DateTimeOffset baseTime = new(2026, 9, 21, 10, 0, 0, TimeSpan.Zero);
         DateTimeOffset resetsAt = baseTime.AddSeconds(168 * 60); // matches the Swift port's addingTimeInterval(168*60)

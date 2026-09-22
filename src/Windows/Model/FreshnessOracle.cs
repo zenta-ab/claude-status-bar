@@ -5,26 +5,35 @@ namespace ClaudeStatusBar.Model;
 /// the always-running 1 s UI timer (docs/forecast-and-states.md, "Freshness
 /// ladder"), never accumulated, never cached.
 ///
-/// StaleAtMono/UnknownAtMono are FROZEN deadlines (decisions 3+5, round 2's
-/// decision 2): QuotaModel computes them once, at each ACCEPTED successful poll,
-/// as lastAcceptMono + 3*c_policy and lastAcceptMono + 10*c_policy (milliseconds),
-/// where c_policy is the burning/idle/spent base interval WITHOUT the
-/// soonest-reset cap and WITHOUT failure backoff. Neither a later failure, a
-/// duplicate/deduped reply, nor the mere passage of time can move these
-/// deadlines later -- they can only be superseded by a NEWER accepted poll,
-/// which is the only thing allowed to improve freshness. Using monotonic time
-/// (not UTC) for both the deadlines and the comparison also closes review
-/// finding 2's last example: a UTC rollback too small to trip the 60s
-/// clock-discontinuity check could otherwise walk the clock backward across a
-/// UTC-denominated deadline and "improve" freshness with no new data at all --
-/// monotonic time cannot move backward that way.
+/// StaleAtMono/UnknownAtMono are FROZEN transport-liveness deadlines (decisions
+/// 3+5, round 2's decision 2, and the 2026-09-22 transport/data-age split):
+/// QuotaModel computes them once, at each poll that returns a valid reading for
+/// the SESSION window -- novel accepted, a cached duplicate of an already-open
+/// window, or a validly closed window, see QuotaModel.Ingest's
+/// "sessionCurrentThisPoll" -- as t + 3*c_policy and t + 10*c_policy
+/// (milliseconds), where c_policy is the burning/idle/spent base interval
+/// WITHOUT the soonest-reset cap and WITHOUT failure backoff. They answer "is
+/// the pipeline working" (are polls succeeding at roughly the expected cadence),
+/// which is a different question from "is the data moving" below. Neither a
+/// later failure, a poll lacking a valid session reading, nor the mere passage
+/// of time can move these deadlines later -- they can only be superseded by a
+/// NEWER qualifying poll, which is the only thing allowed to improve this half
+/// of freshness. Using monotonic time (not UTC) for both the deadlines and the
+/// comparison also closes review finding 2's last example: a UTC rollback too
+/// small to trip the 60s clock-discontinuity check could otherwise walk the
+/// clock backward across a UTC-denominated deadline and "improve" freshness
+/// with no new data at all -- monotonic time cannot move backward that way.
 ///
-/// LastAcceptedMono tracks the monotonic instant of the last ACCEPTED live
-/// observation (QuotaModel's own UTC&lt;-&gt;mono anchor, decision 2) in place of a
-/// per-window UTC fingerprint-change time: since re-anchoring itself now only
-/// happens on an accepted sample (never a duplicate), it already carries the
-/// same "did real new data arrive" signal decision was built on, without a
-/// second UTC-based duration to also convert.
+/// LastAcceptedMono answers the OTHER question, "is the data moving": it tracks
+/// the monotonic instant of the last USABLE reading (QuotaModel's
+/// _lastUsableMono -- accepted, OR a window validly reporting itself closed;
+/// see that field's doc comment) in place of a per-window UTC fingerprint-change
+/// time. Deliberately narrower than StaleAtMono/UnknownAtMono above: a cached
+/// duplicate of an already-open window renews transport liveness (the poll
+/// round-tripped) but NOT this field (no new data arrived) -- a duplicate cannot
+/// fake elapsed monotonic time, so a server that only ever replays the same
+/// snapshot still ages past FingerprintStaleAfterMs and goes Stale here even
+/// while transport stays Live.
 /// </summary>
 public readonly record struct FreshnessInputs(
     bool HasEverSucceeded,

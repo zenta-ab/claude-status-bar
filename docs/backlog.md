@@ -28,6 +28,18 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
   taskbar is dark; low priority).
 - `PanelAnchor` reads `NotifyIcon` private fields via reflection. It falls back to bottom-right if a
   .NET update breaks it.
+- **Mac needs the transport/data-age freshness split too (2026-09-22).** Windows fixed a live
+  false-stale alarm: while burning, the panel read Stale for most of every ~5 min `get_usage`
+  refresh cycle, because the frozen `stale_at`/`unknown_at` transport deadlines re-froze only on
+  a NOVEL accepted sample, not on the cached duplicates every poll in between actually returned.
+  Fix (`docs/forecast-and-states.md`, "Transport liveness vs. data age"): the transport deadlines
+  now renew on ANY poll with a valid session reading (novel, cached duplicate, or validly
+  closed); only the 20-min fingerprint rule (data age) and the clock-guard anchor still require a
+  novel sample. The Mac app's own commit for "a cached duplicate on an open window does not renew
+  freshness" (same message as Windows commit 1618146, "An idle account is not a broken one")
+  states the same too-narrow rule and needs the equivalent split in
+  `src/Mac/Sources/ClaudeQuotaCore/QuotaModel.swift` and `FreshnessOracle.swift`, or it will show
+  the same live symptom.
 
 ## From the statistics round (2026-09-21)
 - **Canonical window key in the live tracker.** Codex statistics finding #19 (the ±120 s jitter

@@ -55,10 +55,20 @@ public sealed class QuotaModel : IQuotaModel
     bool _sessionInactiveLastPoll;
     bool _weeklyInactiveLastPoll;
 
-    // Decision 3+5 (round 1) / decision 2 (round 2): freshness deadlines frozen -- in
-    // MONOTONIC milliseconds, not UTC -- at the last ACCEPTED poll (never a duplicate), using
-    // the POLICY interval only (no reset cap, no backoff). Only a newer accepted poll can move
-    // them; monotonic time cannot be walked backward across them by a UTC clock adjustment.
+    // Decision 3+5 (round 1) / decision 2 (round 2) / 2026-09-22 transport/data-age split
+    // (docs/forecast-and-states.md, freshness ladder): freshness deadlines frozen -- in
+    // MONOTONIC milliseconds, not UTC -- using the POLICY interval only (no reset cap, no
+    // backoff). These answer "is the pipeline working" (transport liveness), a DIFFERENT
+    // question from "is the data moving" (the 20-min fingerprint rule below, keyed off
+    // _lastUsableMono). They are renewed by ANY poll that returns a valid reading for the
+    // session window -- novel accepted, a cached duplicate of an already-open window, or a
+    // validly closed window (see the "sessionCurrentThisPoll" local in Ingest) -- never by a
+    // failure, and never by a poll without a valid session reading. Only a later such poll can
+    // move them; monotonic time cannot be walked backward across them by a UTC clock
+    // adjustment. Before this split, they were frozen on the narrower "usable" condition
+    // (below), so a burning window polled every 30s against a server that only refreshes every
+    // ~5 min spent almost all of its time reporting Stale even while nothing was actually wrong
+    // -- see that section of the doc for the live symptom this fixed.
     long? _freshnessStaleAtMono;
     long? _freshnessUnknownAtMono;
 
@@ -71,12 +81,16 @@ public sealed class QuotaModel : IQuotaModel
     DateTimeOffset? _anchorUtc;
     long? _anchorMono;
 
-    // The last poll that delivered a CURRENTLY USABLE reading, which is a wider thing than an
-    // accepted sample and is what freshness is actually about: accepted, OR a window validly
-    // reporting itself closed (see the "usable" local in Ingest). An idle account's every window
-    // can never be accepted -- the tracker has no deadline to track -- so tying freshness to
-    // acceptance alone froze its deadlines forever and decayed it to Unknown while polling kept
-    // succeeding. An inactive window is by definition current, so it refreshes freshness too.
+    // The last poll that delivered a CURRENTLY USABLE reading: accepted, OR a window validly
+    // reporting itself closed (see the "usable" local in Ingest). This drives ONLY the 20-min
+    // fingerprint-stale rule in FreshnessOracle (FreshnessInputs.LastAcceptedMono) -- "is the
+    // data actually moving" -- and is deliberately narrower than what renews the transport
+    // deadlines above: a cached duplicate on an OPEN window must not count here, or a server that
+    // never produces a novel sample would read as perpetually fresh data instead of eventually
+    // going Stale. An idle account's every window can never be accepted -- the tracker has no
+    // deadline to track -- so tying this to acceptance alone froze it forever and decayed the
+    // account to Unknown while polling kept succeeding; a validly closed window is by definition
+    // current, so it refreshes this too (unlike a cached duplicate of an open one).
     long? _lastUsableMono;
 
     // ---- docs/statistics.md: cycle archive calibration, live-tracked only ----
@@ -185,11 +199,20 @@ public sealed class QuotaModel : IQuotaModel
             _anchorMono = monoMs;
         }
 
-        // Freshness moves on any USABLE reading, which includes a window validly reporting
-        // itself closed -- see _lastUsableMono's doc comment.
-        if (usable)
+        // "Is the data moving" (the 20-min fingerprint rule) moves on any USABLE reading, which
+        // includes a window validly reporting itself closed -- see _lastUsableMono's doc comment.
+        if (usable) _lastUsableMono = monoMs;
+
+        // "Is the pipeline working" (transport liveness) is a different, WIDER question -- see
+        // the freshness-deadline fields' doc comments and docs/forecast-and-states.md's
+        // freshness-ladder section. ANY poll returning a valid reading for the session window
+        // renews it: novel accepted, a cached duplicate of an already-open window, or a validly
+        // closed window. A duplicate cannot fake elapsed monotonic time, so widening this past
+        // "usable" does not reopen decision 2's clock-guard concern -- that concern is about the
+        // UTC<->mono anchor (_anchorUtc/_anchorMono, above), never re-anchored here.
+        bool sessionCurrentThisPoll = sessionValid || _sessionInactiveLastPoll;
+        if (sessionCurrentThisPoll)
         {
-            _lastUsableMono = monoMs;
             TimeSpan cPolicy = PolicyInterval(utcNow);
             _freshnessStaleAtMono = monoMs + (long)(cPolicy.TotalMilliseconds * 3);
             _freshnessUnknownAtMono = monoMs + (long)(cPolicy.TotalMilliseconds * 10);

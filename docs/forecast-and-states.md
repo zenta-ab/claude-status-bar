@@ -245,8 +245,10 @@ Two rules were tied to acceptance and both got this wrong:
 - **Freshness deadlines** re-froze only on an accepted sample, so an idle account's froze at its
   last accept and decayed to Unknown — the menu bar showed "!" for two days while polling
   succeeded every 150 s and the honest answer was "0 % used, nothing running". Freshness now
-  follows a *usable* reading: accepted, **or** a window validly reporting itself closed. A cached
-  duplicate on an open window still does not renew it (round-2 decision 2 is unchanged).
+  follows a *usable* reading: accepted, **or** a window validly reporting itself closed. (A cached
+  duplicate on an *open* window does not renew this "usable" reading either — see "Transport
+  liveness vs. data age" below for the further split this needed, and why that is still correct
+  for one of the two things freshness now tracks but was wrong for the other.)
 - **Decision 13's "global Live requires a valid session window"** treated a closed session as
   missing data. It now accepts a closed one, and the window's reason is
   `MeasuringReasonCode.WindowInactive` ("Inget förbrukat ännu") rather than "Data saknas" —
@@ -258,6 +260,44 @@ baseline from a sample the tracker actually took.
 **Windows had the same two gaps; both are now fixed** (`QuotaModel._lastUsableMono` /
 `_sessionInactiveLastPoll` / `_weeklyInactiveLastPoll`, `MeasuringReasonCode.WindowInactive`),
 matching the Swift side's behaviour, including the deliberately-not-widened clock-guard anchor.
+
+**Transport liveness vs. data age (added 2026-09-22, from a live false-stale alarm).** While the
+user was actively working, the panel header turned orange and read "Datan kan vara inaktuell —
+senast ändrad för 1 min 50 s sedan" with nothing wrong. `get_usage` only produces a *novel* sample
+about every 5 min (see "Staleness" above); every poll in between returns a byte-identical cached
+reply. At the 30 s burning cadence, `stale_at` (frozen at `last-novel-accept + 3·c_policy` = +90 s)
+sat 90 s past whichever novel sample last arrived, so the panel read Stale for most of every ~5 min
+refresh cycle even though every poll was succeeding.
+
+The root problem was that "usable" (above) was answering two different questions with one
+condition:
+
+1. **Is the pipeline working** — are polls round-tripping at roughly the expected cadence? This is
+   transport liveness, and a cached duplicate answers it exactly as well as a novel sample does:
+   the server replied, on schedule, with a currently-valid reading.
+2. **Is the data moving** — has anything actually changed? This already has its own, independent
+   rule: no novel fingerprint for more than 20 min → Stale (`FreshnessOracle.FingerprintStaleAfterMs`).
+
+Round-2 decision 2 (below) said a cached duplicate must not re-anchor the *clock guard*, because a
+duplicate arriving after a wall-clock jump could otherwise restore a confident verdict with no new
+timing evidence at all. That concern is specifically about the UTC↔monotonic anchor
+(`_anchorUtc`/`_anchorMono`) — a duplicate could fake *trust in the clock* if it were allowed to
+re-anchor. It does not apply to the monotonic transport deadlines (`stale_at`/`unknown_at`): a
+duplicate cannot fake *elapsed monotonic time*, so letting it renew them concedes nothing.
+
+The fix keeps three things that used to be one:
+
+- **Transport deadlines** (`stale_at`/`unknown_at`, monotonic) are renewed by **every** successful
+  poll that returns a valid reading for the session window — novel, cached duplicate, or validly
+  closed. A failed poll, or a response without a valid session reading, still never renews them.
+- **The clock-guard anchor** (`_anchorUtc`/`_anchorMono`) stays renewed **only** by a novel accepted
+  sample — round-2 decision 2's own concern, unchanged.
+- **"Is the data moving"** stays the 20-min fingerprint rule, keyed to the last novel accepted
+  sample — or, for an all-closed idle account, the last usable (validly-closed) reading, keeping
+  the idle-account behaviour above intact.
+
+`QuotaModel.Ingest`'s `sessionCurrentThisPoll` local is the new, wider condition for the first
+bullet; `_lastUsableMono` (above) is unchanged and still drives only the third.
 
 **Hysteresis** (on *accepted* observations, never on a poll tick, a duplicate/deduped sample, or
 a transport failure):
@@ -283,15 +323,27 @@ a transport failure):
 ## Freshness ladder
 
 Evaluated on the always-running 1 s UI timer, so a hung poll can never freeze a confident
-number on screen. The deadlines below are **frozen**: each successful poll computes
-`stale_at = t + 3·c_policy` and `unknown_at = t + 10·c_policy` once, where `c_policy` is the
-plain burning/idle/spent policy interval **without** the soonest-reset cap and **without**
-failure backoff. Neither a later failure nor the mere passage of time can move these deadlines
-later — only a *newer* successful poll can, which is the only thing allowed to improve
-freshness. (An earlier design recomputed `3c`/`10c` live against the currently-scheduled poll
-interval; a shrinking reset-cap interval then made freshness collapse right before a normally
-scheduled poll even landed, and a growing failure-backoff interval let it falsely claim Live —
-or even "improve" from Unknown back to Stale — through a prolonged outage.)
+number on screen. `stale_at`/`unknown_at` and the 20-min fingerprint rule answer two DIFFERENT
+questions (2026-09-22, "Transport liveness vs. data age" above, from a live false-stale alarm) —
+"is the pipeline working" and "is the data moving" — and are renewed by different, deliberately
+unequal conditions:
+
+- `stale_at`/`unknown_at` are **frozen transport-liveness deadlines**: each poll that returns a
+  valid reading for the session window — novel, cached duplicate, or validly closed — computes
+  `stale_at = t + 3·c_policy` and `unknown_at = t + 10·c_policy` once, where `c_policy` is the
+  plain burning/idle/spent policy interval **without** the soonest-reset cap and **without**
+  failure backoff. Neither a failure, a poll lacking a valid session reading, nor the mere passage
+  of time can move these deadlines later — only a *newer* qualifying poll can, which is the only
+  thing allowed to improve this half of freshness. (An earlier design recomputed `3c`/`10c` live
+  against the currently-scheduled poll interval; a shrinking reset-cap interval then made
+  freshness collapse right before a normally scheduled poll even landed, and a growing
+  failure-backoff interval let it falsely claim Live — or even "improve" from Unknown back to
+  Stale — through a prolonged outage. A later design froze them, but only on a NOVEL accepted
+  sample; against a server that only produces a novel sample every ~5 min, that made a burning
+  30 s poll cadence read Stale for most of every refresh cycle — the live symptom the 2026-09-22
+  split fixed.)
+- The 20-min fingerprint rule is the **data-age** question and moves only on a novel accepted
+  sample — or, for an all-closed idle account, a validly-closed reading — same as before the split.
 
 - **Unknown**: no successful poll yet, or `now` is past the frozen `unknown_at`. The icon shows
   a grey outline with no arcs, and the panel says "Kan inte läsa kvoten".
@@ -503,7 +555,7 @@ sanity bounds, and `Shortfall`'s meaninglessness in Measuring).
 | # | Finding | Decision |
 |---|---|---|
 | 1 | Non-consecutive replica replies trigger the rollover safety valve; rollover skips ordering checks | **Accept.** Candidate bookkeeping stays separate from accepted state. Continuity resets on any intervening non-matching outcome (a same-window reply, even one that ends up fingerprint-deduped; a regressed-window reply; an invalid sample). A rollover passes the same ordering check as any sample, read against the tracker's last-accepted timing baseline *before* that baseline is cleared for the new window. |
-| 2 | A cached reply re-anchors the clock guard; durations still in UTC | **Accept, no contract change.** Re-anchor (and re-freeze freshness deadlines) only when a live observation is ACCEPTED. Freshness deadlines, hysteresis persistence/cooldown, "burning", idle and since-rollover durations are monotonic. `NextPollDelay(utcNow)` uses the latest `monoMs` the model received via `Ingest`/`Evaluate` (not `IngestFailure`, read literally). |
+| 2 | A cached reply re-anchors the clock guard; durations still in UTC | **Accept, no contract change.** Re-anchor only when a live observation is ACCEPTED. Hysteresis persistence/cooldown, "burning", idle and since-rollover durations are monotonic. `NextPollDelay(utcNow)` uses the latest `monoMs` the model received via `Ingest`/`Evaluate` (not `IngestFailure`, read literally). **Amended 2026-09-22** ("Transport liveness vs. data age", above): "re-freeze freshness deadlines only on an ACCEPTED observation" as originally written here conflated the clock-guard anchor with the transport `stale_at`/`unknown_at` deadlines. The anchor still re-anchors only on an accepted sample (this decision's actual concern, unaffected). The transport deadlines are now renewed more widely — by any poll with a valid session reading, cached duplicate included — because a duplicate cannot fake elapsed monotonic time, so it carries none of this decision's risk for THAT half of freshness; only the 20-min fingerprint rule (data age) still requires a novel sample. |
 | 3 | Invalid session utilization keeps a verdict and Live | **Accept.** Session validity requires `IsValidPct`, exactly like weekly. |
 | 4 | Measuring gets stuck after time-only eligibility, and after a replay→live duplicate (common after every restart) | **Accept.** When the committed state is Measuring and the current snapshot is no longer refused, the verdict commits immediately on the next `Evaluate` tick, without hysteresis evidence — covering the rollover/weekly-24h gates lifting with time, and a WarmStart-seeded window whose only live poll was deduped. |
 | 5 | A CSV row up to 60 s in the future still overrides live data | **Accept.** Replay excludes every row later than the first live observation's UTC (no tolerance). |

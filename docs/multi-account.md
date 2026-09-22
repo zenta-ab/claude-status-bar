@@ -56,9 +56,11 @@ part. Labels are display-only; **the account+organisation pair is the identity**
   Zero setup, which is what a first-time user of a public tool should get.
 - **Adding an account** (`scripts\add-account.ps1`) creates
   `%LOCALAPPDATA%\ClaudeStatusBar\accounts\<n>\config`, runs an interactive `claude` login with
-  `CLAUDE_CONFIG_DIR` pointed at it, and appends the entry. It also offers to pin the *existing*
-  account to its own directory, because a follower entry plus a pinned one can show the same account
-  twice and leave another invisible.
+  `CLAUDE_CONFIG_DIR` pointed at it, and appends the entry. After the login it prints which
+  organization the login landed in (the name from `oauthAccount.organizationName`, or "your
+  personal organization" for Anthropic's auto-generated `<email>'s Organization`), because a
+  personal plan and a Team on the same email differ only there. The plan (max, team, ...) is not
+  in `.claude.json`; it only arrives with `get_usage`, so the script can't show it.
 - Both settings are also togglable from the tray context menu.
 
 ## Identity guard
@@ -166,8 +168,9 @@ on that instead of picking one) and compares it against every already-configured
 including the default `%USERPROFILE%\.claude.json` login when an entry follows it. A match means
 the browser most likely reused an existing claude.ai session instead of letting the user pick a
 different account — the script refuses to register, leaves the new login directory on disk, and
-prints which slot already has it plus how to log in with a genuinely different account (a private
-browser window, or signing out of claude.ai first) and re-register. The same check runs on
+prints which organization the login landed in, which slot already has it, and how to log in with
+a genuinely different account or organization (a private browser window, or signing out of
+claude.ai first) and re-register. The same check runs on
 `-Register`, the recovery path, so a retried recovery can't hit the same problem silently either.
 
 ## Display

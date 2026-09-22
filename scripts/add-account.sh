@@ -51,6 +51,86 @@ JSON
     echo "created $ACCOUNTS_JSON with the default single account"
 }
 
+# Reads oauthAccount from a config directory's .claude.json and prints, tab-separated:
+#   <accountUuid>\t<organizationUuid>\t<organizationName>
+# Empty output when the directory holds no login. Pass "" for Claude Code's own default login.
+read_identity() {
+    python3 - "${1:-}" <<'PY'
+import json, os, sys
+config_dir = sys.argv[1]
+path = os.path.expanduser("~/.claude.json") if not config_dir \
+    else os.path.join(config_dir, ".claude.json")
+try:
+    oauth = json.load(open(path)).get("oauthAccount") or {}
+except Exception:
+    raise SystemExit(0)
+if not oauth.get("accountUuid"):
+    raise SystemExit(0)
+print("\t".join([oauth.get("accountUuid") or "",
+                 oauth.get("organizationUuid") or "",
+                 oauth.get("organizationName") or ""]))
+PY
+}
+
+# Which organization a login landed in, in words you recognise from claude.ai -- the one thing
+# that tells a personal plan and a Team/Enterprise login on the same email apart. The plan itself
+# (max, team, ...) only arrives with get_usage, so this script cannot show it. Anthropic's
+# auto-generated "<email>'s Organization" is the personal one (AccountLabel's ladder skips it for
+# exactly this reason).
+format_organization() {
+    name=$(printf '%s' "${1:-}" | cut -f3)
+    case "$name" in
+        "") echo "an unnamed organization" ;;
+        *"'s Organization") echo "your personal organization" ;;
+        *) echo "the organization \"$name\"" ;;
+    esac
+}
+
+# Mirrors AccountIdentity.stateKey (docs/multi-account.md, "Identity guard"): accountUuid alone
+# identifies the PERSON, not the plan, so accountUuid+organizationUuid is the actual identity.
+# One person's Team seat and personal Max seat share an accountUuid and differ only here.
+state_key_of() {
+    account=$(printf '%s' "${1:-}" | cut -f1)
+    org=$(printf '%s' "${1:-}" | cut -f2)
+    [ -z "$account" ] && return 0
+    if [ -n "$org" ]; then echo "${account}_${org}"; else echo "$account"; fi
+}
+
+# Prints "<index>\t<slot-or-empty>" for the first already-registered account whose login is the
+# SAME as $1's state key, or nothing. This is what makes the organization line worth printing:
+# without it, logging into the same organization twice silently produces two icons for one quota.
+find_duplicate_of() {
+    target="$1"
+    [ -z "$target" ] && return 0
+    ensure_config
+    python3 - "$ACCOUNTS_JSON" "$target" <<'PY'
+import json, os, sys
+path, target = sys.argv[1], sys.argv[2]
+def key(config_dir):
+    probe = os.path.expanduser("~/.claude.json") if not config_dir \
+        else os.path.join(config_dir, ".claude.json")
+    try:
+        oauth = json.load(open(probe)).get("oauthAccount") or {}
+    except Exception:
+        return None
+    account = oauth.get("accountUuid")
+    if not account:
+        return None
+    org = oauth.get("organizationUuid")
+    return f"{account}_{org}" if org else account
+cfg = json.load(open(path))
+for index, account in enumerate(cfg.get("accounts", [])):
+    if key(account.get("configDir")) == target:
+        d = account.get("configDir") or ""
+        slot = ""
+        parts = d.rstrip("/").split("/")
+        if len(parts) >= 2 and parts[-1] == "config":
+            slot = parts[-2]
+        print(f"{index}\t{slot}")
+        break
+PY
+}
+
 list_accounts() {
     ensure_config
     python3 - "$ACCOUNTS_JSON" <<'PY'
@@ -96,6 +176,17 @@ case "${1:-}" in
     --list) list_accounts; exit 0 ;;
     --register)
         [ $# -ge 2 ] || { echo "usage: $0 --register <slot>" >&2; exit 2; }
+        reg_dir=$(canonical "$APP_SUPPORT/accounts/$2/config")
+        reg_identity=$(read_identity "$reg_dir")
+        if [ -n "$reg_identity" ]; then
+            reg_dup=$(find_duplicate_of "$(state_key_of "$reg_identity")")
+            if [ -n "$reg_dup" ]; then
+                echo "This login ($(format_organization "$reg_identity")) is already tracked as"
+                echo "account [$(printf '%s' "$reg_dup" | cut -f1)] — not registering a duplicate."
+                exit 1
+            fi
+            echo "Registering $(format_organization "$reg_identity")."
+        fi
         register_slot "$2"; list_accounts; exit 0 ;;
     "") ;;
     *) echo "usage: $0 [--list | --register <slot>]" >&2; exit 2 ;;
@@ -119,9 +210,10 @@ Adding account slot $slot.
 
   config directory : $dir
 
-A browser window will open for you to log in. Log in with the account you want THIS slot to
-track — a different one from your existing login, or you will end up tracking the same account
-twice.
+A browser window will open for you to log in. If your login belongs to more than one
+organization — say a personal plan and a Team — choose the one you want THIS slot to track
+there. Picking the same account AND organization as an existing entry gives you two icons
+for one quota, so this script checks and refuses that.
 
 Your existing login is untouched: Claude Code stores each config directory's credentials under
 its own Keychain service name, derived from the directory path.
@@ -153,6 +245,27 @@ except Exception:
     exit 1
 fi
 
+new_identity=$(read_identity "$dir")
+duplicate=$(find_duplicate_of "$(state_key_of "$new_identity")")
+
+if [ -n "$duplicate" ]; then
+    dup_index=$(printf '%s' "$duplicate" | cut -f1)
+    echo ""
+    echo "You logged in to $(format_organization "$new_identity"), which is the SAME login as"
+    echo "account [$dup_index] — not adding it as a new account."
+    echo ""
+    echo "Nothing was registered, but the new login directory is left on disk at:"
+    echo "  $dir"
+    echo ""
+    echo "To use it, log in there with a different account or organization:"
+    echo "  CLAUDE_CONFIG_DIR=\"$dir\" CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$dir\" claude /login"
+    echo "...choosing the other account or organization, then /exit and re-run:"
+    echo "  $0 --register $slot"
+    exit 1
+fi
+
+echo ""
+echo "Logged in to $(format_organization "$new_identity")."
 register_slot "$slot"
 echo ""
 list_accounts

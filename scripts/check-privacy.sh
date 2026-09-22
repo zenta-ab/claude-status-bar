@@ -34,12 +34,15 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ "$MODE" = all ]; then
-    git -C "$REPO" ls-files
-else
-    git -C "$REPO" diff --cached --name-only --diff-filter=ACM
-fi | MODE="$MODE" python3 -c '
+# The scanner is built with a QUOTED heredoc rather than passed as `python3 -c '...'`.
+# A single-quoted shell string ends at the first apostrophe, so one ordinary English possessive
+# in a comment silently turns the rest of the program into shell code -- which is exactly what
+# happened: a line reading "the organisation-s public contact address" (with a real apostrophe)
+# broke this script for every macOS user, while Windows, which runs the .ps1, saw nothing.
+# A quoted heredoc cannot be terminated by any character in the body.
+SCANNER=$(cat <<'PYSRC'
 import os, re, sys
+
 
 repo = sys.argv[1]
 
@@ -121,4 +124,13 @@ print("")
 print("Replace with placeholders (alex@example.com, 11111111-1111-4111-8111-111111111111,")
 print("/Users/someone) or commit with --no-verify if you are certain.")
 sys.exit(1)
-' "$REPO"
+PYSRC
+)
+
+# The file list arrives on stdin from this pipe; the heredoc above was consumed at assignment
+# time and does not compete for it.
+if [ "$MODE" = all ]; then
+    git -C "$REPO" ls-files
+else
+    git -C "$REPO" diff --cached --name-only --diff-filter=ACM
+fi | MODE="$MODE" python3 -c "$SCANNER" "$REPO"

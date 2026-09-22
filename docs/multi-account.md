@@ -210,6 +210,14 @@ two real accounts (a Team seat and a personal Max seat), and holds unchanged, wi
 - **`CLAUDE_SECURESTORAGE_CONFIG_DIR` outranks `CLAUDE_CONFIG_DIR`** in that selector. A stray one
   inherited from the user's environment would collapse every account onto a single keychain
   namespace while each still looked isolated, so a pinned account now pins both variables.
+- **`add-account.sh` reports the organization and refuses a duplicate login**, matching
+  `add-account.ps1`. It says which organization the login landed in — "your personal
+  organization" for Anthropic's auto-generated `<email>'s Organization`, otherwise the name —
+  before the login (choose the one you want), after it, and in the duplicate messages. The
+  duplicate check compares `accountUuid_organizationUuid`, the same identity key the app uses, so
+  logging into the same organization twice is refused instead of silently producing two icons for
+  one quota. It runs on `--register` too, so a retried recovery cannot hit the same problem
+  quietly.
 
 The label ladder was exercised against real data for the first time here: the Team account
 resolves at step 2 (its `organizationName`), and the personal Max account's `organizationName` is

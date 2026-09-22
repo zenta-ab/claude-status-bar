@@ -7,6 +7,23 @@
 set -e
 REPO=$(git rev-parse --show-toplevel)
 
+# Who a commit is attributed to is as public as what it contains. Commits here are authored as
+# the organisation or a GitHub noreply address, never a personal name and email -- a clone
+# without that config once pushed ten commits under a personal work address.
+for ident in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+    email=$(git var "$ident" | sed -n 's/.*<\([^>]*\)>.*/\1/p')
+    case "$email" in
+        info@zenta.se|*@users.noreply.github.com) ;;
+        *)
+            echo "pre-commit: $ident is <$email>, which would publish a personal address." >&2
+            echo "  Set this clone's identity first:" >&2
+            echo "    git config user.name \"Zenta AB\"" >&2
+            echo "    git config user.email info@zenta.se" >&2
+            echo "  (or your own <id>+<user>@users.noreply.github.com)." >&2
+            exit 1 ;;
+    esac
+done
+
 if command -v powershell >/dev/null 2>&1; then
     exec powershell -NoProfile -ExecutionPolicy Bypass -File "$REPO/scripts/check-privacy.ps1"
 elif command -v pwsh >/dev/null 2>&1; then

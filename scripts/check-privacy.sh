@@ -45,9 +45,10 @@ repo = sys.argv[1]
 
 # What counts as a placeholder rather than personal data.
 #   - any address at a reserved example domain (RFC 2606) or a noreply address
+#   - the organisation's public contact address, which every commit is authored as
 #   - any UUID whose every dash-separated group is one repeated character
 #   - a home directory whose name is an obvious stand-in
-ALLOWED_EMAIL = re.compile(r"@(example|invalid|test)\.(com|org|net)$|@localhost$|noreply")
+ALLOWED_EMAIL = re.compile(r"@(example|invalid|test)\.(com|org|net)$|@localhost$|noreply|^info@zenta\.se$")
 ALLOWED_WIN_PATH = re.compile(r"(?i)\\Users\\(someone|user|username|test|example)$")
 ALLOWED_POSIX_PATH = re.compile(r"^/(Users|home)/(someone|user|username|test|example)$")
 

@@ -24,9 +24,10 @@ exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show
 
 # What counts as a placeholder rather than personal data.
 #   - any address at a reserved example domain (RFC 2606) or a noreply address
+#   - the organisation's public contact address, which every commit is authored as
 #   - any UUID whose every dash-separated group is one repeated character (1111-1111-..., aaaa-bbbb-...)
 #   - a user path whose name is an obvious stand-in
-$allowedEmail = '@(example|invalid|test)\.(com|org|net)$|@localhost$|noreply'
+$allowedEmail = '@(example|invalid|test)\.(com|org|net)$|@localhost$|noreply|^info@zenta\.se$'
 $allowedPathName = '(?i)\\Users\\(someone|user|username|test|example)$'
 
 function Test-PlaceholderUuid([string]$uuid) {

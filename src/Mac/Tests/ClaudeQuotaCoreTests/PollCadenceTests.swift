@@ -378,3 +378,155 @@ struct IdleAccountFreshnessTests {
         #expect(model.evaluate(utcNow: now, monoMs: mono).freshness == .live)
     }
 }
+
+/// 2026-09-22: transport liveness vs. data age — the live "false stale alarm".
+///
+/// While the user was working the panel header turned orange and read "Datan kan vara inaktuell"
+/// with nothing actually wrong. `get_usage` produces a NOVEL sample roughly every 5 min and
+/// returns a byte-identical cached reply to every poll in between, but the transport deadlines
+/// used to re-freeze only on a novel accepted sample — conflating "are polls succeeding" (which a
+/// duplicate answers exactly as well) with "is the data moving" (which only a novel sample does).
+/// At the 30 s burning cadence `stale_at` sat at last-novel + 90 s while novel samples arrived
+/// ~300 s apart, so the panel read Stale for most of every refresh cycle.
+///
+/// Ported from the C# `QuotaModelTests` added in the same commit.
+@Suite("Transport liveness vs data age")
+struct TransportVsDataAgeTests {
+
+    /// The wire format, with a jitter knob so a "novel" sample is a genuinely distinct
+    /// fingerprint and a "cached" one is byte-identical.
+    private func raw(_ instant: Date, jitter: Int = 0) -> String {
+        wireFormat(instant.addingTimeInterval(Double(jitter) * 0.000_017))
+    }
+
+    @Test("burning cadence with a server refresh every five minutes stays Live for thirty")
+    func burningCadenceStaysLive() {
+        let model = QuotaModel()
+        let resetsAt = utc("2026-09-22T14:00:00.000000+00:00")
+        let t0 = resetsAt.addingTimeInterval(-5 * 3600)
+        var pct = 10.0
+        var jitter = 0
+        var fingerprint = raw(resetsAt, jitter: jitter)
+
+        model.ingest(UsageSnapshot.make(session: pct, sessionResets: fingerprint), utcNow: t0, monoMs: 0)
+        #expect(model.evaluate(utcNow: t0, monoMs: 0).freshness == .live)
+
+        var lastNovelAt = t0
+        var mono: Int64 = 0
+        var now = t0
+        for poll in 1...60 {          // 60 × 30 s = 30 minutes of burning-cadence polling
+            now = now.addingTimeInterval(30)
+            mono += 30_000
+
+            let serverRefreshed = poll % 10 == 0   // a novel sample every 5 min
+            if serverRefreshed {
+                pct += 1
+                jitter += 1
+                fingerprint = raw(resetsAt, jitter: jitter)
+            }
+            // Every other poll repeats the exact same fingerprint: the cached reply get_usage
+            // actually returns between refreshes.
+            model.ingest(UsageSnapshot.make(session: pct, sessionResets: fingerprint),
+                         utcNow: now, monoMs: mono)
+            if serverRefreshed { lastNovelAt = now }
+
+            let view = model.evaluate(utcNow: now, monoMs: mono)
+            #expect(view.freshness == .live, "went \(view.freshness) at poll \(poll)")
+            // The header's own data age is untouched by this fix: it holds at the last NOVEL
+            // sample and grows between refreshes.
+            #expect(view.lastChangedAt == lastNovelAt, "data age moved on a duplicate, at poll \(poll)")
+        }
+    }
+
+    @Test("nothing but cached duplicates goes Stale after twenty minutes, via the fingerprint rule")
+    func duplicatesOnlyGoStaleAfterTwentyMinutes() {
+        let model = QuotaModel()
+        let resetsAt = utc("2026-09-22T20:00:00.000000+00:00")
+        let t0 = resetsAt.addingTimeInterval(-5 * 3600)
+        let fingerprint = raw(resetsAt)
+
+        model.ingest(UsageSnapshot.make(session: 42, sessionResets: fingerprint), utcNow: t0, monoMs: 0)
+        #expect(model.evaluate(utcNow: t0, monoMs: 0).freshness == .live)
+
+        // Polled at 30 s — fast enough that, if this were only about transport liveness, the
+        // 90 s/300 s deadlines would never lapse. Only the 20-minute fingerprint rule, which a
+        // duplicate cannot renew, can explain going Stale here.
+        var mono: Int64 = 0
+        var now = t0
+        for _ in 0..<42 {            // 42 × 30 s = 21 min, just past the threshold
+            now = now.addingTimeInterval(30)
+            mono += 30_000
+            model.ingest(UsageSnapshot.make(session: 42, sessionResets: fingerprint),
+                         utcNow: now, monoMs: mono)
+        }
+        #expect(model.evaluate(utcNow: now, monoMs: mono).freshness == .stale)
+    }
+
+    @Test("consecutive failures still go Stale at 3x and Unknown at 10x")
+    func failuresUnaffected() {
+        let model = QuotaModel()
+        let t0 = utc("2026-09-22T08:00:00.000000+00:00")
+        let farReset = t0.addingTimeInterval(5 * 3600)
+        model.ingest(UsageSnapshot.make(session: 10, sessionResets: raw(farReset)), utcNow: t0, monoMs: 0)
+        // Burning: cPolicy = 30 s → stale_at = t0 + 90 s, unknown_at = t0 + 300 s. A transport
+        // failure never re-freezes these, exactly as before this change.
+        #expect(model.evaluate(utcNow: t0.addingTimeInterval(80), monoMs: 80_000).freshness == .live)
+
+        model.ingestFailure("boom", utcNow: t0.addingTimeInterval(95), monoMs: 95_000)
+        #expect(model.evaluate(utcNow: t0.addingTimeInterval(95), monoMs: 95_000).freshness == .stale)
+
+        model.ingestFailure("boom", utcNow: t0.addingTimeInterval(200), monoMs: 200_000)
+        model.ingestFailure("boom", utcNow: t0.addingTimeInterval(310), monoMs: 310_000)
+        #expect(model.evaluate(utcNow: t0.addingTimeInterval(310), monoMs: 310_000).freshness == .unknown)
+    }
+
+    @Test("a response without a valid session reading does not renew the transport deadlines")
+    func invalidSessionReadingDoesNotRenew() {
+        let model = QuotaModel()
+        let resetsAt = utc("2026-09-22T20:00:00.000000+00:00")
+        let t0 = resetsAt.addingTimeInterval(-5 * 3600)
+        model.ingest(UsageSnapshot.make(session: 30, sessionResets: raw(resetsAt)), utcNow: t0, monoMs: 0)
+        #expect(model.evaluate(utcNow: t0, monoMs: 0).freshness == .live)
+        // Burning: stale_at = t0 + 90 s, unknown_at = t0 + 300 s.
+
+        // A poll that round-trips successfully — this is ingest, not ingestFailure — but carries
+        // an unparseable resets_at: neither a valid open reading nor a validly closed one. It
+        // must be a complete no-op for the transport deadlines, exactly like a failure.
+        let t1 = t0.addingTimeInterval(60)
+        model.ingest(UsageSnapshot.make(session: 30, sessionResets: "not-a-timestamp"),
+                     utcNow: t1, monoMs: 60_000)
+
+        // 100 s after t0: past the ORIGINAL stale_at (90 s), proving it was never pushed out to
+        // the 150 s a renewal at t1 would have produced.
+        #expect(model.evaluate(utcNow: t0.addingTimeInterval(100), monoMs: 100_000).freshness == .stale)
+    }
+
+    /// Sleep across a reset: the resumed reply is a deduped copy of the OLD window, whose own
+    /// `resets_at` has already passed. The duplicate DOES renew the transport deadlines now — it
+    /// is a valid session reading — so transport liveness alone would read Live. But no new data
+    /// has arrived in 110 real minutes, so the 20-minute fingerprint rule trips; independently
+    /// the resumed instant is also past this window's `resets_at + 60 s`. Either is enough, and
+    /// both fire before the transport deadlines ever could. **Stale, not Unknown.**
+    @Test("sleeping across a reset reads Stale, not Unknown")
+    func sleepAcrossResetIsStale() {
+        let model = QuotaModel()
+        let resetsAt = utc("2026-09-22T12:00:00.000000+00:00")
+        let t0 = resetsAt.addingTimeInterval(-10 * 60)      // 10 min before the reset
+        let fingerprint = raw(resetsAt)
+        model.ingest(UsageSnapshot.make(session: 60, sessionResets: fingerprint), utcNow: t0, monoMs: 0)
+        #expect(model.evaluate(utcNow: t0, monoMs: 0).freshness == .live)
+
+        // The machine sleeps for 110 minutes and the resumed poll returns the same cached reply,
+        // still describing the window that has since expired.
+        let resumed = t0.addingTimeInterval(110 * 60)
+        let resumedMono: Int64 = 110 * 60 * 1000
+        model.ingest(UsageSnapshot.make(session: 60, sessionResets: fingerprint),
+                     utcNow: resumed, monoMs: resumedMono)
+
+        let view = model.evaluate(utcNow: resumed, monoMs: resumedMono)
+        #expect(view.freshness == .stale, "expected Stale, got \(view.freshness)")
+        // And the window itself is awaiting its replacement rather than presenting the old one.
+        #expect(view.session.state == .measuring)
+        #expect(view.session.measuringReason == "Nytt fönster väntas")
+    }
+}

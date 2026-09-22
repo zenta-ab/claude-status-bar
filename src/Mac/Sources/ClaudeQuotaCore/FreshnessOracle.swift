@@ -4,13 +4,21 @@ import Foundation
 /// always-running 1 s UI timer (docs/forecast-and-states.md, "Freshness ladder"), never
 /// accumulated, never cached. Ported from `src/Windows/Model/FreshnessOracle.cs`.
 ///
-/// `staleAtMono`/`unknownAtMono` are **frozen** deadlines (decisions 3+5, round-2 decision 2):
-/// `QuotaModel` computes them once, at each ACCEPTED successful poll, as
-/// `lastAcceptMono + 3·c_policy` and `lastAcceptMono + 10·c_policy`, where `c_policy` is the
+/// Freshness is two questions, and the 2026-09-22 split keeps them apart:
+///
+/// `staleAtMono`/`unknownAtMono` are **transport liveness** — *"are polls succeeding at roughly
+/// the expected cadence"*. `QuotaModel` freezes them at each poll returning a valid reading for
+/// the SESSION window — novel accepted, a cached duplicate of an already-open window, or a
+/// validly closed one — as `t + 3·c_policy` and `t + 10·c_policy`, where `c_policy` is the
 /// burning/idle/spent base interval **without** the soonest-reset cap and **without** failure
-/// backoff. Neither a later failure, a deduped reply, nor the mere passage of time can move
-/// these deadlines later — only a newer accepted poll can, which is the only thing allowed to
-/// improve freshness.
+/// backoff. Neither a failure, a poll lacking a valid session reading, nor the mere passage of
+/// time can move them later.
+///
+/// `lastAcceptedMono` is **data age** — *"is the data moving"*. It tracks the last **usable**
+/// reading (accepted, or a window validly reporting itself closed) and is deliberately narrower:
+/// a cached duplicate renews transport liveness (the poll round-tripped) but not this, so a
+/// server that only ever replays the same snapshot still ages past the 20-minute threshold and
+/// goes Stale while transport stays Live.
 ///
 /// Using monotonic time for both the deadlines and the comparison also closes review finding 2's
 /// last example: a UTC rollback too small to trip the 60 s clock-discontinuity check could

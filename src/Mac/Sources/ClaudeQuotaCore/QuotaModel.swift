@@ -48,8 +48,24 @@ public final class QuotaModel: QuotaModelling {
     private var sessionInactiveLastPoll = false
     private var weeklyInactiveLastPoll = false
 
-    /// Freshness deadlines, frozen in MONOTONIC milliseconds at the last ACCEPTED poll (never a
-    /// duplicate), using the POLICY interval only (no reset cap, no backoff).
+    /// **Transport liveness** deadlines, frozen in MONOTONIC milliseconds using the POLICY
+    /// interval only (no reset cap, no backoff). They answer *"are polls succeeding at roughly
+    /// the expected cadence"* — a different question from *"is the data moving"*, which
+    /// `lastUsableMono` answers below.
+    ///
+    /// Renewed by ANY poll returning a valid reading for the SESSION window: novel accepted, a
+    /// cached duplicate of an already-open window, or a validly closed one. Never by a failure,
+    /// and never by a poll without a valid session reading.
+    ///
+    /// Before this split (2026-09-22) they re-froze only on a *novel accepted* sample. But
+    /// `get_usage` produces a novel sample roughly every 5 min and returns a byte-identical
+    /// cached reply to every poll in between, so at the 30 s burning cadence `stale_at` sat at
+    /// last-novel + 90 s while novel samples arrived ~300 s apart — the panel read Stale for most
+    /// of every refresh cycle while the user was working and nothing was wrong.
+    ///
+    /// Widening this does not reopen round-2 decision 2's concern: that is about the UTC↔mono
+    /// anchor, which is never re-anchored here, and a duplicate cannot fake elapsed monotonic
+    /// time.
     private var freshnessStaleAtMono: Int64?
     private var freshnessUnknownAtMono: Int64?
 
@@ -58,8 +74,13 @@ public final class QuotaModel: QuotaModelling {
     private var anchorUtc: Date?
     private var anchorMono: Int64?
 
-    /// The last poll that delivered a **currently usable reading**, which is a wider thing than
-    /// an accepted sample and is what freshness is actually about.
+    /// **Data age**: the last poll that delivered a currently usable reading — accepted, OR a
+    /// window validly reporting itself closed. Drives only the 20-minute fingerprint-stale rule
+    /// (`FreshnessInputs.lastAcceptedMono`).
+    ///
+    /// Deliberately NARROWER than what renews the transport deadlines above: a cached duplicate
+    /// of an open window must not count here, or a server that never produces a novel sample
+    /// would read as perpetually fresh data instead of eventually going Stale.
     ///
     /// A window with no `resets_at` — an expired 5 h session, or a weekly window just after its
     /// reset with nothing consumed — can never be accepted, because the tracker has no deadline
@@ -149,11 +170,18 @@ public final class QuotaModel: QuotaModelling {
             anchorMono = monoMs
         }
 
-        // Freshness moves on any usable reading, which includes a window validly reporting
-        // itself closed. See `lastUsableMono`.
+        // DATA AGE — the narrow half. Only a genuinely new reading counts: a novel accepted
+        // sample, or a window validly reporting itself closed.
         if usable {
             lastUsableMono = monoMs
             lastUsableUtc = utcNow
+        }
+
+        // TRANSPORT LIVENESS — the wide half. Any poll carrying a valid session reading proves
+        // the pipeline is working, whether or not the reading is new. See the deadlines' own doc
+        // comment for the false-Stale symptom this split fixed.
+        let sessionCurrentThisPoll = sessionValid || sessionInactiveLastPoll
+        if sessionCurrentThisPoll {
             let cPolicy = policyInterval(utcNow: utcNow)
             freshnessStaleAtMono = monoMs + Int64(cPolicy * 1000 * 3)
             freshnessUnknownAtMono = monoMs + Int64(cPolicy * 1000 * 10)

@@ -65,12 +65,21 @@ func utc(_ text: String) -> Date {
 }
 
 /// Formats a date back to the wire's 6-fraction-digit form, for synthetic fingerprints.
+///
+/// The fraction is computed by hand rather than left to `DateFormatter`'s `SSSSSS`, which
+/// resolves only to milliseconds and pads the rest with zeros. Tests that jitter a timestamp by
+/// microseconds to make a "distinct fingerprint" would otherwise all render identically, and the
+/// fingerprint dedup would silently reject every one of them — the test would pass or fail for
+/// reasons unrelated to what it claims to check.
 func wireFormat(_ date: Date) -> String {
     let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
     formatter.locale = Locale(identifier: "en_US_POSIX")
-    return formatter.string(from: date) + "+00:00"
+    let seconds = date.timeIntervalSince1970
+    let fraction = seconds - seconds.rounded(.down)
+    let micros = min(999_999, Int((fraction * 1_000_000).rounded()))
+    return formatter.string(from: date) + String(format: ".%06d", micros) + "+00:00"
 }
 
 extension Date {

@@ -344,14 +344,41 @@ unequal conditions:
   split fixed.)
 - The 20-min fingerprint rule is the **data-age** question and moves only on a novel accepted
   sample — or, for an all-closed idle account, a validly-closed reading — same as before the split.
+  **It only runs while the session window is OPEN** (2026-10-08, below).
 
 - **Unknown**: no successful poll yet, or `now` is past the frozen `unknown_at`. The icon shows
-  a grey outline with no arcs, and the panel says "Kan inte läsa kvoten".
+  a grey outline with no arcs, and the panel says "Kan inte läsa kvoten". (From runtime start
+  until the first result, the first failure, or 30 s — whichever comes first — an account is
+  instead **Loading**: the same Unknown freshness, flagged so the icon is a grey ring WITHOUT the
+  "!" with a travelling arc, the tooltip says "Hämtar kvoten…" and the status box "Hämtar
+  kvoten…". After that the Unknown rules above apply. `docs/multi-account.md`, "Loading".)
 - **Stale**: `now` is past the frozen `stale_at`; the session fingerprint is unchanged for more
-  than 20 min; `now > resets_at + 60 s` for any window (reset passed, new data not in yet); or a
-  clock discontinuity was detected (see Evaluate, below). The icon drops to 70 % opacity with a
-  dot, and the panel shows a warning with the real age.
+  than 20 min **while the session window is open**; `now > resets_at + 60 s` for a window the
+  latest reply still describes as open (reset passed, new data not in yet); or a clock
+  discontinuity was detected (see Evaluate, below). The icon drops to 70 % opacity with a dot, and
+  the panel shows a warning with the real age.
 - **Live**: otherwise.
+
+**An idle account is not a stale one (2026-10-08).** Usage only happens inside an open session
+window, so while the session window is validly CLOSED — the server answers
+`{"utilization": 0, "resets_at": null, "is_active": false}`, an answer, not an absence — nothing can
+be consumed and an unchanged snapshot is *expected*. Two things used to make such an account read
+Stale although every poll succeeded:
+
+1. The tracker kept the closed window's old `resets_at`, and `now > resets_at + 60 s` then fired
+   forever. The model now passes no session (or weekly) deadline to the oracle while the latest poll
+   validly reports that window closed. A reply that still describes the ended window as open (the
+   sleep-across-a-reset case below) is not "closed" and still reads Stale.
+2. The data-age rule (`FreshnessInputs.SessionClosed`) is suspended while the session window is
+   validly closed — the transport deadlines, the clock-discontinuity rule and failures all still
+   apply. An OPEN session window whose snapshot stops changing still goes Stale after 20 min.
+
+Evidence: on a real installation one account answered every poll successfully for a day, yet 933 of
+970 state lines said Stale. Its session window was closed and its weekly window Spent (so the snapshot
+never changed). The Stale began exactly five hours after its last open session started — the moment that
+window's own `resets_at + 60 s` passed — and ended only when the app was restarted. (The data-age rule
+alone could not have fired: a validly closed window already counted as a usable reading. The expired
+deadline was the cause; the explicit suspension states the principle and guards the same ground.)
 
 **Clock discontinuity.** QuotaModel keeps a UTC↔monotonic anchor `(anchorUtc, anchorMono)` from
 the last accepted *live* sample (never touched by CSV replay, which is UTC-only — see Ingest

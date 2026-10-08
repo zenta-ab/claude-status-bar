@@ -33,7 +33,7 @@ public class IconContrastTests
         WindowView weekly = WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes);
 
         return new QuotaView(session, weekly, Freshness.Live,
-            LastChangedAt: UtcNow, LastPollAt: UtcNow, PollInterval: TimeSpan.FromSeconds(300),
+            LastChangedAt: UtcNow, LastSuccessAt: UtcNow, PollInterval: TimeSpan.FromSeconds(300),
             Error: null, IconSeverity: QuotaState.Spent, BlockedUntil: session.ResetsAt);
     }
 
@@ -99,7 +99,7 @@ public class IconContrastTests
             RatePctPerMin: 0.01, PaceMultiple: 1.0, ProjectedPctAtReset: usedPct, DepletesAt: null,
             Shortfall: TimeSpan.Zero, MeasuringReason: null);
         return new QuotaView(session, weekly, Freshness.Live,
-            LastChangedAt: UtcNow, LastPollAt: UtcNow, PollInterval: TimeSpan.FromSeconds(300),
+            LastChangedAt: UtcNow, LastSuccessAt: UtcNow, PollInterval: TimeSpan.FromSeconds(300),
             Error: null, IconSeverity: state, BlockedUntil: null);
     }
 

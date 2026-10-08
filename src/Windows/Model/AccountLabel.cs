@@ -18,8 +18,9 @@ public readonly record struct AccountLabelInput(string? OverrideLabel, AccountId
 ///   4. The local part of emailAddress.
 ///   5. "Konto N".
 ///
-/// If two accounts resolve to the same label, append the plan; if still equal, append the
-/// email local part too.
+/// If two accounts resolve to the same label: when their email domains tell them apart, append the
+/// domain ("Max (example.com)" / "Max (example.org)"); otherwise append the plan; if still equal,
+/// append the email local part too. Every part comes from the user's own account data.
 /// </summary>
 public static class AccountLabel
 {
@@ -70,9 +71,11 @@ public static class AccountLabel
 
     /// <summary>
     /// Whole-set disambiguation pass (docs/multi-account.md): every account's base label is
-    /// resolved first; any base label that collides with another account's gets the plan
-    /// appended in parentheses; any label still colliding after that (same org, same plan) gets
-    /// the email local part appended too. Order is preserved; accounts whose base label was
+    /// resolved first; any base label that collides with another account's gets, per group of
+    /// colliding labels, the email DOMAIN appended in parentheses when every member has one and they
+    /// are all different (a Max plan on two different mail domains); a group the domain does not
+    /// separate gets the plan appended instead; any label still colliding after that (same org,
+    /// same plan, same domain) gets the email local part appended too. Order is preserved; accounts whose base label was
     /// already unique come back unchanged.
     ///
     /// <paramref name="isDuplicate"/> (docs/multi-account.md "Duplicate accounts", Model/
@@ -97,13 +100,33 @@ public static class AccountLabel
         bool[] dup = DuplicateMask(baseLabels, participates);
         if (!Array.Exists(dup, x => x)) return baseLabels;
 
+        // Step 1: the email DOMAIN, per group of colliding labels, but only where it actually tells
+        // the group's members apart (every member has a domain and they are all different):
+        // "Max (example.com)" / "Max (example.org)". A group whose domains are missing or shared
+        // keeps its base label here and goes on to the plan / local-part steps below, as before.
+        var current = (string[])baseLabels.Clone();
+        foreach (IGrouping<string, int> group in Enumerable.Range(0, n).Where(i => dup[i]).GroupBy(i => baseLabels[i], StringComparer.Ordinal))
+        {
+            string?[] domains = group.Select(i => EmailDomain(accounts[i].Identity?.EmailAddress)).ToArray();
+            bool tellsThemApart = domains.All(d => d != null)
+                && domains.Distinct(StringComparer.OrdinalIgnoreCase).Count() == domains.Length;
+            if (!tellsThemApart) continue;
+            int k = 0;
+            foreach (int i in group) current[i] = Suffix(baseLabels[i], domains[k++]);
+        }
+
+        bool[] dupAfterDomain = DuplicateMask(current, participates);
+        if (!Array.Exists(dupAfterDomain, x => x)) return current;
+
+        // Step 2: the plan.
         var withPlan = new string[n];
         for (int i = 0; i < n; i++)
-            withPlan[i] = dup[i] ? Suffix(baseLabels[i], TitleCasePlan(accounts[i].SubscriptionType)) : baseLabels[i];
+            withPlan[i] = dupAfterDomain[i] ? Suffix(current[i], TitleCasePlan(accounts[i].SubscriptionType)) : current[i];
 
         bool[] stillDup = DuplicateMask(withPlan, participates);
         if (!Array.Exists(stillDup, x => x)) return withPlan;
 
+        // Step 3: plan AND email local part (same organisation, same plan, same email domain).
         var final = new string[n];
         for (int i = 0; i < n; i++)
         {
@@ -112,9 +135,17 @@ public static class AccountLabel
             string? plan = TitleCasePlan(accounts[i].SubscriptionType);
             string? email = LocalPart(accounts[i].Identity?.EmailAddress);
             string clause = plan != null && email != null ? $"{plan}, {email}" : plan ?? email ?? "";
-            final[i] = clause.Length == 0 ? baseLabels[i] : Suffix(baseLabels[i], clause);
+            final[i] = clause.Length == 0 ? current[i] : Suffix(current[i], clause);
         }
         return final;
+    }
+
+    /// <summary>The part of an email address after the last '@', lower-cased; null when there is none.</summary>
+    static string? EmailDomain(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        int at = email.LastIndexOf('@');
+        return at >= 0 && at < email.Length - 1 ? email[(at + 1)..].Trim().ToLowerInvariant() : null;
     }
 
     static string Suffix(string label, string? extra) => string.IsNullOrEmpty(extra) ? label : $"{label} ({extra})";

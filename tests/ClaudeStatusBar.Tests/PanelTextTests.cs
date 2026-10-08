@@ -235,7 +235,7 @@ public class PanelTextTests
         QuotaView view = new(
             WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
             WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
-            Freshness.Unknown, LastChangedAt: null, LastPollAt: new DateTimeOffset(2026, 9, 11, 11, 10, 0, TimeSpan.Zero),
+            Freshness.Unknown, LastChangedAt: null, LastSuccessAt: new DateTimeOffset(2026, 9, 11, 11, 10, 0, TimeSpan.Zero),
             PollInterval: TimeSpan.FromSeconds(600), Error: "get_usage svarar inte", IconSeverity: QuotaState.Measuring, BlockedUntil: null);
 
         StatusBoxText box = PanelText.Compose(view, Now, Tz).StatusBox;

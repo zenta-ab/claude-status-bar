@@ -106,30 +106,4 @@ public sealed record AccountIdentity(
         obj.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
-
-    /// <summary>CLAUDE_CONFIG_DIR if set, else %USERPROFILE%\.claude -- exactly how Claude Code itself resolves the default account's config directory (docs/multi-account.md).</summary>
-    public static string ResolveDefaultConfigDir() =>
-        Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is { Length: > 0 } explicitDir
-            ? explicitDir
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
-
-    /// <summary>
-    /// Where AccountRuntime looks for the DEFAULT account's .claude.json. Deliberately NOT the
-    /// same value as ResolveDefaultConfigDir(): verified against a real, already-logged-in
-    /// installation (this task's own live-verification step), Claude Code writes the identity/
-    /// oauthAccount file to %USERPROFILE%\.claude.json directly -- a SIBLING of the
-    /// %USERPROFILE%\.claude directory, not inside it. %USERPROFILE%\.claude only holds
-    /// credentials/plugins/CLAUDE.md/etc. A literal "&lt;ResolveDefaultConfigDir()&gt;\.claude.json"
-    /// composition (%USERPROFILE%\.claude\.claude.json) does not exist on disk and silently left
-    /// every default-account identity read at null, defeating the whole per-account CSV/model
-    /// keying this exists for. When CLAUDE_CONFIG_DIR IS set, this app has no independent way to
-    /// verify Claude Code's layout choice for that custom directory, so it keeps the spec's
-    /// literal "&lt;configDir&gt;\.claude.json" composition there -- consistent with
-    /// CLAUDE_CONFIG_DIR being documented as relocating the whole state directory, not just the
-    /// credentials-shaped subset %USERPROFILE%\.claude holds by default.
-    /// </summary>
-    public static string ResolveDefaultIdentityDir() =>
-        Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is { Length: > 0 } explicitDir
-            ? explicitDir
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 }

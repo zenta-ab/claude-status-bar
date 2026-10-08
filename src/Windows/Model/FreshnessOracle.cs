@@ -34,6 +34,14 @@ namespace ClaudeStatusBar.Model;
 /// fake elapsed monotonic time, so a server that only ever replays the same
 /// snapshot still ages past FingerprintStaleAfterMs and goes Stale here even
 /// while transport stays Live.
+///
+/// SessionClosed (2026-10-08): the latest poll validly reported the SESSION window as closed
+/// ("is_active": false -- an answer, not an absence). Usage only happens inside an open session window,
+/// so while it is closed nothing can be consumed and an unchanged snapshot is EXPECTED: the data-age
+/// rule (LastAcceptedMono) is suspended. The transport deadlines, the clock-jump rule and the
+/// resets_at rules still apply. QuotaModel also stops passing the closed window's old
+/// resets_at deadline here, which is what had been turning a perfectly healthy idle account Stale
+/// five hours after its last session began.
 /// </summary>
 public readonly record struct FreshnessInputs(
     bool HasEverSucceeded,
@@ -42,7 +50,8 @@ public readonly record struct FreshnessInputs(
     long? LastAcceptedMono,
     DateTimeOffset? SessionResetsAt,
     DateTimeOffset? WeeklyResetsAt,
-    bool ClockDiscontinuity);
+    bool ClockDiscontinuity,
+    bool SessionClosed = false);
 
 public static class FreshnessOracle
 {
@@ -61,7 +70,7 @@ public static class FreshnessOracle
         if (i.UnknownAtMono is { } u && monoMs > u) return Freshness.Unknown;
         if (i.StaleAtMono is { } s && monoMs > s) return Freshness.Stale;
 
-        if (i.LastAcceptedMono is { } changed && (monoMs - changed) > FingerprintStaleAfterMs) return Freshness.Stale;
+        if (!i.SessionClosed && i.LastAcceptedMono is { } changed && (monoMs - changed) > FingerprintStaleAfterMs) return Freshness.Stale;
 
         // resets_at deadlines stay UTC: this is an absolute wall-clock instant compared to the
         // current wall clock, not a duration since some past accepted event, so it does not

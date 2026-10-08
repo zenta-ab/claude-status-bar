@@ -36,6 +36,41 @@ namespace ClaudeStatusBar.Data;
 /// </summary>
 public static class UsageParser
 {
+    /// <summary>The error text for the "not logged in" shape (see Parse); stable so a log line or test can recognise it.</summary>
+    public const string NotLoggedInError = "not logged in: no subscription login in this config dir (subscription_type null, rate_limits unavailable)";
+
+    /// <summary>
+    /// Like TryParse, but also reports the one failure that means something specific: the "not
+    /// logged in" shape. A child with no usable subscription login answers get_usage with
+    /// `subscription_type: null`, `rate_limits_available: false` and `rate_limits: null` (observed
+    /// on an empty config dir, docs/mac-port.md) -- a perfectly well-formed response that carries
+    /// no quota. That is not a parse error and must not be reported as one.
+    /// </summary>
+    public static UsageParseResult Parse(JsonElement controlResponse)
+    {
+        UsageSnapshot? snapshot = TryParse(controlResponse, out string? error);
+        if (snapshot is not null) return new UsageParseResult(snapshot, null);
+        return IsNotLoggedInShape(controlResponse)
+            ? new UsageParseResult(null, NotLoggedInError, NotLoggedIn: true)
+            : new UsageParseResult(null, error);
+    }
+
+    /// <summary>True only when all three markers are present and say "no subscription login": subscription_type null, rate_limits_available false, rate_limits null.</summary>
+    public static bool IsNotLoggedInShape(JsonElement controlResponse)
+    {
+        try
+        {
+            if (!controlResponse.TryGetProperty("response", out var response)) return false;
+            return TryFindExactKey(response, "subscription_type", out var sub) && sub.ValueKind == JsonValueKind.Null
+                && TryFindExactKey(response, "rate_limits_available", out var available) && available.ValueKind == JsonValueKind.False
+                && TryFindExactKey(response, "rate_limits", out var limits) && limits.ValueKind == JsonValueKind.Null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static UsageSnapshot? TryParse(JsonElement controlResponse, out string? error)
     {
         try

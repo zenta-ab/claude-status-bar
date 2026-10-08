@@ -12,7 +12,7 @@ namespace ClaudeStatusBar.Model;
 /// </summary>
 public static class MultiAccountDemoSource
 {
-    public readonly record struct DemoAccount(string Label, QuotaView View);
+    public readonly record struct DemoAccount(string Label, QuotaView View, string? Subtitle = null);
     public readonly record struct MultiState(string Key, AccountDisplayMode Mode, IReadOnlyList<DemoAccount> Accounts, int FocusIndex);
 
     /// <summary>
@@ -26,24 +26,40 @@ public static class MultiAccountDemoSource
     /// </summary>
     public static IReadOnlyList<MultiState> Build(DateTimeOffset utcNow)
     {
-        DemoAccount personal = new("Personligt", SafeView(utcNow));
-        DemoAccount team = new("Team", DryEarlyView(utcNow));
-        DemoAccount enterprise = new("Enterprise", SpentView(utcNow));
+        DemoAccount personal = new("Personligt", SafeView(utcNow), "Max · personlig organisation");
+        DemoAccount team = new("Team", DryEarlyView(utcNow), "Acme AB");
+        DemoAccount enterprise = new("Enterprise", SpentView(utcNow), "Globex AB");
         var accounts = new List<DemoAccount> { personal, team, enterprise };
 
         return new List<MultiState>
         {
             new("multi_per_account", AccountDisplayMode.PerAccount, accounts, FocusIndex: 1),
             new("multi_binding", AccountDisplayMode.Binding, accounts, FocusIndex: 2),
+            new("multi_needs_login", AccountDisplayMode.PerAccount, new List<DemoAccount> { personal, new("Team", NeedsLoginView(utcNow), "Acme AB") }, FocusIndex: 1),
+            new("multi_loading", AccountDisplayMode.PerAccount, new List<DemoAccount> { personal, new("Team", LoadingView(utcNow), "Acme AB") }, FocusIndex: 1),
         };
     }
+
+    /// <summary>docs/multi-account.md "Loading": the account has not answered yet.</summary>
+    static QuotaView LoadingView(DateTimeOffset utcNow) => new(
+        WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
+        WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
+        Freshness.Unknown, LastChangedAt: null, LastSuccessAt: null, PollInterval: TimeSpan.FromSeconds(30),
+        Error: null, IconSeverity: QuotaState.Measuring, BlockedUntil: null, Loading: true);
+
+    /// <summary>docs/multi-account.md "NeedsLogin": a fresh child confirmed there is no usable login. The grey ring, the tooltip and the panel's re-login button all key on QuotaView.NeedsLogin.</summary>
+    static QuotaView NeedsLoginView(DateTimeOffset utcNow) => new(
+        WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
+        WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
+        Freshness.Unknown, LastChangedAt: null, LastSuccessAt: utcNow.AddHours(-3), PollInterval: TimeSpan.FromMinutes(2),
+        Error: "not logged in", IconSeverity: QuotaState.Measuring, BlockedUntil: null, NeedsLogin: true);
 
     static QuotaView SafeView(DateTimeOffset utcNow)
     {
         WindowView session = VerdictWindow(WindowKind.Session, QuotaWindows.SessionMinutes, usedPct: 18.0, ratePctPerMin: 0.12, minutesToReset: 240, utcNow);
         WindowView weekly = VerdictWindow(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, usedPct: 12.0, ratePctPerMin: 0.004, minutesToReset: 8000, utcNow);
         return new QuotaView(session, weekly, Freshness.Live,
-            LastChangedAt: utcNow.AddSeconds(-15), LastPollAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(150),
+            LastChangedAt: utcNow.AddSeconds(-15), LastSuccessAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(150),
             Error: null, IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State), BlockedUntil: null);
     }
 
@@ -53,7 +69,7 @@ public static class MultiAccountDemoSource
         WindowView session = VerdictWindow(WindowKind.Session, QuotaWindows.SessionMinutes, usedPct: 56.0, ratePctPerMin: 0.424, minutesToReset: 168, utcNow);
         WindowView weekly = VerdictWindow(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, usedPct: 40.0, ratePctPerMin: 0.01, minutesToReset: 6000, utcNow);
         return new QuotaView(session, weekly, Freshness.Live,
-            LastChangedAt: utcNow.AddSeconds(-10), LastPollAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(30),
+            LastChangedAt: utcNow.AddSeconds(-10), LastSuccessAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(30),
             Error: null, IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State), BlockedUntil: null);
     }
 
@@ -63,7 +79,7 @@ public static class MultiAccountDemoSource
         WindowView weekly = VerdictWindow(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, usedPct: 70.0, ratePctPerMin: 0.02, minutesToReset: 5000, utcNow);
         DateTimeOffset? blockedUntil = session.State == QuotaState.Spent ? session.ResetsAt : null;
         return new QuotaView(session, weekly, Freshness.Live,
-            LastChangedAt: utcNow.AddSeconds(-30), LastPollAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(300),
+            LastChangedAt: utcNow.AddSeconds(-30), LastSuccessAt: utcNow.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(300),
             Error: null, IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State), BlockedUntil: blockedUntil);
     }
 

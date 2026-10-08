@@ -73,6 +73,7 @@ public static class DemoQuotaSource
             // verdict, which would outrank it in the banner's priority order and hide it.
             new("stale", View(safeSession, safeWeekly, Freshness.Stale, utcNow, TimeSpan.FromSeconds(150), utcNow.AddMinutes(-23))),
             new("unknown", UnknownView(utcNow)),
+            new("loading", LoadingView(utcNow)),
         };
         return list;
     }
@@ -80,7 +81,7 @@ public static class DemoQuotaSource
     static QuotaView View(WindowView session, WindowView weekly, Freshness freshness, DateTimeOffset utcNow, TimeSpan pollInterval, DateTimeOffset lastChangedAt) =>
         new(session, weekly, freshness,
             LastChangedAt: lastChangedAt,
-            LastPollAt: utcNow.AddSeconds(-2),
+            LastSuccessAt: utcNow.AddSeconds(-2),
             PollInterval: pollInterval,
             Error: null,
             IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State),
@@ -95,19 +96,32 @@ public static class DemoQuotaSource
 
         return new QuotaView(session, weekly, Freshness.Live,
             LastChangedAt: utcNow.AddSeconds(-30),
-            LastPollAt: utcNow.AddSeconds(-2),
+            LastSuccessAt: utcNow.AddSeconds(-2),
             PollInterval: TimeSpan.FromSeconds(300),
             Error: null,
             IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State),
             BlockedUntil: blockedUntil);
     }
 
+    /// <summary>docs/multi-account.md "Loading": no result yet -- grey ring without the "!", a travelling arc, "Hämtar kvoten…".</summary>
+    static QuotaView LoadingView(DateTimeOffset utcNow) =>
+        new(WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
+            WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
+            Freshness.Unknown,
+            LastChangedAt: null,
+            LastSuccessAt: null,
+            PollInterval: TimeSpan.FromSeconds(30),
+            Error: null,
+            IconSeverity: QuotaState.Measuring,
+            BlockedUntil: null,
+            Loading: true);
+
     static QuotaView UnknownView(DateTimeOffset utcNow) =>
         new(WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
             WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
             Freshness.Unknown,
             LastChangedAt: null,
-            LastPollAt: utcNow.AddMinutes(-40),
+            LastSuccessAt: utcNow.AddMinutes(-40),
             PollInterval: TimeSpan.FromSeconds(600),
             Error: "get_usage svarar inte",
             IconSeverity: QuotaState.Measuring,

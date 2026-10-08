@@ -31,7 +31,38 @@ public static class HandleCensus
     {
         int single = RunSingleIconSelfTest(iterations, threshold);
         int multi = RunMultiAccountIconSelfTest(threshold: 8);
-        return single == 0 && multi == 0 ? 0 : 1;
+        int loading = RunLoadingIconSelfTest(iterations, threshold);
+        return single == 0 && multi == 0 && loading == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The loading icon (docs/multi-account.md "Loading") re-assigns a NEW Icon built from a cached
+    /// ICO frame at up to 8 a second. Steps through every frame, thousands of times over, and checks
+    /// the same thing as above: GDI/USER handle counts stay flat, and the cache stays at its
+    /// fixed size however long it spins.
+    /// </summary>
+    static int RunLoadingIconSelfTest(int iterations, int threshold)
+    {
+        using var notifyIcon = new NotifyIcon { Visible = false };
+        using var slot = new IconSlot(notifyIcon);
+        DateTimeOffset start = DateTimeOffset.UtcNow;
+        QuotaView loading = DemoQuotaSource.Build(start).First(s => s.Key == "loading").View;
+
+        for (int i = 0; i < 25; i++) slot.Update(loading, nowOverride: start.AddMilliseconds(LoadingFrames.FrameIntervalMs * i));
+
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var before = Sample();
+        for (int i = 0; i < iterations; i++) slot.Update(loading, nowOverride: start.AddMilliseconds(LoadingFrames.FrameIntervalMs * (i + 25)));
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var after = Sample();
+
+        int dGdi = after.gdi - before.gdi;
+        int dUser = after.user - before.user;
+        Console.WriteLine(
+            $"selftest(loading) n={iterations}  GDI {before.gdi}->{after.gdi} (d={dGdi})  " +
+            $"USER {before.user}->{after.user} (d={dUser})  threshold={threshold}  cachedFrames={LoadingFrames.CachedFrames}");
+
+        return Math.Abs(dGdi) <= threshold && Math.Abs(dUser) <= threshold && LoadingFrames.CachedFrames <= LoadingFrames.FrameCount * 4 ? 0 : 1;
     }
 
     static int RunSingleIconSelfTest(int iterations, int threshold)

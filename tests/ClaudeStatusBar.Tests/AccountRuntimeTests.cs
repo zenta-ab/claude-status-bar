@@ -308,7 +308,7 @@ public class AccountRuntimeTests
                 return runtime.LastView.Freshness == Freshness.Live;
             }, TimeSpan.FromSeconds(10));
 
-            DateTimeOffset? pollTimeBeforePause = runtime.LastView.LastPollAt;
+            DateTimeOffset? pollTimeBeforePause = runtime.LastView.LastSuccessAt;
 
             runtime.SetDuplicate(true, duplicateOfIndex: 0);
             Assert.True(runtime.IsDuplicate);
@@ -319,7 +319,7 @@ public class AccountRuntimeTests
             // just the (already-stopped) timer.
             await runtime.PollAsync();
             Assert.False(runtime.IsPolling);
-            Assert.Equal(pollTimeBeforePause, runtime.LastView.LastPollAt);
+            Assert.Equal(pollTimeBeforePause, runtime.LastView.LastSuccessAt);
 
             DateTimeOffset beforeResume = DateTimeOffset.UtcNow;
             runtime.SetDuplicate(false);
@@ -327,12 +327,12 @@ public class AccountRuntimeTests
             Assert.Null(runtime.DuplicateOfIndex);
 
             // SetDuplicate(false) itself kicks off an immediate poll (never waits for the timer's
-            // next tick) -- proven by a genuinely NEW LastPollAt landing after the resume call,
+            // next tick) -- proven by a genuinely NEW LastSuccessAt landing after the resume call,
             // not merely freshness staying Live (which would also hold true if resume did nothing).
             await WaitUntilAsync(() =>
             {
                 runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
-                return runtime.LastView.LastPollAt > beforeResume;
+                return runtime.LastView.LastSuccessAt > beforeResume;
             }, TimeSpan.FromSeconds(10));
             Assert.Equal(Freshness.Live, runtime.LastView.Freshness);
         }
@@ -380,6 +380,373 @@ public class AccountRuntimeTests
             Directory.Delete(baseLogDir, recursive: true);
             Directory.Delete(configDir, recursive: true);
             Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    // ---- docs/multi-account.md "NeedsLogin" ----
+
+    static int Launches(string launchLog) => File.Exists(launchLog) ? File.ReadAllLines(launchLog).Length : 0;
+
+    /// <summary>
+    /// A child that answers with the "no subscription login" shape: the first answer restarts the
+    /// child ONCE (a stale process is the usual cause), and only the fresh child saying the same
+    /// thing makes the account NeedsLogin. Exactly two launches -- never a restart loop.
+    /// </summary>
+    [Fact]
+    public async Task NotLoggedIn_RestartsTheChildOnce_ThenAFreshChildSayingTheSameThingIsNeedsLogin()
+    {
+        string baseLogDir = NewTempDir("runtime-nl-logs");
+        string configDir = NewConfigDirWithIdentity("runtime-nl-cfg", "ffffffff-0000-0000-0000-000000000000");
+        string workDir = NewTempDir("runtime-nl-work");
+        string launchLog = Path.Combine(workDir, "launches.log");
+        var uiContext = new SynchronizationContext();
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec($"not-logged-in --launch-log=\"{launchLog}\"", workDir), configDirOverride: configDir);
+
+        try
+        {
+            runtime.Start();
+
+            await WaitUntilAsync(() => runtime.NeedsLogin, TimeSpan.FromSeconds(20));
+
+            Assert.Equal(2, Launches(launchLog)); // the original child and exactly one replacement
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+            Assert.True(runtime.LastView.NeedsLogin);
+            Assert.Equal(Freshness.Unknown, runtime.LastView.Freshness); // the grey "!" ring
+
+            // Further not-logged-in answers do not restart it again.
+            await runtime.PollAsync();
+            await Task.Delay(500);
+            Assert.Equal(2, Launches(launchLog));
+            Assert.True(runtime.NeedsLogin);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>The first child was just stale; its replacement reads fine: no NeedsLogin at all, ever.</summary>
+    [Fact]
+    public async Task NotLoggedIn_FromAStaleChild_IsCuredByTheOneRestart()
+    {
+        string baseLogDir = NewTempDir("runtime-nlcure-logs");
+        string configDir = NewConfigDirWithIdentity("runtime-nlcure-cfg", "99999999-0000-0000-0000-000000000000");
+        string workDir = NewTempDir("runtime-nlcure-work");
+        string launchLog = Path.Combine(workDir, "launches.log");
+        string marker = Path.Combine(workDir, "first-launch.marker");
+        var uiContext = new SynchronizationContext();
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir,
+            specOverride: FakeSpec($"not-logged-in-once --marker=\"{marker}\" --launch-log=\"{launchLog}\"", workDir),
+            configDirOverride: configDir);
+
+        try
+        {
+            runtime.Start();
+
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return runtime.LastView.Freshness == Freshness.Live;
+            }, TimeSpan.FromSeconds(20));
+
+            Assert.False(runtime.NeedsLogin);
+            Assert.False(runtime.LastView.NeedsLogin);
+            Assert.Equal(2, Launches(launchLog));
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>Any successful reading clears NeedsLogin (the user logged in again some other way, or the login came back).</summary>
+    [Fact]
+    public async Task NeedsLogin_ClearsOnTheNextSuccessfulReading()
+    {
+        string baseLogDir = NewTempDir("runtime-nlclear-logs");
+        string configDir = NewConfigDirWithIdentity("runtime-nlclear-cfg", "88888888-0000-0000-0000-000000000000");
+        string workDir = NewTempDir("runtime-nlclear-work");
+        string marker = Path.Combine(workDir, "login-renewed.marker");
+        var uiContext = new SynchronizationContext();
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec($"not-logged-in-until-marker --marker=\"{marker}\"", workDir), configDirOverride: configDir);
+
+        try
+        {
+            runtime.Start();
+            await WaitUntilAsync(() => runtime.NeedsLogin, TimeSpan.FromSeconds(20));
+
+            File.WriteAllText(marker, "renewed");
+            await runtime.PollAsync();
+
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return !runtime.NeedsLogin && runtime.LastView.Freshness == Freshness.Live;
+            }, TimeSpan.FromSeconds(10));
+            Assert.False(runtime.LastView.NeedsLogin);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>"Senast avläst" is the last SUCCESSFUL read: an account that stops answering keeps the time of its last good reading.</summary>
+    [Fact]
+    public async Task LastSuccessAt_StaysAtTheLastGoodReading_WhileFailuresPileUp()
+    {
+        string baseLogDir = NewTempDir("runtime-lastok-logs");
+        string configDir = NewConfigDirWithIdentity("runtime-lastok-cfg", "77777777-0000-0000-0000-000000000000");
+        string workDir = NewTempDir("runtime-lastok-work");
+        var uiContext = new SynchronizationContext();
+        var runtime = new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, uiContext,
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec("die-after --count=1", workDir), configDirOverride: configDir);
+
+        try
+        {
+            runtime.Start();
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return runtime.LastView.LastSuccessAt is not null;
+            }, TimeSpan.FromSeconds(10));
+            DateTimeOffset firstRead = runtime.LastView.LastSuccessAt!.Value;
+
+            // The child answered once and exits on the next request: every poll from here on fails.
+            await runtime.PollAsync();
+            await Task.Delay(300);
+            await runtime.PollAsync();
+            await Task.Delay(300);
+
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+            Assert.Equal(firstRead, runtime.LastView.LastSuccessAt);
+            Assert.NotNull(runtime.LastView.Error);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(baseLogDir, recursive: true);
+            Directory.Delete(configDir, recursive: true);
+            Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    // ---- slots: an AccountRuntime resolves its config dir through the path guard ----
+
+    [Fact]
+    public void Constructor_RefusesASlotThePathGuardRefuses()
+    {
+        var store = new SlotStore(Path.Combine(Path.GetTempPath(), "csb-rt-guard-" + Guid.NewGuid().ToString("N"), "accounts"));
+
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            new AccountRuntime(@"..\x", new AccountEntry { Enabled = true }, 0, new SynchronizationContext(), slots: store));
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            new AccountRuntime("default", new AccountEntry { Enabled = true }, 0, new SynchronizationContext(), slots: store));
+    }
+
+    [Fact]
+    public async Task Constructor_ReadsTheIdentityFromTheSlotsConfigDir()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "csb-rt-slot-" + Guid.NewGuid().ToString("N"));
+        var store = new SlotStore(Path.Combine(tempRoot, "accounts"));
+        string slot = store.CreatePending();
+        WriteIdentity(store.ConfigDirOf(slot), "66666666-0000-0000-0000-000000000000", organizationUuid: null);
+        var runtime = new AccountRuntime(slot, new AccountEntry { Slot = slot, Enabled = true }, 0, new SynchronizationContext(),
+            baseLogDirOverride: Path.Combine(tempRoot, "logs"), slots: store);
+        try
+        {
+            Assert.Equal(slot, runtime.Slot);
+            Assert.Equal("66666666-0000-0000-0000-000000000000", runtime.Identity?.AccountUuid);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    // ---- docs/multi-account.md "Loading": from start until the first result, the first failure, or 30 s ----
+
+    AccountRuntime LoadingRuntime(string mode, string tag, out string[] cleanup, TimeSpan? loadingTimeout = null)
+    {
+        string baseLogDir = NewTempDir($"runtime-{tag}-logs");
+        string configDir = NewConfigDirWithIdentity($"runtime-{tag}-cfg", "55555555-0000-0000-0000-000000000000");
+        string workDir = NewTempDir($"runtime-{tag}-work");
+        cleanup = new[] { baseLogDir, configDir, workDir };
+        return new AccountRuntime("0", new AccountEntry { Enabled = true }, 0, new SynchronizationContext(),
+            baseLogDirOverride: baseLogDir, specOverride: FakeSpec(mode, workDir), configDirOverride: configDir,
+            loadingTimeout: loadingTimeout);
+    }
+
+    static void Cleanup(string[] dirs)
+    {
+        foreach (string d in dirs) { try { Directory.Delete(d, recursive: true); } catch { /* best effort */ } }
+    }
+
+    [Fact]
+    public async Task Loading_ABrandNewRuntime_IsLoading_NotAnError()
+    {
+        AccountRuntime runtime = LoadingRuntime("hang", "load-new", out string[] dirs);
+        try
+        {
+            Assert.True(runtime.LastView.Loading); // before it is even started
+            runtime.Start();
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+
+            Assert.True(runtime.LastView.Loading);
+            Assert.Equal(Freshness.Unknown, runtime.LastView.Freshness);
+            Assert.False(runtime.LastView.NeedsLogin);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Cleanup(dirs);
+        }
+    }
+
+    [Fact]
+    public async Task Loading_EndsWithTheFirstSuccessfulRead()
+    {
+        AccountRuntime runtime = LoadingRuntime("normal", "load-ok", out string[] dirs);
+        try
+        {
+            runtime.Start();
+
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return runtime.LastView.Freshness == Freshness.Live;
+            }, TimeSpan.FromSeconds(10));
+
+            Assert.False(runtime.LastView.Loading);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Cleanup(dirs);
+        }
+    }
+
+    [Fact]
+    public async Task Loading_EndsWithTheFirstFailure_AfterWhichItIsAnOrdinaryUnknown()
+    {
+        AccountRuntime runtime = LoadingRuntime("die-immediately", "load-fail", out string[] dirs);
+        try
+        {
+            runtime.Start();
+
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return !runtime.LastView.Loading;
+            }, TimeSpan.FromSeconds(15));
+
+            Assert.Equal(Freshness.Unknown, runtime.LastView.Freshness);
+            Assert.NotNull(runtime.LastView.Error);
+            Assert.False(runtime.LastView.NeedsLogin);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Cleanup(dirs);
+        }
+    }
+
+    [Fact]
+    public async Task Loading_EndsAfterTheTimeout_EvenWithNoResultAtAll()
+    {
+        // A child that never answers, and a short stand-in for the 30 s.
+        AccountRuntime runtime = LoadingRuntime("hang", "load-timeout", out string[] dirs, TimeSpan.FromMilliseconds(700));
+        try
+        {
+            runtime.Start();
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+            Assert.True(runtime.LastView.Loading);
+
+            await Task.Delay(900);
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+
+            Assert.False(runtime.LastView.Loading);
+            Assert.Equal(Freshness.Unknown, runtime.LastView.Freshness); // from here the normal Unknown rules apply
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Cleanup(dirs);
+        }
+    }
+
+    [Fact]
+    public async Task Loading_ARebuild_StartsItAgain_ForTheNewRuntime()
+    {
+        AccountRuntime first = LoadingRuntime("normal", "load-rebuild1", out string[] dirs1);
+        AccountRuntime? second = null;
+        string[] dirs2 = Array.Empty<string>();
+        try
+        {
+            first.Start();
+            await WaitUntilAsync(() =>
+            {
+                first.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                return first.LastView.Freshness == Freshness.Live;
+            }, TimeSpan.FromSeconds(10));
+            Assert.False(first.LastView.Loading);
+
+            // A rebuild replaces every runtime: the account is "Hämtar kvoten…" again until the new one reads.
+            await first.DisposeAsync();
+            second = LoadingRuntime("hang", "load-rebuild2", out dirs2);
+            second.Start();
+            second.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+
+            Assert.True(second.LastView.Loading);
+        }
+        finally
+        {
+            await first.DisposeAsync();
+            if (second is not null) await second.DisposeAsync();
+            Cleanup(dirs1);
+            Cleanup(dirs2);
+        }
+    }
+
+    [Fact]
+    public async Task Loading_TheFirstNotLoggedInAnswer_IsNotYetAResult_SoNoErrorLookShowsBetweenTheTwoAnswers()
+    {
+        AccountRuntime runtime = LoadingRuntime("not-logged-in", "load-nl", out string[] dirs);
+        try
+        {
+            runtime.Start();
+            bool errorLookSeen = false;
+
+            // The first answer restarts the child; the confirming answer decides. Until then it is still loading.
+            await WaitUntilAsync(() =>
+            {
+                runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+                if (!runtime.LastView.Loading && !runtime.LastView.NeedsLogin) errorLookSeen = true;
+                return runtime.NeedsLogin;
+            }, TimeSpan.FromSeconds(20));
+
+            Assert.False(errorLookSeen, "between the first and the confirming answer the account looked like a plain error");
+            runtime.Evaluate(DateTimeOffset.UtcNow, Environment.TickCount64);
+            Assert.False(runtime.LastView.Loading);
+            Assert.True(runtime.LastView.NeedsLogin);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+            Cleanup(dirs);
         }
     }
 }

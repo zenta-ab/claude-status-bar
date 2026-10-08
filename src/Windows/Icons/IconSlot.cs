@@ -42,13 +42,18 @@ public sealed class IconSlot : IDisposable
     /// cap). Null (the default) keeps the exact single-account tooltip this app has always shown
     /// -- required so a single-account install's icon is unchanged.
     /// </param>
-    public void Update(QuotaView view, string? accountLabel = null)
+    /// <param name="tooltipOverride">
+    /// Replaces the whole tooltip -- used by the zero-accounts icon (docs/multi-account.md "Zero
+    /// accounts"), which has no verdict to describe. Must fit NotifyIcon.Text's 63-character cap.
+    /// </param>
+    /// <param name="nowOverride">Test / self-test only: the instant to render for, so the loading icon's frames can be stepped without waiting for real time.</param>
+    public void Update(QuotaView view, string? accountLabel = null, string? tooltipOverride = null, DateTimeOffset? nowOverride = null)
     {
         try
         {
             int px = QueryTrayIconPixelSize();
             bool taskbarDark = TaskbarIsDark();
-            DateTimeOffset now = DateTimeOffset.UtcNow;
+            DateTimeOffset now = nowOverride ?? DateTimeOffset.UtcNow;
             // Monotonic (Codex review Low #18): a backward wall-clock jump must not leave the
             // exhausted-icon throttle stuck open/closed until wall time catches back up.
             long nowMonoMs = Environment.TickCount64;
@@ -61,13 +66,20 @@ public sealed class IconSlot : IDisposable
 
             if (!sizeOrThemeChanged && (throttledExhausted || unchanged))
             {
-                _notifyIcon.Text = BuildTooltip(view, accountLabel);
+                _notifyIcon.Text = tooltipOverride ?? BuildTooltip(view, accountLabel);
                 return;
             }
 
             Icon next;
-            using (Bitmap bmp = GaugeRenderer.RenderQuota(p))
+            if (p.Loading)
             {
+                // A cached, ready-made frame: only an Icon is built, nothing is drawn.
+                using var ms = new MemoryStream(LoadingFrames.GetIcoBytes(px, p.LoadingFrame), writable: false);
+                next = new Icon(ms, new Size(px, px));
+            }
+            else
+            {
+                using Bitmap bmp = GaugeRenderer.RenderQuota(p);
                 byte[] icoBytes = IconFactory.BuildIco(bmp);
                 using var ms = new MemoryStream(icoBytes);
                 next = new Icon(ms, new Size(px, px));
@@ -88,7 +100,7 @@ public sealed class IconSlot : IDisposable
 
             _lastParams = p;
             _lastRenderAtMonoMs = nowMonoMs;
-            _notifyIcon.Text = BuildTooltip(view, accountLabel);
+            _notifyIcon.Text = tooltipOverride ?? BuildTooltip(view, accountLabel);
         }
         catch (Exception ex)
         {
@@ -134,6 +146,11 @@ public sealed class IconSlot : IDisposable
     static string ComposeTooltip(QuotaView view)
     {
         TimeZoneInfo tz = TimeZoneInfo.Local;
+
+        if (view.Loading) return LoginText.LoadingTooltip;
+
+        // docs/multi-account.md "NeedsLogin": the same grey ring as Unknown, but the fix is a login, so say so.
+        if (view.NeedsLogin) return LoginText.NeedsLoginTooltip;
 
         if (view.Freshness == Freshness.Unknown) return "Kan inte läsa kvoten";
 

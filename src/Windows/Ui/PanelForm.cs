@@ -43,6 +43,7 @@ public sealed class PanelForm : Form
     const float BarHeight = 8f;
     const float RefreshGlyphSize = 13f;
     const float RefreshHitSize = 22f; // bigger than the glyph itself -- easier to click, Fitts's-law style
+    const float LoginButtonHeight = 26f;
 
     // Same literal as PanelText's AwaitingResetText -- QuotaModel/DemoQuotaSource's
     // MeasuringReason is a plain string, not an enum, and this is the one place
@@ -96,6 +97,14 @@ public sealed class PanelForm : Form
     bool _demo;
     float _lastHeight = -1f;
     string? _accountLabel;
+    string? _accountSubtitle;
+
+    /// <summary>The header's first line when no account label is given (the single-account demo frames).</summary>
+    const string DefaultTitle = "Claude Code";
+
+    /// <summary>The header title is the account's label; the DEMO badge, when shown, takes the right end of that row.</summary>
+    string TitleText => _accountLabel ?? DefaultTitle;
+    float TitleWidth => ContentWidth - (_demo ? 54f : 0f);
     IReadOnlyList<OtherAccountRow> _otherAccounts = Array.Empty<OtherAccountRow>();
     bool _refreshInFlight;
     string? _adviceLine;
@@ -118,6 +127,9 @@ public sealed class PanelForm : Form
     /// never which account that means.
     /// </summary>
     public event Action? RefreshRequested;
+
+    /// <summary>docs/multi-account.md "NeedsLogin": fired when the user clicks the "Logga in igen" button shown under the status box of an account that needs a login. The caller knows which account is shown and starts that account's re-login flow.</summary>
+    public event Action? ReloginRequested;
 
     public PanelForm(NotifyIcon? trayIcon = null)
     {
@@ -213,13 +225,14 @@ public sealed class PanelForm : Form
     /// renders dimmed and ignores clicks while this is true, so it can never start a second
     /// concurrent poll for the same account.
     /// </param>
-    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null)
+    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null, string? accountSubtitle = null)
     {
         try
         {
             _view = view;
             _demo = demo;
             _accountLabel = accountLabel;
+            _accountSubtitle = string.IsNullOrWhiteSpace(accountSubtitle) ? null : accountSubtitle;
             _otherAccounts = otherAccounts ?? Array.Empty<OtherAccountRow>();
             _refreshInFlight = refreshInFlight;
             _adviceLine = adviceLine;
@@ -278,6 +291,12 @@ public sealed class PanelForm : Form
             if (!_refreshInFlight && layout.RefreshHitRect.Contains(logicalPoint))
             {
                 RefreshRequested?.Invoke();
+                return;
+            }
+
+            if (_view.NeedsLogin && layout.LoginButtonRect.Contains(logicalPoint))
+            {
+                ReloginRequested?.Invoke();
                 return;
             }
 
@@ -349,11 +368,11 @@ public sealed class PanelForm : Form
     // ---- layout: single source of truth for every section's Y-offset (and, via DrawFitText, every wrap decision) ----
 
     readonly record struct PanelLayout(
-        PanelTextResult Text, float LabelY, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
+        PanelTextResult Text, float SubtitleY, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
         float SessionY, float SessionHeight, float WeeklyY, float WeeklyHeight,
         float RuleY, float FooterY, float AdviceY, float AdviceHeight, RectangleF AdviceHitRect,
         float OtherAccountsRuleY, float OtherAccountsY,
-        IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, float TotalHeight);
+        IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, RectangleF LoginButtonRect, float TotalHeight);
 
     float ContentWidth => LogicalWidth - 2 * SidePadding;
 
@@ -362,13 +381,17 @@ public sealed class PanelForm : Form
         PanelTextResult text = PanelText.Compose(_view, now, TimeZoneInfo.Local);
 
         float y = 12f;
-        y += 20f; // title
+        // Title: the account's label (its own name or the automatic one). It may shrink or wrap, so it
+        // is measured like everything else rather than assumed to be one 20px line.
+        y += Math.Max(20f, DrawFitText(_measureG, TitleText, _fontTitle, TextPrimary, 0, 0, TitleWidth, draw: false));
 
-        float labelY = -1f;
-        if (_accountLabel is { } label)
+        // Subtitle: plan and organisation from Anthropic data; absent when unknown or when it would
+        // just repeat the title (PanelText.ComposeAccountSubtitle).
+        float subtitleY = -1f;
+        if (_accountSubtitle is { } subtitle)
         {
-            labelY = y;
-            y += DrawFitText(_measureG, label, _fontSectionTitle, TextPrimary, 0, 0, ContentWidth, draw: false) + 4f;
+            subtitleY = y;
+            y += DrawFitText(_measureG, subtitle, _fontResetHeader, TextSecondary, 0, 0, ContentWidth, draw: false) + 4f;
         }
 
         float freshnessY = y;
@@ -381,7 +404,16 @@ public sealed class PanelForm : Form
 
         float statusBoxY = y;
         float statusBoxHeight = MeasureStatusBox(text.StatusBox);
-        y += statusBoxHeight + 14f;
+        y += statusBoxHeight;
+
+        var loginButtonRect = RectangleF.Empty;
+        if (_view.NeedsLogin)
+        {
+            y += 8f;
+            loginButtonRect = new RectangleF(SidePadding, y, ContentWidth, LoginButtonHeight);
+            y += LoginButtonHeight;
+        }
+        y += 14f;
 
         float sessionY = y;
         float sessionHeight = MeasureSection(text.Session, _view.Session);
@@ -429,9 +461,9 @@ public sealed class PanelForm : Form
             }
         }
 
-        return new PanelLayout(text, labelY, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight,
+        return new PanelLayout(text, subtitleY, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight,
             weeklyY, weeklyHeight, ruleY, footerY, adviceY, adviceHeight, adviceHitRect,
-            otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, y);
+            otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, loginButtonRect, y);
     }
 
     float MeasureStatusBox(StatusBoxText box)
@@ -484,6 +516,7 @@ public sealed class PanelForm : Form
 
             DrawHeader(g, layout);
             DrawStatusBox(g, layout);
+            DrawLoginButton(g, layout);
             DrawSection(g, layout.SessionY, layout.Text.Session, _view.Session, now);
             DrawSection(g, layout.WeeklyY, layout.Text.Weekly, _view.Weekly, now);
 
@@ -509,8 +542,7 @@ public sealed class PanelForm : Form
 
     void DrawHeader(Graphics g, PanelLayout layout)
     {
-        using (var titleBrush = new SolidBrush(TextPrimary))
-            g.DrawString("Claude Code", _fontTitle, titleBrush, SidePadding, 12f);
+        DrawFitText(g, TitleText, _fontTitle, TextPrimary, SidePadding, 12f, TitleWidth);
 
         if (_demo)
         {
@@ -524,8 +556,8 @@ public sealed class PanelForm : Form
             g.DrawString("DEMO", _fontDemoBadge, textBrush, badgeRect, fmt);
         }
 
-        if (_accountLabel is { } label)
-            DrawFitText(g, label, _fontSectionTitle, TextPrimary, SidePadding, layout.LabelY, ContentWidth);
+        if (_accountSubtitle is { } subtitle)
+            DrawFitText(g, subtitle, _fontResetHeader, TextSecondary, SidePadding, layout.SubtitleY, ContentWidth);
 
         var (text, color) = BuildFreshnessLine(_view);
         using var freshBrush = new SolidBrush(color);
@@ -656,6 +688,26 @@ public sealed class PanelForm : Form
         y += DrawFitText(g, box.Line2, _fontStatusLine2, TextSecondary, textX, y, innerWidth) + 4f;
         if (box.SecondaryLine is { } sec) y += DrawFitText(g, sec, _fontStatusLine3, TextSecondary, textX, y, innerWidth) + 4f;
         if (box.Line3 is { } l3) DrawFitText(g, l3, _fontStatusLine3, Palette.Tight, textX, y, innerWidth);
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "NeedsLogin": a plain painted button (never a real WinForms control -- the panel
+    /// must stay non-activating) under the status box; OnMouseDown hit-tests the same rectangle.
+    /// </summary>
+    void DrawLoginButton(Graphics g, PanelLayout layout)
+    {
+        if (!_view.NeedsLogin) return;
+        RectangleF rect = layout.LoginButtonRect;
+        using (var path = RoundedRect(rect, 6f))
+        {
+            using var bg = new SolidBrush(Color.FromArgb(46, 255, 255, 255));
+            using var edge = new Pen(Color.FromArgb(90, 255, 255, 255), 1f);
+            g.FillPath(bg, path);
+            g.DrawPath(edge, path);
+        }
+        using var textBrush = new SolidBrush(TextPrimary);
+        using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        g.DrawString(LoginText.ReloginButton, _fontStatusLine2, textBrush, rect, fmt);
     }
 
     /// <summary>One window section (docs/panel-v2.md, item 3): small ring, title, reset header, Tid bar, Kvot bar.</summary>
@@ -821,6 +873,8 @@ public sealed class PanelForm : Form
 
     static (string Text, Color Color) BuildFreshnessLine(QuotaView view)
     {
+        if (view.Loading) return ("Hämtar…", TextSecondary);
+        if (view.NeedsLogin) return ("Inte inloggad", Palette.Crit);
         if (view.Freshness == Freshness.Unknown) return ("Kan inte läsa kvoten", Palette.Crit);
         if (view.LastChangedAt is { } changed)
         {
@@ -832,7 +886,7 @@ public sealed class PanelForm : Form
     }
 
     static string BuildFooter(QuotaView view) =>
-        view.LastPollAt is { } lastPoll
+        view.LastSuccessAt is { } lastPoll
             ? $"Senast avläst kl {TimeText.ClockWithSeconds(lastPoll, TimeZoneInfo.Local)} · uppdateras var {TimeText.Duration(view.PollInterval)}"
             : "Väntar på första avläsningen…";
 

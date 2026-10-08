@@ -216,6 +216,32 @@ public static class GaugeRenderer
     }
 
     /// <summary>
+    /// The loading glyph (docs/multi-account.md "Loading"): the same grey ring as the Unknown icon but
+    /// WITHOUT the "!" -- "not answered yet" is not "something is wrong" -- plus a brighter arc whose
+    /// position is `frame` of `frameCount` steps round the ring. Goes through the same supersample +
+    /// downsample pipeline as the other ring glyphs; LoadingFrames renders each frame once and caches it.
+    /// </summary>
+    public static Bitmap RenderLoading(int px, int frame, int frameCount)
+    {
+        int s = px * SS;
+        using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(hi))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            var (band, _, ringRect) = RingGeometry(s);
+
+            using (var track = new Pen(Color.FromArgb(170, Palette.Dead), band * 0.45f))
+                g.DrawEllipse(track, ringRect);
+
+            float start = -90f + 360f * frame / frameCount;
+            using var arc = new Pen(Color.FromArgb(255, Palette.Dead), band * 0.95f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawArc(arc, ringRect, start, 100f);
+        }
+        return Downsample(hi, px, exhausted: false, dimAlpha: 1f);
+    }
+
+    /// <summary>
     /// Composites the "!" onto the already-downsampled ring bitmap (consumes and disposes
     /// it): a rounded bar over a dot, every dimension pixel-snapped (Math.Round) and sized as
     /// a fraction of px, so it stays a crisp two-part mark at every tray size (16/20/24/32)
@@ -317,6 +343,7 @@ public static class GaugeRenderer
     /// </summary>
     public static Bitmap RenderQuota(QuotaIconParams p)
     {
+        if (p.Loading) return RenderLoading(p.Px, p.LoadingFrame, LoadingFrames.FrameCount);
         if (p.Outline) return RenderOutline(p.Px);
 
         // 0.85 on a dark taskbar, per docs/forecast-and-states.md "Exhausted": with the real

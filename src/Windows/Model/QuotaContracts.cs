@@ -50,23 +50,35 @@ public sealed record WindowView(
 /// <summary>
 /// Everything the icon and panel render. LastChangedAt is when a novel fingerprint
 /// last arrived (the honest data age), not when the last poll round-tripped.
+/// LastSuccessAt is when a poll last returned a reading ("Senast avläst"); failures never move it.
 /// BlockedUntil is set only while some window is Spent.
+///
+/// Loading (docs/multi-account.md "Loading"): the account has not produced its first result yet (see
+/// Model/LoadingTracker). Overlaid by AccountRuntime on an Unknown view so the icon, tooltip and panel say
+/// "Hämtar kvoten…" instead of looking like an error.
+///
+/// NeedsLogin (docs/multi-account.md "NeedsLogin"): the account's login has expired or is missing.
+/// It is not part of the model's own verdict -- AccountRuntime overlays it, together with
+/// Freshness.Unknown (the grey ring with "!"), once a fresh child has confirmed the "not logged in"
+/// answer. It is distinct from a plain Unknown, which means "could not read, will retry".
 /// </summary>
 public sealed record QuotaView(
     WindowView Session,
     WindowView Weekly,
     Freshness Freshness,
     DateTimeOffset? LastChangedAt,
-    DateTimeOffset? LastPollAt,
+    DateTimeOffset? LastSuccessAt,
     TimeSpan PollInterval,
     string? Error,
     QuotaState IconSeverity,
-    DateTimeOffset? BlockedUntil)
+    DateTimeOffset? BlockedUntil,
+    bool NeedsLogin = false,
+    bool Loading = false)
 {
     public static QuotaView Initial { get; } = new(
         WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
         WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),
-        Freshness.Unknown, LastChangedAt: null, LastPollAt: null,
+        Freshness.Unknown, LastChangedAt: null, LastSuccessAt: null,
         PollInterval: TimeSpan.FromSeconds(30), Error: null,
         QuotaState.Measuring, BlockedUntil: null);
 }

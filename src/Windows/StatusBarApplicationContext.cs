@@ -3,6 +3,7 @@ using System.Globalization;
 using ClaudeStatusBar.Config;
 using ClaudeStatusBar.Data;
 using ClaudeStatusBar.Diagnostics;
+using ClaudeStatusBar.Flow;
 using ClaudeStatusBar.Icons;
 using ClaudeStatusBar.Model;
 using ClaudeStatusBar.Ui;
@@ -44,9 +45,16 @@ namespace ClaudeStatusBar;
 /// stop any other), and reconciles ONE TrayIconHandle per account the display plan
 /// (Model/AccountDisplayPlan.cs) says should have an icon: one per enabled account in perAccount
 /// mode (capped at MaxIcons), or the single closest-to-blocked account in binding mode. The panel
-/// always shows one account at a time (_explicitPanelAccountIndex, or the display-mode default
+/// always shows one account at a time (_explicitPanelSlot -- a slot id, never a list position -- or the display-mode default
 /// when unset) plus, when more than one account is configured, a compact "other accounts" list
 /// any row of which switches the panel to that account.
+///
+/// Account set (docs/multi-account.md "Account set"): the list is rebuilt, not patched, on every add /
+/// remove / re-login (RebuildAccountSetAsync): every runtime is stopped gracefully, the config is
+/// reconciled against the login slots, and a new set is built and started. Everything that must
+/// survive a rebuild (panel focus, the right-clicked icon, the NeedsLogin toast state) is remembered
+/// by slot id. Logins are only ever created, replaced and removed here (the login flow, "Lägg till
+/// konto…", "Konton" in the tray menu) -- always into a NEW slot folder this app owns.
 ///
 /// Shutdown (Codex review High #5, Medium #8, Low #17): every exit route
 /// (ExitApp from the tray menu, Application.Run returning, Program's finally)
@@ -75,7 +83,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// tooltip-only note the account THIS ONE duplicates gets appended to its icon tooltip
     /// (never its panel header label -- see RenderAccounts' icon-update loop).
     /// </summary>
-    readonly record struct DisplayAccount(string? Label, QuotaView View, bool IsDuplicate = false, OtherAccountRow? DuplicateRow = null, string? DuplicateSuffix = null);
+    readonly record struct DisplayAccount(string Slot, string? Label, QuotaView View, bool IsDuplicate = false, OtherAccountRow? DuplicateRow = null, string? DuplicateSuffix = null, string? Title = null, string? Subtitle = null);
 
     /// <summary>One step of the --demo / --capture-states cycle: either a legacy single-account state (Accounts.Count == 1, Label null) or a MultiAccountDemoSource frame.</summary>
     readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex);
@@ -84,23 +92,37 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     readonly PanelForm _panel;
     readonly System.Windows.Forms.Timer _evalTimer;
     readonly System.Windows.Forms.Timer? _demoTimer;
+    readonly System.Windows.Forms.Timer _loadingTimer; // drives the loading icon's frames; runs only while some account is loading
     readonly SynchronizationContext _uiContext;
     readonly List<AccountRuntime> _accounts = new();
-    readonly Dictionary<int, TrayIconHandle> _iconsByIndex = new();
+    readonly Dictionary<string, TrayIconHandle> _iconsBySlot = new();
     readonly ContextMenuStrip _trayMenu;
     readonly ToolStripMenuItem _toggleModeItem;
+    readonly ToolStripMenuItem _showPanelItem;
+    readonly ToolStripMenuItem _statisticsItem;
+    readonly ToolStripMenuItem _addAccountItem;
+    readonly ToolStripMenuItem _accountsItem;
+    readonly SlotStore _slots = SlotStore.Default;
+    readonly ClaudeAuthCli _auth;
+    readonly CancellationTokenSource _shutdownCts = new();
     StatisticsForm? _statisticsForm;
+    TrayIconHandle? _emptyIcon; // the one grey "log in" icon of the zero-accounts state
+    EventWaitHandle? _exitEvent;
+    RegisteredWaitHandle? _exitWait;
 
-    AccountsConfig _accountsConfig = AccountsConfig.Default();
+    AccountsConfig _accountsConfig = AccountsConfig.Empty();
     AccountDisplayMode _displayMode = AccountDisplayMode.PerAccount;
     int _maxIcons = 3;
-    int? _explicitPanelAccountIndex;
-    int? _lastRightClickedAccountIndex;
-    int? _shownAccountIndex; // whichever index RenderAccounts last showed the panel for -- see OnRefreshRequested
+    string? _explicitPanelSlot;
+    string? _lastRightClickedSlot;
+    string? _shownSlot; // whichever slot RenderAccounts last showed the panel for -- see OnRefreshRequested
+    IReadOnlyList<string?> _renderedSlots = Array.Empty<string?>(); // slot per row of the last render, so a row click maps to the account it was drawn for
+    AccountFlowController? _flows; // null in demo mode (no accounts to change)
 
     IReadOnlyList<DemoFrame> _demoFrames = Array.Empty<DemoFrame>();
     int _demoIndex;
     bool _shuttingDown;
+    bool _capturing; // --capture-states drives its own render loop: the loading timer must not repaint over it
 
     public StatusBarApplicationContext(bool demoMode = false, bool showPanelOnStartup = false)
     {
@@ -108,14 +130,22 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
         _uiContext = SynchronizationContext.Current!;
 
-        (_trayMenu, _toggleModeItem) = BuildTrayMenu();
+        _auth = new ClaudeAuthCli(_slots);
+        (_trayMenu, _toggleModeItem, _showPanelItem, _statisticsItem, _addAccountItem, _accountsItem) = BuildTrayMenu();
         _panel = new PanelForm();
-        _panel.OtherAccountClicked += FocusAccount;
+        _panel.OtherAccountClicked += FocusRenderedRow;
         _panel.RefreshRequested += OnRefreshRequested;
+        _panel.ReloginRequested += () => { if (_shownSlot is { } slot) StartLoginFlow(slot); };
         _panel.AdviceClicked += () => OpenStatisticsWindow();
 
         _evalTimer = new System.Windows.Forms.Timer { Interval = (int)EvalTickInterval.TotalMilliseconds };
         _evalTimer.Tick += (_, _) => SafeTick();
+
+        // docs/multi-account.md "Loading": ~8 frames a second, and only while an account is loading
+        // (UpdateLoadingTimer starts and stops it). Each tick is the ordinary tick, which re-renders
+        // an icon only when its params -- the frame number included -- changed.
+        _loadingTimer = new System.Windows.Forms.Timer { Interval = LoadingFrames.FrameIntervalMs };
+        _loadingTimer.Tick += (_, _) => SafeTick();
 
         if (_demoMode)
         {
@@ -127,23 +157,16 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         }
         else
         {
-            _accountsConfig = AccountsConfig.LoadOrCreateDefault();
+            _accountsConfig = AccountFlowController.LoadAndReconcile(_slots);
+            _flows = new AccountFlowController(_accountsConfig, _slots, new RuntimeHost(this), _auth, new FlowUi(this), SaveAccountsConfig, _shutdownCts.Token);
             _displayMode = _accountsConfig.DisplayMode;
             _maxIcons = Math.Max(1, _accountsConfig.MaxIcons);
             UpdateToggleModeItemText();
 
             RunStatisticsBackfillOnceInBackground();
+            ListenForExitSignal();
 
-            int index = 0;
-            foreach (AccountEntry entry in _accountsConfig.Accounts)
-            {
-                if (entry.Enabled)
-                {
-                    string slot = index == 0 ? "default" : index.ToString(CultureInfo.InvariantCulture);
-                    _accounts.Add(new AccountRuntime(slot, entry, index, _uiContext));
-                }
-                index++;
-            }
+            BuildAccountSet();
 
             // Every account is driven independently from here on (docs/multi-account.md): one
             // account's channel failing to launch, being logged out, or its config directory
@@ -151,7 +174,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             foreach (AccountRuntime account in _accounts) account.Start();
 
             // AccountRuntime's constructor already reads Identity synchronously, so two accounts
-            // configured to the same already-logged-in identity are detectable before the first
+            // that resolve to the same already-logged-in identity are detectable before the first
             // eval tick -- run the duplicate pass once here too, or the very first render would
             // briefly show two identical icons before Tick() caught up a second later.
             RefreshDuplicates();
@@ -207,9 +230,222 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         });
     }
 
+    // ---- account set (docs/multi-account.md "Account set") ----
+    //
+    // What changes WHICH accounts exist -- add, re-login, remove, discard, rebuild, and the NeedsLogin
+    // toast -- lives in Flow/AccountFlowController, which is tested without any window. This class
+    // supplies its seams: RuntimeHost (the live runtimes), FlowUi (dialogs, toasts, what is remembered
+    // by slot id) and the config save.
+
+    /// <summary>
+    /// The named event scripts\install.ps1 signals to ask a running app to exit through its normal
+    /// graceful shutdown (children stopped cleanly) instead of being killed. Auto-reset, so a
+    /// signal sent while no app is waiting cannot make the NEXT instance exit the moment it starts.
+    /// </summary>
+    public const string ExitEventName = @"Local\ClaudeStatusBar-Exit";
+
+    void ListenForExitSignal()
+    {
+        try
+        {
+            _exitEvent = new EventWaitHandle(initialState: false, EventResetMode.AutoReset, ExitEventName);
+            _exitWait = ThreadPool.RegisterWaitForSingleObject(_exitEvent, (_, timedOut) =>
+            {
+                if (timedOut) return;
+                _uiContext.Post(_ => { if (!_shuttingDown) ExitApp(); }, null);
+            }, null, Timeout.Infinite, executeOnlyOnce: true);
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"exit signal unavailable (install.ps1 falls back to killing the app): {ex.Message}");
+        }
+    }
+
+    /// <summary>Saves accounts.json; throws on failure (the flows decide what a failed save means). Demo mode never touches the user's real file.</summary>
+    void SaveAccountsConfig(AccountsConfig config)
+    {
+        if (_demoMode) return;
+        AccountsConfig.Save(config);
+    }
+
+    /// <summary>One AccountRuntime per enabled entry, in config order. A slot the path guard refuses is skipped with a warning, never started.</summary>
+    void BuildAccountSet()
+    {
+        _accounts.Clear();
+        int index = 0;
+        foreach (AccountEntry entry in _accountsConfig.Accounts)
+        {
+            if (entry.Enabled && entry.Slot is { } slot)
+            {
+                try { _accounts.Add(new AccountRuntime(slot, entry, index, _uiContext, slots: _slots)); }
+                catch (Exception ex) { SafeLog.Warn($"slot {slot} not started: {ex.Message}"); }
+            }
+            index++;
+        }
+    }
+
+    /// <summary>Starts a login flow (reloginSlot null = add). Menu, icon and panel entry point; no-op in demo mode.</summary>
+    void StartLoginFlow(string? reloginSlot)
+    {
+        if (_flows is { } flows) _ = flows.RunLoginFlowAsync(reloginSlot);
+    }
+
+    void StartRemove(string slot)
+    {
+        if (_flows is { } flows) _ = flows.RemoveAsync(slot);
+    }
+
+    /// <summary>The live runtimes as the flow controller sees them.</summary>
+    sealed class RuntimeHost : IRuntimeHost
+    {
+        readonly StatusBarApplicationContext _owner;
+        readonly Dictionary<string, AccountRuntime> _stopped = new(StringComparer.Ordinal); // taken out by StopAsync, kept for KillAsync
+
+        public RuntimeHost(StatusBarApplicationContext owner) => _owner = owner;
+
+        public IReadOnlyList<RunningAccount> Running =>
+            _owner._accounts
+                .Select(a => new RunningAccount(a.Slot, a.Label, a.Identity, a.SubscriptionType, a.NeedsLogin, a.LastView.LastSuccessAt is not null))
+                .ToList();
+
+        public async Task<bool> StopAsync(IReadOnlyCollection<string> slots)
+        {
+            List<AccountRuntime> runtimes = _owner._accounts.Where(a => slots.Contains(a.Slot)).ToList();
+            foreach (AccountRuntime runtime in runtimes)
+            {
+                _owner._accounts.Remove(runtime); // out of the live list at once: no tick renders a half-stopped account
+                _stopped[runtime.Slot] = runtime;
+            }
+            return await StopAccountsAsync(runtimes, ShutdownDeadline);
+        }
+
+        public Task KillAsync(IReadOnlyCollection<string> slots) => Task.Run(() =>
+        {
+            foreach (string slot in slots)
+            {
+                if (!_stopped.Remove(slot, out AccountRuntime? runtime)) continue;
+                int killed = runtime.KillChildren();
+                SafeLog.Warn($"slot {slot}: {killed} child process(es) killed after the stop timed out");
+            }
+        });
+
+        public void StartAll(AccountsConfig config)
+        {
+            _stopped.Clear();
+            foreach (TrayIconHandle handle in _owner._iconsBySlot.Values)
+            {
+                try { handle.Dispose(); } catch (Exception ex) { SafeLog.Warn($"TrayIconHandle.Dispose during rebuild threw: {ex.Message}"); }
+            }
+            _owner._iconsBySlot.Clear();
+            try { _owner._statisticsForm?.Dispose(); } catch { /* best effort */ }
+            _owner._statisticsForm = null;
+
+            _owner.BuildAccountSet();
+            foreach (AccountRuntime account in _owner._accounts) account.Start();
+            _owner.RefreshDuplicates();
+            _owner.RenderAccounts(_owner.BuildLiveDisplayAccounts(), _owner._displayMode, _owner._maxIcons);
+        }
+    }
+
+    /// <summary>
+    /// Stops the given runtimes in parallel (each gracefully), bounded by `deadline`; one hanging stop
+    /// never holds up the others. False when the deadline passed first -- the caller must then kill
+    /// what is left (AccountRuntime.KillChildren) before relying on the children being gone.
+    /// </summary>
+    static async Task<bool> StopAccountsAsync(IReadOnlyCollection<AccountRuntime> accounts, TimeSpan deadline)
+    {
+        if (accounts.Count == 0) return true;
+        Task all = Task.WhenAll(accounts.Select(async account =>
+        {
+            try { await account.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { SafeLog.Warn($"stopping an account threw: {ex.Message}"); }
+        }));
+        Task winner = await Task.WhenAny(all, Task.Delay(deadline)).ConfigureAwait(false);
+        return winner == all;
+    }
+
+    /// <summary>Dialogs, toasts, and whatever the UI remembers by slot id.</summary>
+    sealed class FlowUi : IFlowUi
+    {
+        readonly StatusBarApplicationContext _owner;
+
+        public FlowUi(StatusBarApplicationContext owner) => _owner = owner;
+
+        public bool Confirm(string title, string body) =>
+            ShowDialog(body, title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+
+        public void Inform(string text, bool warning) =>
+            ShowDialog(text, LoginText.WindowCaption, MessageBoxButtons.OK, warning ? MessageBoxIcon.Warning : MessageBoxIcon.Information, MessageBoxDefaultButton.Button1);
+
+        public void Toast(string text) => _owner.ShowToast(text);
+
+        public void LabelsChanged() => _owner.Tick(); // labels are re-derived from the entries every tick; nothing is rebuilt
+
+        /// <summary>A small topmost dialog: hint, text box prefilled with the current name, OK / Avbryt.</summary>
+        public string? PromptName(string title, string hint, string current, int maxLength)
+        {
+            using var form = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterScreen,
+                TopMost = true,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ClientSize = new Size(360, 124),
+            };
+            var hintLabel = new Label { Text = hint, Location = new Point(12, 12), Size = new Size(336, 34) };
+            var box = new TextBox { Text = current, MaxLength = maxLength, Location = new Point(12, 50), Width = 336 };
+            var ok = new Button { Text = LoginText.RenameOk, DialogResult = DialogResult.OK, Location = new Point(192, 88), Size = new Size(75, 26) };
+            var cancel = new Button { Text = LoginText.RenameCancel, DialogResult = DialogResult.Cancel, Location = new Point(273, 88), Size = new Size(75, 26) };
+            form.Controls.AddRange(new Control[] { hintLabel, box, ok, cancel });
+            form.AcceptButton = ok;
+            form.CancelButton = cancel;
+            form.Shown += (_, _) => { form.Activate(); SetForegroundWindow(form.Handle); box.Focus(); box.SelectAll(); };
+            return form.ShowDialog() == DialogResult.OK ? box.Text : null;
+        }
+
+        public void SlotReplaced(string oldSlot, string newSlot)
+        {
+            if (_owner._explicitPanelSlot == oldSlot) _owner._explicitPanelSlot = newSlot;
+            if (_owner._lastRightClickedSlot == oldSlot) _owner._lastRightClickedSlot = newSlot;
+        }
+
+        public void SlotRemoved(string slot)
+        {
+            if (_owner._explicitPanelSlot == slot) _owner._explicitPanelSlot = null;
+            if (_owner._lastRightClickedSlot == slot) _owner._lastRightClickedSlot = null;
+        }
+
+        /// <summary>
+        /// A MessageBox needs an owner that is topmost and activated, or it can open behind the browser
+        /// the user has just been in -- a tray app has no window of its own to own it. The owner is a
+        /// 1x1 off-screen topmost form shown (and brought to the foreground) just for the dialog.
+        /// </summary>
+        static DialogResult ShowDialog(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, MessageBoxDefaultButton defaultButton)
+        {
+            using var owner = new Form
+            {
+                TopMost = true,
+                ShowInTaskbar = false,
+                FormBorderStyle = FormBorderStyle.None,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-32000, -32000),
+                Size = new Size(1, 1),
+            };
+            owner.Show();
+            owner.Activate();
+            SetForegroundWindow(owner.Handle);
+            return MessageBox.Show(owner, text, caption, buttons, icon, defaultButton);
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool SetForegroundWindow(IntPtr hWnd);
+    }
+
     // ---- tray menu (docs/multi-account.md, the task's "Tray context menu" item) ----
 
-    (ContextMenuStrip Menu, ToolStripMenuItem ToggleItem) BuildTrayMenu()
+    (ContextMenuStrip Menu, ToolStripMenuItem ToggleItem, ToolStripMenuItem ShowPanelItem, ToolStripMenuItem StatisticsItem, ToolStripMenuItem AddAccountItem, ToolStripMenuItem AccountsItem) BuildTrayMenu()
     {
         var menu = new ContextMenuStrip
         {
@@ -219,7 +455,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         };
 
         var showPanelItem = new ToolStripMenuItem("Visa panel") { ForeColor = DarkMenuColors.Foreground };
-        showPanelItem.Click += (_, _) => FocusAccount(DefaultFocusAccountIndex());
+        showPanelItem.Click += (_, _) => { if (DefaultFocusSlot() is { } slot) FocusSlot(slot); };
 
         var toggleItem = new ToolStripMenuItem { ForeColor = DarkMenuColors.Foreground };
         toggleItem.Click += (_, _) => ToggleDisplayMode();
@@ -227,14 +463,72 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         var statisticsItem = new ToolStripMenuItem("Statistik…") { ForeColor = DarkMenuColors.Foreground };
         statisticsItem.Click += (_, _) => OpenStatisticsWindow();
 
+        // docs/multi-account.md "Login flow": adding an account is a top-level entry on every icon
+        // (the zero-accounts icon included); managing an existing one is under "Konton".
+        var addAccountItem = new ToolStripMenuItem(LoginText.AddAccountMenu) { ForeColor = DarkMenuColors.Foreground };
+        addAccountItem.Click += (_, _) => StartLoginFlow(reloginSlot: null);
+
+        var accountsItem = new ToolStripMenuItem(LoginText.AccountsMenu) { ForeColor = DarkMenuColors.Foreground };
+
         var exitItem = new ToolStripMenuItem("Exit") { ForeColor = DarkMenuColors.Foreground };
         exitItem.Click += (_, _) => ExitApp();
 
         menu.Items.Add(showPanelItem);
         menu.Items.Add(toggleItem);
         menu.Items.Add(statisticsItem);
+        menu.Items.Add(addAccountItem);
+        menu.Items.Add(accountsItem);
         menu.Items.Add(exitItem);
-        return (menu, toggleItem);
+        menu.Opening += (_, _) => RefreshTrayMenu();
+        return (menu, toggleItem, showPanelItem, statisticsItem, addAccountItem, accountsItem);
+    }
+
+    /// <summary>
+    /// Brings the menu in line with the account set each time it opens: entries that need an
+    /// account are disabled without one (the zero-accounts state keeps "Lägg till konto…" and
+    /// Exit), the login entries are disabled while a login / remove / rebuild is running, and the
+    /// "Konton" submenu lists one entry per tracked account, each addressed by SLOT ID (the closures
+    /// below capture the slot, never a list position).
+    /// </summary>
+    void RefreshTrayMenu()
+    {
+        bool hasAccounts = _demoMode || _accounts.Count > 0;
+        bool busy = _flows is { IsBusy: true } or { IsMutating: true };
+
+        _showPanelItem.Enabled = hasAccounts;
+        _statisticsItem.Enabled = hasAccounts;
+        _addAccountItem.Visible = !_demoMode;
+        _addAccountItem.Enabled = !busy;
+
+        foreach (ToolStripItem old in _accountsItem.DropDownItems.Cast<ToolStripItem>().ToList()) old.Dispose();
+        _accountsItem.DropDownItems.Clear();
+
+        var entries = _demoMode ? new List<AccountEntry>() : _accountsConfig.Accounts.Where(a => a.Slot is not null).ToList();
+        _accountsItem.Visible = entries.Count > 0;
+        _accountsItem.Enabled = !busy;
+        if (entries.Count == 0) return;
+
+        _accountsItem.DropDown.Renderer = _trayMenu.Renderer;
+        _accountsItem.DropDown.BackColor = DarkMenuColors.Background;
+        foreach (AccountEntry entry in entries)
+        {
+            string slot = entry.Slot!;
+            var accountItem = new ToolStripMenuItem((_flows?.LabelForMenu(slot) ?? slot).Replace("&", "&&")) { ForeColor = DarkMenuColors.Foreground };
+            accountItem.DropDown.Renderer = _trayMenu.Renderer;
+            accountItem.DropDown.BackColor = DarkMenuColors.Background;
+
+            var relogin = new ToolStripMenuItem(LoginText.ReloginMenu) { ForeColor = DarkMenuColors.Foreground, Enabled = !busy };
+            relogin.Click += (_, _) => StartLoginFlow(slot);
+            var rename = new ToolStripMenuItem(LoginText.RenameMenu) { ForeColor = DarkMenuColors.Foreground, Enabled = !busy };
+            rename.Click += (_, _) => _flows?.Rename(slot);
+            var remove = new ToolStripMenuItem(LoginText.RemoveMenu) { ForeColor = DarkMenuColors.Foreground, Enabled = !busy };
+            remove.Click += (_, _) => StartRemove(slot);
+
+            accountItem.DropDownItems.Add(relogin);
+            accountItem.DropDownItems.Add(rename);
+            accountItem.DropDownItems.Add(remove);
+            _accountsItem.DropDownItems.Add(accountItem);
+        }
     }
 
     /// <summary>
@@ -317,11 +611,12 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     }
 
     /// <summary>Which account "Visa panel" opens on when it wasn't reached through a specific icon's own right-click: whichever icon was last right-clicked, else the current display-mode default.</summary>
-    int DefaultFocusAccountIndex()
+    string? DefaultFocusSlot()
     {
-        if (_lastRightClickedAccountIndex is { } idx) return idx;
         IReadOnlyList<DisplayAccount> current = CurrentDisplayAccounts();
-        return EffectiveDefaultPanelAccountIndex(current, _displayMode, DateTimeOffset.UtcNow) ?? 0;
+        if (current.Count == 0) return null;
+        if (_lastRightClickedSlot is { } slot && current.Any(a => a.Slot == slot)) return slot;
+        return current[EffectiveDefaultPanelAccountIndex(current, _displayMode, DateTimeOffset.UtcNow) ?? 0].Slot;
     }
 
     IReadOnlyList<DisplayAccount> CurrentDisplayAccounts() =>
@@ -386,13 +681,30 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             return;
         }
 
+        if (_flows is { IsMutating: true }) return; // the set is being changed (the flow renders once it is done): no focus is resolved against a half-changed list, no zero-accounts flash
+
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         long monoMs = Environment.TickCount64;
         foreach (AccountRuntime account in _accounts) account.Evaluate(utcNow, monoMs);
         RefreshDuplicates();
         RefreshDisambiguatedLabels();
+        _flows?.NotifyNeedsLoginTransitions();
 
         RenderAccounts(BuildLiveDisplayAccounts(), _displayMode, _maxIcons);
+    }
+
+    /// <summary>A tray balloon from whichever icon exists (the zero-accounts icon included).</summary>
+    void ShowToast(string text)
+    {
+        try
+        {
+            NotifyIcon? icon = _iconsBySlot.Values.Select(h => h.NotifyIcon).FirstOrDefault() ?? _emptyIcon?.NotifyIcon;
+            icon?.ShowBalloonTip(6000, LoginText.WindowCaption, text, ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"toast failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -432,10 +744,12 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         {
             AccountRuntime a = _accounts[i];
             OtherAccountRow? dupRow = a.IsDuplicate
-                ? PanelText.ComposeDuplicateAccountRow(i, a.DuplicateOfIndex ?? 0, KeptAccountLabel(a.DuplicateOfIndex), a.ConfigDir)
+                ? PanelText.ComposeDuplicateAccountRow(i, a.DuplicateOfIndex ?? 0, KeptAccountLabel(a.DuplicateOfIndex))
                 : null;
             string? suffix = a.IsDuplicate ? null : BuildDuplicateSuffix(i);
-            result.Add(new DisplayAccount(multi ? a.Label : null, a.LastView, a.IsDuplicate, dupRow, suffix));
+            result.Add(new DisplayAccount(a.Slot, multi ? a.Label : null, a.LastView, a.IsDuplicate, dupRow, suffix,
+                Title: a.Label,
+                Subtitle: PanelText.ComposeAccountSubtitle(a.Label, a.SubscriptionType, a.Identity?.OrganizationName)));
         }
         return result;
     }
@@ -476,46 +790,66 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// The shared rendering path for both live and demo accounts (docs/multi-account.md
     /// "Display"): decides which accounts get a tray icon (Model/AccountDisplayPlan.cs),
     /// creates/destroys TrayIconHandles to match, renders every live icon, and updates the panel
-    /// with whichever account is currently focused plus the "other accounts" rows.
+    /// with whichever account is currently focused plus the "other accounts" rows. Icons and panel
+    /// focus are keyed by SLOT ID, so they survive the account list being rebuilt. With no enabled
+    /// account at all (live mode only) it shows the single grey "log in" icon instead.
     /// </summary>
     void RenderAccounts(IReadOnlyList<DisplayAccount> current, AccountDisplayMode mode, int maxIcons)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
+        List<string?> slots = current.Select(a => (string?)a.Slot).ToList();
+        _renderedSlots = slots;
 
         // A duplicate (docs/multi-account.md "Duplicate accounts") is never a valid explicit
         // panel target -- it has no separate icon to have been reached through, and nothing of
-        // its own worth pinning the panel to; fall back to the display mode's own default,
-        // exactly like an out-of-range index already does.
-        if (_explicitPanelAccountIndex is { } exp && (exp >= current.Count || current[exp].IsDuplicate))
-            _explicitPanelAccountIndex = null;
+        // its own worth pinning the panel to; AccountFocus falls back to the display mode's own
+        // default, exactly like a slot that no longer exists.
+        int panelIndex = 0;
+        if (current.Count > 0)
+        {
+            (panelIndex, _explicitPanelSlot) = AccountFocus.Resolve(
+                slots, current.Select(a => a.IsDuplicate).ToList(), _explicitPanelSlot,
+                EffectiveDefaultPanelAccountIndex(current, mode, now) ?? 0);
+        }
 
         // Candidate.Enabled doubles as "eligible for a tray icon" here: a confirmed duplicate is
         // never one, in EITHER display mode (it can never win binding selection either).
         var candidates = current.Select(a => new AccountDisplayPlan.Candidate(!a.IsDuplicate, a.View)).ToList();
-        IReadOnlyList<int> desired = current.Count == 0
-            ? Array.Empty<int>()
-            : AccountDisplayPlan.SelectIconAccounts(candidates, mode, Math.Max(1, maxIcons), now);
-        var desiredSet = new HashSet<int>(desired);
+        AccountDisplayPlan.TrayPlan plan = AccountDisplayPlan.PlanTray(candidates, mode, Math.Max(1, maxIcons), now);
+        var desiredSlots = new HashSet<string>(plan.AccountIcons.Select(i => current[i].Slot), StringComparer.Ordinal);
 
-        foreach (int key in _iconsByIndex.Keys.Where(k => !desiredSet.Contains(k)).ToList())
+        foreach (string key in _iconsBySlot.Keys.Where(k => !desiredSlots.Contains(k)).ToList())
         {
-            _iconsByIndex[key].Dispose();
-            _iconsByIndex.Remove(key);
+            _iconsBySlot[key].Dispose();
+            _iconsBySlot.Remove(key);
         }
 
-        foreach (int idx in desired.OrderBy(i => i))
+        if (plan.ZeroAccountsIcon && !_demoMode)
         {
-            if (_iconsByIndex.ContainsKey(idx)) continue;
+            RenderZeroAccounts();
+            return;
+        }
+        if (_emptyIcon is not null)
+        {
+            _emptyIcon.Dispose();
+            _emptyIcon = null;
+        }
+        if (current.Count == 0) return; // demo frames always carry at least one account; nothing to draw otherwise
+
+        foreach (int idx in plan.AccountIcons.OrderBy(i => i))
+        {
+            string slot = current[idx].Slot;
+            if (_iconsBySlot.ContainsKey(slot)) continue;
             var handle = new TrayIconHandle { NotifyIcon = { ContextMenuStrip = _trayMenu } };
-            int captured = idx;
-            handle.NotifyIcon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) FocusAccount(captured); };
-            handle.NotifyIcon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Right) _lastRightClickedAccountIndex = captured; };
-            _iconsByIndex[idx] = handle;
+            handle.NotifyIcon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) FocusSlot(slot); };
+            handle.NotifyIcon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Right) _lastRightClickedSlot = slot; };
+            _iconsBySlot[slot] = handle;
         }
 
         bool multi = current.Count > 1;
-        foreach ((int idx, TrayIconHandle handle) in _iconsByIndex)
+        foreach ((string slot, TrayIconHandle handle) in _iconsBySlot)
         {
+            if (AccountFocus.IndexOfSlot(slots, slot) is not { } idx) continue;
             // The kept account of a duplicate group gets a short tooltip-only suffix (docs/
             // multi-account.md "Duplicate accounts") -- appended here, never to current[idx].Label
             // itself, so the panel header (which reuses that same Label) stays unaffected.
@@ -525,16 +859,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             handle.Slot.Update(current[idx].View, tooltipLabel);
         }
 
-        if (current.Count == 0)
-        {
-            _shownAccountIndex = null;
-            _panel.UpdateView(QuotaView.Initial, _demoMode, null, Array.Empty<OtherAccountRow>());
-            _panel.SetAnchorIcon(null);
-            return;
-        }
-
-        int panelIndex = _explicitPanelAccountIndex ?? EffectiveDefaultPanelAccountIndex(current, mode, now) ?? 0;
-        _shownAccountIndex = panelIndex;
+        _shownSlot = current[panelIndex].Slot;
         DisplayAccount shown = current[panelIndex];
 
         IReadOnlyList<OtherAccountRow> otherRows = multi
@@ -553,16 +878,48 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         // poll there). Reads AccountRuntime.IsPolling, the very same flag PollAsync's own
         // concurrency guard is keyed on, so the button can never show "idle" while a poll it
         // just started is actually still running.
-        bool refreshInFlight = !_demoMode && panelIndex < _accounts.Count && _accounts[panelIndex].IsPolling;
+        AccountRuntime? shownRuntime = _demoMode ? null : _accounts.FirstOrDefault(a => a.Slot == shown.Slot);
+        bool refreshInFlight = shownRuntime?.IsPolling ?? false;
 
         // docs/statistics.md decision 4 "Proactive advice": never in demo mode (there is no
         // AccountRuntime driving it there) or with no account shown.
-        string? adviceLine = !_demoMode && panelIndex < _accounts.Count ? _accounts[panelIndex].AdviceLine : null;
+        string? adviceLine = shownRuntime?.AdviceLine;
 
-        _panel.UpdateView(shown.View, _demoMode, multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null, otherRows, refreshInFlight, adviceLine);
-        _panel.SetAnchorIcon(_iconsByIndex.TryGetValue(panelIndex, out TrayIconHandle? anchorHandle)
+        // The panel title is the account's label (or, in the legacy single-account demo frames, none);
+        // the line under it is the plan and organisation.
+        _panel.UpdateView(shown.View, _demoMode, shown.Title ?? (multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null), otherRows, refreshInFlight, adviceLine, shown.Subtitle);
+        UpdateLoadingTimer(current);
+        _panel.SetAnchorIcon(_iconsBySlot.TryGetValue(shown.Slot, out TrayIconHandle? anchorHandle)
             ? anchorHandle.NotifyIcon
-            : _iconsByIndex.Values.Select(h => h.NotifyIcon).FirstOrDefault());
+            : _iconsBySlot.Values.Select(h => h.NotifyIcon).FirstOrDefault());
+    }
+
+    /// <summary>Runs the loading-frame timer exactly while some shown account is loading.</summary>
+    void UpdateLoadingTimer(IReadOnlyList<DisplayAccount> current)
+    {
+        bool anyLoading = !_capturing && current.Any(a => a.View.Loading);
+        if (_loadingTimer.Enabled != anyLoading) _loadingTimer.Enabled = anyLoading;
+    }
+
+    /// <summary>
+    /// docs/multi-account.md "Zero accounts": exactly one grey icon, tooltip "Logga in för att visa
+    /// kvoten", the full menu (so "Lägg till konto…" and Exit are reachable), and a left click that
+    /// starts the add flow. No panel: there is nothing to show in it.
+    /// </summary>
+    void RenderZeroAccounts()
+    {
+        if (_emptyIcon is null)
+        {
+            _emptyIcon = new TrayIconHandle { NotifyIcon = { ContextMenuStrip = _trayMenu } };
+            _emptyIcon.NotifyIcon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) StartLoginFlow(reloginSlot: null); };
+        }
+        _emptyIcon.Slot.Update(QuotaView.Initial, tooltipOverride: LoginText.ZeroAccountsTooltip);
+        _loadingTimer.Enabled = false; // nothing loads with no account
+
+        _shownSlot = null;
+        _explicitPanelSlot = null;
+        _panel.HidePanel();
+        _panel.SetAnchorIcon(_emptyIcon.NotifyIcon);
     }
 
     /// <summary>
@@ -572,16 +929,15 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// AccountRuntime.RequestImmediateRefresh/PollAsync's own _polling guard makes the last case
     /// safe on its own, but checking IsPolling here too avoids even scheduling the redundant
     /// call. Re-ticks immediately afterward so the button's busy state shows up without waiting
-    /// up to 1s for the next regular eval tick (the same pattern FocusAccount already uses).
+    /// up to 1s for the next regular eval tick (the same pattern FocusSlot already uses).
     /// </summary>
     void OnRefreshRequested()
     {
-        if (_demoMode) return;
-        if (_shownAccountIndex is not { } idx || idx < 0 || idx >= _accounts.Count) return;
+        if (_demoMode || _flows is { IsMutating: true }) return;
+        if (_shownSlot is not { } slot || _accounts.FirstOrDefault(a => a.Slot == slot) is not { } account) return;
 
-        AccountRuntime account = _accounts[idx];
-        // Defensive (docs/multi-account.md "Duplicate accounts"): _shownAccountIndex should never
-        // point at a duplicate -- RenderAccounts resets _explicitPanelAccountIndex away from one
+        // Defensive (docs/multi-account.md "Duplicate accounts"): _shownSlot should never
+        // point at a duplicate -- RenderAccounts resets _explicitPanelSlot away from one
         // -- but a duplicate account can never be usefully refreshed (AccountRuntime.PollAsync's
         // own IsDuplicate guard would just no-op it anyway), so skip even scheduling the call.
         if (account.IsDuplicate) return;
@@ -603,25 +959,33 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// docs/multi-account.md "Panel": clicking a tray icon opens the panel on that icon's
     /// account; clicking an "other accounts" row switches to that account. If the panel is
     /// already open on this exact account, this click closes it instead (the existing
-    /// single-icon toggle behaviour), so a click doesn't reopen what it just closed.
+    /// single-icon toggle behaviour), so a click doesn't reopen what it just closed. The account
+    /// is addressed by slot id, so a click can never land on a different account after the set
+    /// has been rebuilt.
     ///
     /// docs/multi-account.md "Duplicate accounts": a duplicate's own "other accounts" row is the
     /// explanatory message, not a normal navigation target -- clicking it redirects to the
     /// account it duplicates instead of focusing a stopped, unpolled account that has nothing to
     /// show.
     /// </summary>
-    void FocusAccount(int accountIndex)
+    void FocusSlot(string slot)
     {
-        if (accountIndex >= 0 && accountIndex < _accounts.Count
-            && _accounts[accountIndex] is { IsDuplicate: true, DuplicateOfIndex: { } keptIndex })
+        if (_accounts.FirstOrDefault(a => a.Slot == slot) is { IsDuplicate: true, DuplicateOfIndex: { } keptIndex }
+            && keptIndex >= 0 && keptIndex < _accounts.Count)
         {
-            accountIndex = keptIndex;
+            slot = _accounts[keptIndex].Slot;
         }
 
-        if (_panel.Visible && _explicitPanelAccountIndex == accountIndex) { _panel.Toggle(); return; }
-        _explicitPanelAccountIndex = accountIndex;
+        if (_panel.Visible && _explicitPanelSlot == slot) { _panel.Toggle(); return; }
+        _explicitPanelSlot = slot;
         if (!_panel.Visible) _panel.ShowPanel();
         Tick();
+    }
+
+    /// <summary>The panel reports a click on row `rowIndex` of the list it was last given; the slot recorded at that render says which account that row is.</summary>
+    void FocusRenderedRow(int rowIndex)
+    {
+        if (rowIndex >= 0 && rowIndex < _renderedSlots.Count && _renderedSlots[rowIndex] is { } slot) FocusSlot(slot);
     }
 
     /// <summary>
@@ -650,11 +1014,11 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     {
         var frames = new List<DemoFrame>();
         foreach (DemoQuotaSource.DemoState s in DemoQuotaSource.Build(utcNow))
-            frames.Add(new DemoFrame(s.Key, AccountDisplayMode.PerAccount, new[] { new DisplayAccount(null, s.View) }, FocusIndex: 0));
+            frames.Add(new DemoFrame(s.Key, AccountDisplayMode.PerAccount, new[] { new DisplayAccount("demo-0", null, s.View, Title: "Max", Subtitle: "personlig organisation") }, FocusIndex: 0));
 
         foreach (MultiAccountDemoSource.MultiState m in MultiAccountDemoSource.Build(utcNow))
         {
-            IReadOnlyList<DisplayAccount> accounts = m.Accounts.Select(a => new DisplayAccount(a.Label, a.View)).ToList();
+            IReadOnlyList<DisplayAccount> accounts = m.Accounts.Select((a, i) => new DisplayAccount($"demo-{i}", a.Label, a.View, Title: a.Label, Subtitle: a.Subtitle)).ToList();
             frames.Add(new DemoFrame(m.Key, m.Mode, accounts, m.FocusIndex));
         }
 
@@ -681,6 +1045,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         // fix). RunAutomatedCapture drives its own render (via RenderAccounts) + capture loop
         // below, so the regular eval timer has nothing left to do during this run.
         _evalTimer.Stop();
+        _capturing = true;
+        _loadingTimer.Stop();
         _demoTimer?.Stop();
         IReadOnlyList<DemoFrame> frames = BuildDemoFrames(DateTimeOffset.UtcNow);
         int i = 0;
@@ -708,7 +1074,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
                 return;
             }
 
-            _explicitPanelAccountIndex = frames[i].FocusIndex < frames[i].Accounts.Count ? frames[i].FocusIndex : 0;
+            _explicitPanelSlot = frames[i].Accounts[frames[i].FocusIndex < frames[i].Accounts.Count ? frames[i].FocusIndex : 0].Slot;
             RenderAccounts(frames[i].Accounts, frames[i].Mode, DemoMaxIcons);
             _panel.ShowPanel();
             waitingToCapture = true;
@@ -889,6 +1255,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     {
         if (_shuttingDown) return;
         _shuttingDown = true;
+        try { _shutdownCts.Cancel(); } catch { /* best effort */ } // stops waiting for a login console; the console itself is left running (it may own the user's browser)
+        try { _exitWait?.Unregister(null); _exitEvent?.Dispose(); } catch { /* best effort */ }
 
         // Panel hooks removed and the panel itself torn down FIRST (Codex review High #5):
         // HidePanel() stops the DismissWatcher's global hooks immediately, and Dispose()
@@ -898,25 +1266,27 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         try { _statisticsForm?.Dispose(); } catch (Exception ex) { SafeLog.Warn($"StatisticsForm.Dispose during shutdown threw: {ex.Message}"); }
 
         try { _evalTimer.Stop(); _evalTimer.Dispose(); } catch { /* best effort */ }
+        try { _loadingTimer.Stop(); _loadingTimer.Dispose(); } catch { /* best effort */ }
         try { _demoTimer?.Stop(); _demoTimer?.Dispose(); } catch { /* best effort */ }
 
-        foreach (TrayIconHandle handle in _iconsByIndex.Values)
+        foreach (TrayIconHandle handle in _iconsBySlot.Values.Concat(_emptyIcon is null ? Array.Empty<TrayIconHandle>() : new[] { _emptyIcon }))
         {
             try { handle.Dispose(); } catch (Exception ex) { SafeLog.Warn($"TrayIconHandle.Dispose during shutdown threw: {ex.Message}"); }
         }
-        _iconsByIndex.Clear();
+        _iconsBySlot.Clear();
+        _emptyIcon = null;
 
         // Terminate every account's child and flush its log writer off the UI thread, bounded
         // (Codex review High #5): closing a redirected pipe/flushing the CSV can block if the
         // child is not reading or the disk is slow, and that must never hang the thread this
-        // runs on across every exit route. One account's cleanup hanging must not stop another's.
+        // runs on across every exit route. One account's cleanup hanging must not stop another's:
+        // all accounts are stopped in PARALLEL (graceful: stdin closed, bounded wait for the child to
+        // exit, then a tree kill), so the whole shutdown costs one account's time, not the sum.
+        AccountRuntime[] toStop = _accounts.ToArray();
         RunBoundedOnBackgroundThread(async () =>
         {
-            foreach (AccountRuntime account in _accounts)
-            {
-                try { await account.DisposeAsync().ConfigureAwait(false); }
-                catch (Exception ex) { SafeLog.Warn($"account disposal during shutdown threw: {ex.Message}"); }
-            }
+            if (!await StopAccountsAsync(toStop, ShutdownDeadline - TimeSpan.FromSeconds(1)).ConfigureAwait(false))
+                foreach (AccountRuntime account in toStop) account.KillChildren(); // whatever did not stop in time
         }, ShutdownDeadline);
 
         try { _trayMenu.Dispose(); } catch { /* best effort */ }

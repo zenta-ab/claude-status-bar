@@ -26,10 +26,17 @@ public readonly record struct QuotaIconParams(
     int PieArgb,
     bool Stale,
     int Px,
-    bool TaskbarDark)
+    bool TaskbarDark,
+    bool Loading = false,
+    int LoadingFrame = 0)
 {
     public static QuotaIconParams Build(QuotaView view, int px, bool taskbarDark, DateTimeOffset utcNow)
     {
+        // Not answered yet: its own glyph (grey ring, no "!", a travelling arc). The frame is part of the
+        // params, so a new frame is a change and IconSlot re-renders -- from LoadingFrames' cache.
+        if (view.Loading)
+            return new QuotaIconParams(Outline: false, false, 0, 0, 0, 0, 0, 0, false, px, taskbarDark, Loading: true, LoadingFrame: LoadingFrames.FrameAt(utcNow));
+
         if (view.Freshness == Freshness.Unknown)
             return new QuotaIconParams(Outline: true, false, 0, 0, 0, 0, 0, 0, false, px, taskbarDark);
 

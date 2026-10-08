@@ -6,7 +6,7 @@ namespace ClaudeStatusBar.Data;
 
 /// <summary>
 /// Everything one account owns, end to end (docs/multi-account.md): its own claude.exe child
-/// (via ChildProcessSpec.ForAccount + ClaudeCliChannelSupervisor), its own identity-keyed state
+/// (via ChildProcessSpec.ForSlot + ClaudeCliChannelSupervisor), its own identity-keyed state
 /// (AccountKeyedState: QuotaModel + per-account DiskLogSink), its own poll timer, and its last
 /// evaluated QuotaView, identity and display label. StatusBarApplicationContext owns a list of
 /// these and drives each independently -- see that type's doc comment for the wiring rules
@@ -26,9 +26,15 @@ namespace ClaudeStatusBar.Data;
 /// logout) so a transient read race while the CLI is mid-write can never tear down a perfectly
 /// good in-memory model.
 ///
+/// NeedsLogin (docs/multi-account.md "NeedsLogin"): a child whose login has expired or is missing
+/// still answers get_usage, with the "not logged in" shape (UsageParser.Parse). The first such
+/// answer restarts the child once -- a stale process is the usual cause, a fresh one is the cheap
+/// test -- and only if the fresh child's first answer is the same shape does the account become
+/// NeedsLogin. Any successful reading clears it. `auth status` is never consulted for this.
+///
 /// Duplicate accounts (docs/multi-account.md "Duplicate accounts"): two configured accounts can
-/// resolve to the same StateKey -- most commonly the "whatever you're logged into" default entry
-/// converging onto an already-pinned account. StatusBarApplicationContext.RefreshDuplicates
+/// resolve to the same StateKey -- for example a slot recovered after accounts.json was lost whose
+/// login landed in an organisation another slot already tracks. StatusBarApplicationContext.RefreshDuplicates
 /// (Model/AccountDuplicates.cs) detects this every eval tick and calls SetDuplicate on whichever
 /// account is not first in config order: it stops that account's poll timer and child (never its
 /// on-disk state) so there is no redundant claude.exe and no duplicate tray icon, while
@@ -39,6 +45,9 @@ public sealed class AccountRuntime : IAsyncDisposable
 {
     static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long a restarted child gets to come up before the confirming poll is attempted anyway.</summary>
+    static readonly TimeSpan RestartChannelWait = TimeSpan.FromSeconds(3);
+
     readonly string _slot;
     readonly AccountEntry _config;
     readonly int _index;
@@ -47,23 +56,31 @@ public sealed class AccountRuntime : IAsyncDisposable
     readonly string _baseLogDir;
     readonly ChildProcessSpec _spec;
     readonly System.Windows.Forms.Timer _pollTimer;
+    readonly LoadingTracker _loading;
+    readonly object _swapLock = new(); // guards _channelSupervisor replacement against a concurrent stop
 
     AccountKeyedState _state;
     ClaudeCliChannelSupervisor _channelSupervisor;
     bool _polling;
-    bool _shuttingDown;
+    volatile bool _shuttingDown;
+    volatile bool _restarting;
+    bool _restartedForNotLoggedIn; // the one restart has been spent; the next not-logged-in answer is final
+
+    /// <summary>The slot id (the folder name under the accounts root) -- how this account is addressed everywhere outside this list.</summary>
+    public string Slot => _slot;
+
+    /// <summary>True once a fresh child has confirmed that this account has no usable login (see the type doc comment). Shown as the grey "!" ring with a re-login prompt.</summary>
+    public bool NeedsLogin { get; private set; }
 
     public AccountIdentity? Identity { get; private set; }
     public string? SubscriptionType { get; private set; }
     public string Label { get; private set; }
-    public QuotaView LastView { get; private set; } = QuotaView.Initial;
+    /// <summary>Starts out "Hämtar kvoten…" (Model/LoadingTracker): not answered yet is not an error.</summary>
+    public QuotaView LastView { get; private set; } = QuotaView.Initial with { Loading = true };
     public bool Enabled => _config.Enabled;
     public string? OverrideLabel => _config.Label;
     public string? IdentityKey => _state.IdentityKey;
     public string CurrentLogDir => _state.CurrentLogDir;
-
-    /// <summary>This account's raw accounts.json configDir (null for the default "whatever you're logged into" entry) -- exposed for Ui/PanelText.ComposeDuplicateAccountRow, which needs it to name the right add-account.ps1 -Remove slot.</summary>
-    public string? ConfigDir => _config.ConfigDir;
 
     /// <summary>docs/multi-account.md "Duplicate accounts": true once StatusBarApplicationContext.RefreshDuplicates (Model/AccountDuplicates.cs) has confirmed this account resolves to the same AccountIdentity.StateKey as an earlier one in config order. See SetDuplicate for what changing this does.</summary>
     public bool IsDuplicate { get; private set; }
@@ -91,13 +108,15 @@ public sealed class AccountRuntime : IAsyncDisposable
     /// </summary>
     public bool IsPolling => _polling;
 
-    /// <param name="slot">Opaque per-account identifier ("default" for accounts[0], else the account's index) -- only affects the child's working directory.</param>
+    /// <param name="slot">The slot id: the folder under the accounts root that holds this account's login.</param>
     /// <param name="config">This account's accounts.json entry.</param>
     /// <param name="index">This account's position in the configured list, for the "Konto N" label fallback.</param>
     /// <param name="uiContext">The UI SynchronizationContext poll completions are marshalled back onto, exactly like StatusBarApplicationContext's own polling used to.</param>
     /// <param name="baseLogDirOverride">Test-only: replaces %LOCALAPPDATA%\ClaudeStatusBar\logs.</param>
     /// <param name="specOverride">Test-only: points the channel at tests/FakeClaudeChild instead of the real claude.exe.</param>
     /// <param name="configDirOverride">Test-only: replaces the resolved config directory identity is read from.</param>
+    /// <param name="loadingTimeout">Test-only: replaces the 30 s the loading state lasts without any result.</param>
+    /// <param name="slots">The slot store whose path guard resolves the slot (default: the app's own accounts root). Throws if the guard refuses the slot.</param>
     public AccountRuntime(
         string slot,
         AccountEntry config,
@@ -105,18 +124,19 @@ public sealed class AccountRuntime : IAsyncDisposable
         SynchronizationContext uiContext,
         string? baseLogDirOverride = null,
         ChildProcessSpec? specOverride = null,
-        string? configDirOverride = null)
+        string? configDirOverride = null,
+        SlotStore? slots = null,
+        TimeSpan? loadingTimeout = null)
     {
         _slot = slot;
         _config = config;
         _index = index;
         _uiContext = uiContext;
-        _configDir = configDirOverride ?? (string.IsNullOrWhiteSpace(config.ConfigDir)
-            ? AccountIdentity.ResolveDefaultIdentityDir()
-            : config.ConfigDir!);
+        slots ??= SlotStore.Default;
+        _configDir = configDirOverride ?? slots.ConfigDirOf(slot);
         _baseLogDir = baseLogDirOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStatusBar", "logs");
-        _spec = specOverride ?? ChildProcessSpec.ForAccount(slot, config.ConfigDir);
+        _spec = specOverride ?? ChildProcessSpec.ForSlot(slots, slot);
 
         Identity = AccountIdentity.ReadFrom(_configDir);
         _state = new AccountKeyedState(_baseLogDir, Identity?.StateKey);
@@ -124,6 +144,7 @@ public sealed class AccountRuntime : IAsyncDisposable
 
         Label = AccountLabel.Resolve(new AccountLabelInput(OverrideLabel, Identity, SubscriptionType), index);
 
+        _loading = new LoadingTracker(Environment.TickCount64, loadingTimeout);
         _pollTimer = new System.Windows.Forms.Timer { Interval = 30_000 };
         _pollTimer.Tick += (_, _) => _ = PollAsync();
     }
@@ -131,13 +152,26 @@ public sealed class AccountRuntime : IAsyncDisposable
     /// <summary>Launches the child and starts polling. Does not wait for the first poll to land.</summary>
     public void Start()
     {
+        _loading.Restart(Environment.TickCount64);
         _channelSupervisor.Start();
         _pollTimer.Start();
         _ = PollAsync();
     }
 
     /// <summary>The 1s UI tick for this account: cheap, safe every second, per QuotaModel.Evaluate's own contract.</summary>
-    public void Evaluate(DateTimeOffset utcNow, long monoMs) => LastView = _state.Model.Evaluate(utcNow, monoMs);
+    public void Evaluate(DateTimeOffset utcNow, long monoMs) => LastView = WithLoginState(_state.Model.Evaluate(utcNow, monoMs), monoMs);
+
+    /// <summary>
+    /// NeedsLogin is overlaid on the model's view: grey ring (Unknown) plus the flag the panel and
+    /// tooltip key on. So is Loading (no result yet, 30 s not passed): the same Unknown view, flagged so
+    /// it reads "Hämtar kvoten…" rather than as an error. NeedsLogin wins -- it only exists after results.
+    /// </summary>
+    QuotaView WithLoginState(QuotaView view, long monoMs)
+    {
+        if (NeedsLogin) return view with { Freshness = Freshness.Unknown, NeedsLogin = true };
+        if (_loading.IsLoading(monoMs)) return view with { Freshness = Freshness.Unknown, Loading = true };
+        return view;
+    }
 
     /// <summary>
     /// The panel's reload button (docs/panel-v2.md "Header"): an on-demand poll for this
@@ -161,18 +195,17 @@ public sealed class AccountRuntime : IAsyncDisposable
         // poll child for a confirmed duplicate" -- it must hold even against a stray direct call
         // (e.g. a reload-button click racing the exact tick that just marked this account a
         // duplicate), never just against the timer being stopped.
-        if (_polling || _shuttingDown || IsDuplicate) return;
+        if (_polling || _shuttingDown || IsDuplicate || _restarting) return;
         _polling = true;
         try
         {
             SyncIdentityIfChanged();
 
-            (UsageSnapshot? snapshot, string? error, TimeSpan latency) =
-                await _channelSupervisor.GetUsageAsync(RequestTimeout).ConfigureAwait(false);
+            UsageReadResult result = await _channelSupervisor.GetUsageAsync(RequestTimeout).ConfigureAwait(false);
             _uiContext.Post(_ =>
             {
                 if (_shuttingDown) return;
-                ApplyResult(snapshot, error, latency);
+                ApplyResult(result);
             }, null);
         }
         finally
@@ -205,9 +238,7 @@ public sealed class AccountRuntime : IAsyncDisposable
         if (isDuplicate && !wasDuplicate)
         {
             _pollTimer.Stop();
-            ClaudeCliChannelSupervisor old = _channelSupervisor;
-            _channelSupervisor = new ClaudeCliChannelSupervisor(_spec, _state.LogSink); // idle placeholder -- never Started while duplicate
-            _ = old.DisposeAsync();
+            _ = ReplaceSupervisor(start: false)?.DisposeAsync(); // the replacement is an idle placeholder -- never Started while duplicate
             SafeLog.Info($"account {_slot}: marked duplicate of index {duplicateOfIndex} -- child stopped");
         }
         else if (!isDuplicate && wasDuplicate && !_shuttingDown)
@@ -250,10 +281,7 @@ public sealed class AccountRuntime : IAsyncDisposable
                 // old one's. The old child is torn down in the background; a poll or two
                 // failing right after a genuine account switch is an acceptable, self-healing
                 // blip, not a correctness problem.
-                ClaudeCliChannelSupervisor oldSupervisor = _channelSupervisor;
-                _channelSupervisor = new ClaudeCliChannelSupervisor(_spec, _state.LogSink);
-                _channelSupervisor.Start();
-                _ = oldSupervisor.DisposeAsync();
+                _ = ReplaceSupervisor(start: true)?.DisposeAsync();
                 SafeLog.Info($"account {_slot}: identity changed, rebuilt state (key={AccountIdentity.KeyPrefixOf(_state.IdentityKey)})");
             }
             Identity = identity;
@@ -263,17 +291,58 @@ public sealed class AccountRuntime : IAsyncDisposable
         // logout -- keep the last known Identity and state exactly as they were.
     }
 
-    void ApplyResult(UsageSnapshot? snapshot, string? error, TimeSpan latency)
+    /// <summary>
+    /// Swaps in a new (idle or started) supervisor and hands back the old one for the caller to
+    /// stop. Null -- and nothing swapped -- once this runtime is shutting down, so a late swap
+    /// can never start a child nobody will stop.
+    /// </summary>
+    ClaudeCliChannelSupervisor? ReplaceSupervisor(bool start)
     {
+        lock (_swapLock)
+        {
+            if (_shuttingDown) return null;
+            ClaudeCliChannelSupervisor old = _channelSupervisor;
+            _channelSupervisor = new ClaudeCliChannelSupervisor(_spec, _state.LogSink);
+            if (start) _channelSupervisor.Start();
+            return old;
+        }
+    }
+
+    void ApplyResult(UsageReadResult result)
+    {
+        UsageSnapshot? snapshot = result.Snapshot;
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         long monoMs = Environment.TickCount64;
 
-        if (snapshot is null)
+        if (result.NotLoggedIn)
         {
-            _state.Model.IngestFailure(error ?? "unknown error", utcNow, monoMs);
+            _state.Model.IngestFailure(result.Error ?? UsageParser.NotLoggedInError, utcNow, monoMs);
+            if (!_restartedForNotLoggedIn)
+            {
+                // First such answer: could be a stale process. Restart once, then ask again.
+                _restartedForNotLoggedIn = true;
+                SafeLog.Info($"account {_slot}: child answered not-logged-in -- restarting it once to confirm");
+                _ = RestartChildAsync(); // still loading: the confirming answer is the first RESULT
+            }
+            else if (!NeedsLogin)
+            {
+                _loading.End();
+                NeedsLogin = true;
+                SafeLog.Info($"account {_slot}: a fresh child also answered not-logged-in -- needs login");
+            }
+        }
+        else if (snapshot is null)
+        {
+            _loading.End(); // the first failure ends loading: from here on it is a real failure
+            _state.Model.IngestFailure(result.Error ?? "unknown error", utcNow, monoMs);
         }
         else
         {
+            _loading.End();
+            if (NeedsLogin) SafeLog.Info($"account {_slot}: reading succeeded -- login restored");
+            NeedsLogin = false;
+            _restartedForNotLoggedIn = false;
+
             if (snapshot.SubscriptionType != null) SubscriptionType = snapshot.SubscriptionType;
             RefreshLabel();
 
@@ -293,8 +362,37 @@ public sealed class AccountRuntime : IAsyncDisposable
         TimeSpan next = _state.Model.NextPollDelay(utcNow);
         _pollTimer.Interval = Math.Max(1, (int)Math.Round(next.TotalMilliseconds));
 
-        LastView = _state.Model.Evaluate(utcNow, monoMs);
+        LastView = WithLoginState(_state.Model.Evaluate(utcNow, monoMs), monoMs);
         LogCommittedState();
+    }
+
+    /// <summary>
+    /// Stops this account's child and starts a fresh one, then polls it right away so the
+    /// not-logged-in confirmation does not wait out a failure backoff. Polls are held off meanwhile.
+    /// </summary>
+    async Task RestartChildAsync()
+    {
+        _restarting = true;
+        try
+        {
+            ClaudeCliChannelSupervisor? old = ReplaceSupervisor(start: false);
+            if (old is null) return;
+            try { await old.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { SafeLog.Warn($"account {_slot}: stopping the child for a restart threw: {ex.Message}"); }
+
+            ClaudeCliChannelSupervisor fresh = _channelSupervisor;
+            fresh.Start();
+
+            DateTime deadline = DateTime.UtcNow + RestartChannelWait;
+            while (!_shuttingDown && fresh.CurrentProcessId is null && DateTime.UtcNow < deadline)
+                await Task.Delay(50).ConfigureAwait(false);
+        }
+        finally
+        {
+            _restarting = false;
+        }
+
+        if (!_shuttingDown) _ = PollAsync();
     }
 
     /// <summary>
@@ -375,11 +473,24 @@ public sealed class AccountRuntime : IAsyncDisposable
     /// <summary>Lets the caller install a whole-set-disambiguated label (AccountLabel.Disambiguate) over this account's own base label -- see StatusBarApplicationContext for where that pass runs.</summary>
     public void ApplyDisambiguatedLabel(string label) => Label = label;
 
+    /// <summary>Kills whatever this account's supervisor started and is still running -- the fallback when a graceful stop did not finish in time.</summary>
+    public int KillChildren() => _channelSupervisor.KillLaunchedChildren();
+
+    /// <summary>
+    /// Graceful stop (docs/multi-account.md "Child lifecycle"): no more polls, then the child's
+    /// stdin is closed and it is given time to exit by itself before anything is killed
+    /// (ClaudeCliChannelSupervisor.StopAsync), then the log sink is flushed.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        _shuttingDown = true;
+        ClaudeCliChannelSupervisor supervisor;
+        lock (_swapLock)
+        {
+            _shuttingDown = true;
+            supervisor = _channelSupervisor;
+        }
         try { _pollTimer.Stop(); _pollTimer.Dispose(); } catch { /* best effort */ }
-        await _channelSupervisor.DisposeAsync().ConfigureAwait(false);
+        await supervisor.DisposeAsync().ConfigureAwait(false);
         await _state.DisposeAsync().ConfigureAwait(false);
     }
 }

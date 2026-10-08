@@ -52,3 +52,29 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
   covered. A named mutex or a lock file would close it.
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
+
+## Mac parity for the 2026-10-08 round (Windows: loading state, panel header, idle-account freshness)
+- **Idle account is not stale.** `src/Mac/Sources/ClaudeQuotaCore/QuotaModel.swift` and `FreshnessOracle.swift`
+  need the same two changes as Windows (`docs/forecast-and-states.md`, "An idle account is not a stale
+  one"): stop passing a session/weekly `resets_at` deadline to the oracle while the latest poll validly
+  reports that window closed, and suspend the 20-min fingerprint rule while the session window is closed
+  (`SessionClosed`). Tests: closed session + spent weekly with identical replies for 2 h stays Live; a session
+  that ended and now reports closed stays Live; an open session with identical replies > 20 min still goes
+  Stale; failures still go Stale/Unknown.
+- **Loading state** (grey ring without "!", a travelling arc, "Hämtar kvoten…", 30 s) and the **panel header**
+  (title = the account's label, subtitle = plan · organisation) once the Mac app has the slot model.
+
+## From the own-login round (Windows, `docs/multi-account.md`)
+- **Mac parity: the same design.** Slots the app owns (`accounts/<id>/config` + `slot.json`), the path
+  guard, reconciliation, a login flow that always logs into a new slot, NeedsLogin from the null
+  `get_usage` shape, and no follower. Two Mac-specific points: the config-dir path must stay canonical
+  (`docs/mac-port.md` §2), and since there is no logout, **deleting a slot must also delete its keychain
+  item**, `Claude Code-credentials-<sha256(configDir)[:8]>` (first 8 hex of the SHA-256 of the NFC config
+  dir string) -- otherwise a removed account leaves a credential behind.
+- **Early warning from `refreshTokenExpiresAt`.** Warn before a login lapses instead of after. It would
+  mean reading the credentials file, which the app deliberately never does (it never reads token values);
+  deferred until there is a way to get the expiry without touching the token.
+- **Does revoking one grant affect another?** Two slots for the same person each hold their own OAuth
+  grant. `claude auth logout` revokes server-side, and whether that invalidates the other slot's grant is
+  unverified, which is why the app never runs it and removing an account only deletes its folder. If it
+  turns out to be safe, "Ta bort…" could also sign the account out.

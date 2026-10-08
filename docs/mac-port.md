@@ -29,7 +29,7 @@ src/Core/          (optional, later) portable .NET logic if the Windows app is e
 src/Windows/       today's src/ClaudeStatusBar
 src/Mac/           the Swift app
 tests/             C# tests; fixtures move to tests/fixtures/ and are shared
-scripts/           install.ps1, add-account.ps1, check-privacy.ps1 (Windows) + mac equivalents
+scripts/           install.ps1, check-privacy.ps1 (Windows; accounts are added from the tray menu) + mac equivalents
 ```
 
 The Windows build, tests, scripts and `ClaudeStatusBar.slnx` must stay green through the move.
@@ -134,8 +134,9 @@ not the keychain, is what selects the login.
 Two consequences for M4:
 
 - The `add-account` script cannot work by creating a directory and copying anything; it must run an
-  interactive `claude` login in the new `CLAUDE_CONFIG_DIR`, which `scripts/add-account.ps1` already
-  does for its own reasons (token rotation invalidates copies). The mac script mirrors it.
+  interactive `claude` login in the new `CLAUDE_CONFIG_DIR`, which the Windows app's login flow
+  (formerly `scripts/add-account.ps1`) does for its own reasons (token rotation invalidates copies).
+  The mac script mirrors it.
 #### RESOLVED: the keychain item is namespaced per config directory
 
 The first pass left this open. It is now answered from Claude Code's own shipped code (2.1.271),

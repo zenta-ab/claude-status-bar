@@ -7,6 +7,9 @@ namespace ClaudeStatusBar;
 
 internal static class Program
 {
+    /// <summary>One live instance per desktop session (docs/multi-account.md "Child lifecycle"). Session-local, so another user's instance does not count.</summary>
+    const string InstanceMutexName = @"Local\ClaudeStatusBar-Instance";
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -18,6 +21,20 @@ internal static class Program
 
         if (args.Contains("--rebuild-statistics"))
             return RunStatisticsRebuild();
+
+        // Single instance. A second LIVE instance must not even start: it would reconcile the login slots
+        // (retiring and deleting a login the first instance is in the middle of creating) and run its own
+        // children against the same accounts. It exits quietly. --demo never touches accounts, so it is exempt.
+        Mutex? instanceLock = null;
+        if (!args.Contains("--demo"))
+        {
+            instanceLock = new Mutex(initiallyOwned: true, InstanceMutexName, out bool firstInstance);
+            if (!firstInstance)
+            {
+                instanceLock.Dispose();
+                return 0;
+            }
+        }
 
         // UI exception boundary (Codex review Medium #15): must be set before any handle is
         // created. CatchException keeps WinForms routing exceptions to ThreadException below
@@ -65,6 +82,8 @@ internal static class Program
         finally
         {
             context.Dispose();
+            try { instanceLock?.ReleaseMutex(); } catch { /* not owned: nothing to release */ }
+            instanceLock?.Dispose();
         }
         return 0;
     }

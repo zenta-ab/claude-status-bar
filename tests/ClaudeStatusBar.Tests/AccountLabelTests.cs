@@ -232,4 +232,165 @@ public class AccountLabelTests
         Assert.Equal("Max (Max, alex)", labels[0]);
         Assert.Equal("Max (Max, bob)", labels[2]);
     }
+
+    // ---- email domain as the first disambiguator (docs/multi-account.md "Labels") ----
+
+    [Fact]
+    public void Disambiguate_SamePlan_DifferentEmailDomains_AppendsTheDomain_BeforeThePlanOrLocalPart()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alex@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: "alex@example.org"), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal("Max (example.com)", labels[0]);
+        Assert.Equal("Max (example.org)", labels[1]);
+    }
+
+    [Fact]
+    public void Disambiguate_Domain_IsComparedCaseInsensitively_AndShownLowerCase()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "Alex@Example.COM"), "max"),
+            new AccountLabelInput(null, Identity(email: "bob@example.org"), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal("Max (example.com)", labels[0]);
+        Assert.Equal("Max (example.org)", labels[1]);
+    }
+
+    [Fact]
+    public void Disambiguate_SameEmailDomain_FallsBackToThePlanAndLocalPartSteps_AsBefore()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alice@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: "bob@example.com"), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal("Max (Max, alice)", labels[0]);
+        Assert.Equal("Max (Max, bob)", labels[1]);
+    }
+
+    [Fact]
+    public void Disambiguate_SameDomainDifferentPlan_StillUsesThePlan_NotTheDomain()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity("Acme", "alice@example.com"), "max"),
+            new AccountLabelInput(null, Identity("Acme", "bob@example.com"), "team"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal("Acme (Max)", labels[0]);
+        Assert.Equal("Acme (Team)", labels[1]);
+    }
+
+    [Fact]
+    public void Disambiguate_ThreeCollidingAccounts_TwoSharingADomain_DoNotGetPartialDomains()
+    {
+        // The domain does not tell all three apart, so the whole group uses the old steps.
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alice@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: "bob@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: "carol@example.org"), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal(new[] { "Max (Max, alice)", "Max (Max, bob)", "Max (Max, carol)" }, labels);
+    }
+
+    [Fact]
+    public void Disambiguate_AMemberWithoutAnEmail_FallsBackToTheOldSteps()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alex@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: null), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal(2, labels.Distinct().Count());
+        Assert.DoesNotContain("example.com", labels[1]);
+    }
+
+    [Fact]
+    public void Disambiguate_EachCollidingGroupIsHandledOnItsOwn()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alex@example.com"), "max"),   // group "Max": domains differ
+            new AccountLabelInput(null, Identity(email: "alex@example.org"), "max"),
+            new AccountLabelInput(null, Identity("Acme", "alice@example.com"), "team"), // group "Acme": same domain
+            new AccountLabelInput(null, Identity("Acme", "bob@example.com"), "team"),
+            new AccountLabelInput(null, Identity("Solo", "sam@example.net"), "team"),   // unique: untouched
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts);
+
+        Assert.Equal(new[]
+        {
+            "Max (example.com)", "Max (example.org)",
+            "Acme (Team, alice)", "Acme (Team, bob)",
+            "Solo",
+        }, labels);
+    }
+
+    [Fact]
+    public void Disambiguate_ASingleAccount_NeverGetsADomain()
+    {
+        var accounts = new[] { new AccountLabelInput(null, Identity(email: "alex@example.com"), "max") };
+
+        Assert.Equal(new[] { "Max" }, AccountLabel.Disambiguate(accounts));
+    }
+
+    [Fact]
+    public void Disambiguate_UniqueLabels_NeverGetADomain()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity("Acme", "alex@example.com"), "team"),
+            new AccountLabelInput(null, Identity(null, "alex@example.org"), "max"),
+        };
+
+        Assert.Equal(new[] { "Acme", "Max" }, AccountLabel.Disambiguate(accounts));
+    }
+
+    [Fact]
+    public void Disambiguate_TheUsersOwnOverrides_AreDisambiguatedTheSameWay()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput("Jobb", Identity(email: "alex@example.com"), "max"),
+            new AccountLabelInput("Jobb", Identity(email: "alex@example.org"), "max"),
+        };
+
+        Assert.Equal(new[] { "Jobb (example.com)", "Jobb (example.org)" }, AccountLabel.Disambiguate(accounts));
+    }
+
+    [Fact]
+    public void Disambiguate_ADuplicateRow_DoesNotCountAsACollision_SoNoDomainIsAdded()
+    {
+        var accounts = new[]
+        {
+            new AccountLabelInput(null, Identity(email: "alex@example.com"), "max"),
+            new AccountLabelInput(null, Identity(email: "alex@example.org"), "max"),
+        };
+
+        IReadOnlyList<string> labels = AccountLabel.Disambiguate(accounts, new[] { false, true });
+
+        Assert.Equal("Max", labels[0]);
+    }
 }

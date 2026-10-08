@@ -41,7 +41,7 @@ public sealed class QuotaModel : IQuotaModel
 
     bool _everSucceeded;
     bool _liveDataIngested; // decision 6 (round 2): consumed only by an ACCEPTED (usable) live ingest, not merely a poll that round-tripped
-    DateTimeOffset? _lastPollAt;
+    DateTimeOffset? _lastSuccessAt;
     int _consecutiveFailures;
     string? _lastError;
 
@@ -184,7 +184,7 @@ public sealed class QuotaModel : IQuotaModel
         bool usable = anyAccepted || _sessionInactiveLastPoll || _weeklyInactiveLastPoll;
 
         _everSucceeded = true;
-        _lastPollAt = utcNow;
+        _lastSuccessAt = utcNow;
         _consecutiveFailures = 0;
         _lastError = null;
 
@@ -221,7 +221,10 @@ public sealed class QuotaModel : IQuotaModel
 
     public void IngestFailure(string error, DateTimeOffset utcNow, long monoMs)
     {
-        _lastPollAt = utcNow;
+        // _lastSuccessAt is deliberately NOT moved here: "Senast avläst" is the last time a read
+        // SUCCEEDED, so a run of failures must leave it where it was (docs/multi-account.md
+        // "NeedsLogin"). Before, a failure refreshed it and an unreadable account kept claiming a
+        // recent read.
         _lastError = error;
         _consecutiveFailures++;
         // Decision 14/6: a failure must NOT gate WarmStart (only an ACCEPTED Ingest does).
@@ -388,7 +391,13 @@ public sealed class QuotaModel : IQuotaModel
 
         var freshnessInputs = new FreshnessInputs(
             _everSucceeded, _freshnessStaleAtMono, _freshnessUnknownAtMono,
-            _lastUsableMono, sessionSnap.ResetsAt, weeklySnap.ResetsAt, clockJump);
+            _lastUsableMono,
+            // A window the latest poll validly reported CLOSED has no deadline to wait for: its old resets_at
+            // is history, not an overdue reset (docs/forecast-and-states.md, "Freshness ladder").
+            _sessionInactiveLastPoll ? null : sessionSnap.ResetsAt,
+            _weeklyInactiveLastPoll ? null : weeklySnap.ResetsAt,
+            clockJump,
+            SessionClosed: _sessionInactiveLastPoll);
         Freshness freshness = FreshnessOracle.Evaluate(freshnessInputs, utcNow, monoMs);
 
         // Decision 13: global Live requires a USABLE session window. A window reporting itself
@@ -399,7 +408,7 @@ public sealed class QuotaModel : IQuotaModel
         return new QuotaView(
             sessionView, weeklyView, freshness,
             LastChangedAt: _session.LastAcceptedUtc,
-            LastPollAt: _lastPollAt,
+            LastSuccessAt: _lastSuccessAt,
             PollInterval: pollInterval,
             Error: _lastError,
             IconSeverity: severity,

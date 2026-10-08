@@ -40,16 +40,31 @@ public sealed class ClaudeCliChannel : IDisposable
     long _nextRequestId;
     int _faultedFlag; // 0 = healthy, 1 = faulted (Interlocked-guarded so MarkFaulted is idempotent)
     string? _faultReason;
+    volatile bool _stopping; // StopAsync has begun: no new requests, the clean exit that follows is not a fault worth reporting
     bool _disposed;
+
+    /// <summary>Longest StopAsync waits for an in-flight request to finish writing before it gives up on the polite route and kills.</summary>
+    static readonly TimeSpan StdinLockWait = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>After Kill(entireProcessTree), how long Dispose waits for the process to actually be gone.</summary>
+    static readonly TimeSpan KillExitWait = TimeSpan.FromSeconds(1);
 
     /// <summary>Raised exactly once per channel instance, the moment it is judged unhealthy (stdout EOF, process exit, pump crash, an oversized-line pattern, or a request timeout). The supervisor disposes this channel and relaunches on this signal.</summary>
     public event Action<ClaudeCliChannel, string>? Faulted;
 
-    public bool IsHealthy => Volatile.Read(ref _faultedFlag) == 0 && !_disposed;
+    public bool IsHealthy => Volatile.Read(ref _faultedFlag) == 0 && !_disposed && !_stopping;
+
+    /// <summary>The child's process id, for diagnostics and for tests that prove a stop left nothing behind.</summary>
+    public int ProcessId { get; }
+
+    /// <summary>When the child started, so a later kill can tell it from a different process that reused the id.</summary>
+    public DateTime ProcessStartTime { get; }
 
     ClaudeCliChannel(Process process, DiskLogSink logSink, IntPtr jobHandle)
     {
         _process = process;
+        ProcessId = process.Id;
+        try { ProcessStartTime = process.StartTime; } catch { /* already gone: never matches a live process */ }
         _logSink = logSink;
         _jobHandle = jobHandle;
     }
@@ -81,14 +96,11 @@ public sealed class ClaudeCliChannel : IDisposable
             StandardInputEncoding = Encoding.UTF8,
         };
 
-        // Per-account identity (docs/multi-account.md): CLAUDE_CONFIG_DIR is the only thing
-        // that tells claude.exe which login to use. Left untouched (inherited) for the default
-        // account -- see ChildProcessSpec.ForAccount's doc comment for why.
+        // Per-account identity (docs/multi-account.md "Environment"): the slot pins the config dir and
+        // strips every variable that would make this child use some other login -- see
+        // ChildEnvironment.
         if (spec.EnvironmentOverrides is { } overrides)
-        {
-            foreach ((string key, string value) in overrides)
-                psi.Environment[key] = value;
-        }
+            ChildEnvironment.Apply(psi.Environment, overrides);
 
         // Job Object is created and configured BEFORE the process starts (Codex review High
         // #2): the previous ordering left the child able to run entirely unsandboxed if job
@@ -267,11 +279,11 @@ public sealed class ClaudeCliChannel : IDisposable
     }
 
     /// <summary>Sends get_usage and awaits the correlated response, or times out. Returns promptly with a failure result whenever the channel is not healthy -- the poll gate must never stay closed forever (Codex review High #1, #3).</summary>
-    public async Task<(UsageSnapshot? Snapshot, string? Error, TimeSpan Latency)> GetUsageAsync(
+    public async Task<UsageReadResult> GetUsageAsync(
         TimeSpan timeout, CancellationToken ct = default)
     {
         if (!IsHealthy)
-            return (null, _faultReason ?? "channel is not healthy", TimeSpan.Zero);
+            return new UsageReadResult(null, _faultReason ?? "channel is not healthy", TimeSpan.Zero);
 
         string requestId = Interlocked.Increment(ref _nextRequestId).ToString();
         var tcs = new TaskCompletionSource<JsonDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -302,9 +314,9 @@ public sealed class ClaudeCliChannel : IDisposable
             using JsonDocument doc = await tcs.Task.ConfigureAwait(false);
             sw.Stop();
 
-            UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
-            if (snapshot != null) _logSink.EnqueueCsv(snapshot, sw.Elapsed);
-            return (snapshot, error, sw.Elapsed);
+            UsageParseResult parsed = UsageParser.Parse(doc.RootElement);
+            if (parsed.Snapshot != null) _logSink.EnqueueCsv(parsed.Snapshot, sw.Elapsed);
+            return new UsageReadResult(parsed.Snapshot, parsed.Error, sw.Elapsed, parsed.NotLoggedIn);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -317,18 +329,18 @@ public sealed class ClaudeCliChannel : IDisposable
             // unblocks a stuck OS-level pipe write.
             string message = $"get_usage timed out after {timeout.TotalMilliseconds:F0}ms";
             MarkFaulted(message);
-            return (null, message, sw.Elapsed);
+            return new UsageReadResult(null, message, sw.Elapsed);
         }
         catch (OperationCanceledException)
         {
             sw.Stop();
-            return (null, "get_usage canceled by caller", sw.Elapsed);
+            return new UsageReadResult(null, "get_usage canceled by caller", sw.Elapsed);
         }
         catch (Exception ex)
         {
             sw.Stop();
             MarkFaulted($"get_usage failed: {ex.Message}"); // a write/flush exception leaves the pipe in an unknown state
-            return (null, ex.Message, sw.Elapsed);
+            return new UsageReadResult(null, ex.Message, sw.Elapsed);
         }
         finally
         {
@@ -363,6 +375,45 @@ public sealed class ClaudeCliChannel : IDisposable
         }
     }
 
+    /// <summary>
+    /// Graceful stop (docs/multi-account.md "Child lifecycle"): refuse new requests, close the
+    /// child's stdin so `claude -p` ends its session and exits by itself, wait for that (bounded),
+    /// and only then kill whatever is left -- and wait for it to be gone. Stdin is closed UNDER
+    /// the stdin lock, so it can never be closed in the middle of a request's write; if a write
+    /// is stuck (a child that stopped reading), the lock is not obtained and the child is killed
+    /// instead of waiting on it. The supervisor marks itself disposed BEFORE calling this, so the
+    /// clean exit is not mistaken for a crash and relaunched.
+    /// </summary>
+    public async Task StopAsync(TimeSpan exitWait)
+    {
+        if (_disposed) return;
+        _stopping = true;
+
+        bool stdinClosed = false;
+        try
+        {
+            if (await _stdinLock.WaitAsync(StdinLockWait).ConfigureAwait(false))
+            {
+                // Deliberately never released: after this nothing may write to the pipe.
+                try { _process.StandardInput.Close(); stdinClosed = true; }
+                catch { /* already gone */ }
+            }
+        }
+        catch { /* semaphore disposed or similar: fall through to the kill below */ }
+
+        if (stdinClosed)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(exitWait);
+                await _process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch { /* timed out, or already disposed: Dispose() kills what is left */ }
+        }
+
+        Dispose();
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -378,7 +429,15 @@ public sealed class ClaudeCliChannel : IDisposable
         // shutdown path would hang the app before ever reaching the kill below. Once the
         // child (and, via the job object, its descendants) is gone, closing the pipe cannot
         // block on anything.
-        try { if (!_process.HasExited) _process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+        try
+        {
+            if (!_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+                _process.WaitForExit((int)KillExitWait.TotalMilliseconds); // killed AND gone, not just signalled
+            }
+        }
+        catch { /* already gone */ }
         try { _process.StandardInput.Close(); } catch { /* already gone */ }
         try { _process.Dispose(); } catch { /* already gone */ }
 

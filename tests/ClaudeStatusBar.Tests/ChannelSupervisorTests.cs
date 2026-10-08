@@ -29,11 +29,11 @@ public class ChannelSupervisorTests
         return dir;
     }
 
-    static async Task<(UsageSnapshot? Snapshot, string? Error, TimeSpan Latency)> PollUntilSuccessAsync(
+    static async Task<UsageReadResult> PollUntilSuccessAsync(
         ClaudeCliChannelSupervisor supervisor, TimeSpan perAttemptTimeout, TimeSpan maxWait)
     {
         DateTime deadline = DateTime.UtcNow + maxWait;
-        (UsageSnapshot? Snapshot, string? Error, TimeSpan Latency) result = (null, "not attempted", TimeSpan.Zero);
+        UsageReadResult result = new(null, "not attempted", TimeSpan.Zero);
         while (DateTime.UtcNow < deadline)
         {
             result = await supervisor.GetUsageAsync(perAttemptTimeout).ConfigureAwait(false);
@@ -222,6 +222,206 @@ public class ChannelSupervisorTests
             Directory.Delete(workDir, recursive: true);
             Directory.Delete(logDir, recursive: true);
             Directory.Delete(Path.GetDirectoryName(marker)!, recursive: true);
+        }
+    }
+
+    // ---- docs/multi-account.md "Child lifecycle": graceful stop ----
+
+    [Fact]
+    public async Task Stop_IsGraceful_TheChildSeesItsStdinClose_RatherThanBeingKilled()
+    {
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-graceful-work");
+        string logDir = NewTempDir("chan-graceful-logs");
+        string eofMarker = Path.Combine(workDir, "stdin-closed.marker");
+        var logSink = new DiskLogSink(logDir);
+        var supervisor = new ClaudeCliChannelSupervisor(BuildSpec($"--mode=normal --on-eof-marker=\"{eofMarker}\"", workDir), logSink);
+        try
+        {
+            supervisor.Start();
+            var (snapshot, _, _) = await PollUntilSuccessAsync(supervisor, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+            Assert.NotNull(snapshot);
+            Assert.False(File.Exists(eofMarker));
+
+            await supervisor.DisposeAsync();
+
+            // A kill never reaches the child's EOF handling; closing stdin does.
+            Assert.True(File.Exists(eofMarker), "the child was killed instead of being asked to finish");
+        }
+        finally
+        {
+            await supervisor.DisposeAsync();
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(5));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_TheCleanExitItCausesIsNotMistakenForACrash_NoRelaunch()
+    {
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-norestart-work");
+        string logDir = NewTempDir("chan-norestart-logs");
+        string launchLog = Path.Combine(workDir, "launches.log");
+        var logSink = new DiskLogSink(logDir);
+        // A 200 ms first backoff step: were the clean exit treated as a crash, a second child would be up well within the wait below.
+        var supervisor = new ClaudeCliChannelSupervisor(
+            BuildSpec($"--mode=normal --launch-log=\"{launchLog}\"", workDir), logSink,
+            backoffSteps: new[] { TimeSpan.FromMilliseconds(200) });
+        try
+        {
+            supervisor.Start();
+            var (snapshot, _, _) = await PollUntilSuccessAsync(supervisor, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+            Assert.NotNull(snapshot);
+
+            await supervisor.DisposeAsync();
+            await Task.Delay(1500);
+
+            Assert.Single(File.ReadAllLines(launchLog));
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            await supervisor.DisposeAsync();
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_ALaunchStillInFlight_IsNotLeakedAsAnUnownedChild()
+    {
+        // The leak this guards: DisposeAsync ran while ClaudeCliChannel.Start() was still inside
+        // the supervisor, so the channel it produced was published into a supervisor nobody would
+        // ever stop again -- a claude.exe child that outlived its account.
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-leak-work");
+        string logDir = NewTempDir("chan-leak-logs");
+        var logSink = new DiskLogSink(logDir);
+        var slowResolve = new ChildProcessSpec(
+            ResolveExePath: () => { Thread.Sleep(700); return ExePath; }, // the launch is "in flight" for 700 ms
+            Arguments: "--mode=normal",
+            WorkingDirectory: workDir);
+        var supervisor = new ClaudeCliChannelSupervisor(slowResolve, logSink);
+        try
+        {
+            // Start() runs its first launch attempt on the caller's thread until it first awaits, so it is run on its own thread here.
+            Task starting = Task.Run(supervisor.Start);
+            await Task.Delay(150); // the launch is now inside ResolveExePath
+            await supervisor.DisposeAsync();
+            await starting;
+            await Task.Delay(300);
+
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(3));
+            Assert.Null(supervisor.CurrentProcessId);
+        }
+        finally
+        {
+            // If the assertion above failed, a leaked child is still alive with its working directory
+            // locked: reap it so the cleanup below cannot mask the real failure with an IOException.
+            foreach (Process leaked in Process.GetProcessesByName("FakeClaudeChild").Where(p => StartedDuringThisTest(p, testStart)))
+            {
+                try { leaked.Kill(entireProcessTree: true); leaked.WaitForExit(2000); } catch { /* already gone */ }
+            }
+            await supervisor.DisposeAsync();
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_AChildThatIgnoresItsStdinClose_IsKilledAfterTheBoundedWait_AndIsGone()
+    {
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-stubborn-work");
+        string logDir = NewTempDir("chan-stubborn-logs");
+        var logSink = new DiskLogSink(logDir);
+        var supervisor = new ClaudeCliChannelSupervisor(BuildSpec("--mode=hang", workDir), logSink);
+        try
+        {
+            supervisor.Start();
+            await Task.Delay(500); // let the child actually start
+            Assert.NotNull(supervisor.CurrentProcessId);
+            int pid = supervisor.CurrentProcessId!.Value;
+
+            var sw = Stopwatch.StartNew();
+            await supervisor.StopAsync(TimeSpan.FromMilliseconds(600));
+            sw.Stop();
+
+            Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(500), $"gave up on the polite route after only {sw.Elapsed}");
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"stop took {sw.Elapsed}");
+            Assert.Throws<ArgumentException>(() => Process.GetProcessById(pid)); // killed AND gone, not just signalled
+        }
+        finally
+        {
+            await supervisor.DisposeAsync();
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(5));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_IsIdempotent()
+    {
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-idem-work");
+        string logDir = NewTempDir("chan-idem-logs");
+        var logSink = new DiskLogSink(logDir);
+        var supervisor = new ClaudeCliChannelSupervisor(BuildSpec("--mode=normal", workDir), logSink);
+        try
+        {
+            supervisor.Start();
+            await PollUntilSuccessAsync(supervisor, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+
+            await supervisor.DisposeAsync();
+            await supervisor.DisposeAsync();
+            await supervisor.StopAsync(TimeSpan.FromMilliseconds(100));
+        }
+        finally
+        {
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(5));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task KillLaunchedChildren_KillsWhatTheSupervisorStarted_AndOnlyThat()
+    {
+        DateTime testStart = DateTime.UtcNow;
+        string workDir = NewTempDir("chan-killlaunched-work");
+        string logDir = NewTempDir("chan-killlaunched-logs");
+        var logSink = new DiskLogSink(logDir);
+        var supervisor = new ClaudeCliChannelSupervisor(BuildSpec("--mode=hang", workDir), logSink);
+        // A bystander the supervisor did not start: it must survive.
+        using Process bystander = Process.Start(new ProcessStartInfo(ExePath, "--mode=hang") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true })!;
+        try
+        {
+            supervisor.Start();
+            await Task.Delay(500);
+            int pid = supervisor.CurrentProcessId!.Value;
+
+            int killed = supervisor.KillLaunchedChildren();
+
+            Assert.Equal(1, killed);
+            Assert.Throws<ArgumentException>(() => Process.GetProcessById(pid));
+            Assert.False(bystander.HasExited, "a process the supervisor did not start was killed");
+        }
+        finally
+        {
+            try { bystander.Kill(entireProcessTree: true); bystander.WaitForExit(3000); } catch { /* already gone */ }
+            await supervisor.DisposeAsync();
+            await logSink.DisposeAsync(TimeSpan.FromSeconds(2));
+            await AssertNoOrphanedFakeChildrenAsync(testStart, TimeSpan.FromSeconds(5));
+            Directory.Delete(workDir, recursive: true);
+            Directory.Delete(logDir, recursive: true);
         }
     }
 }

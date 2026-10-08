@@ -69,6 +69,20 @@ public static class AccountDisplayPlan
         return SelectPerAccount(accounts, maxIcons);
     }
 
+    /// <summary>Which tray icons exist: the accounts' own, or -- with no enabled account at all -- exactly one grey "log in" icon.</summary>
+    public readonly record struct TrayPlan(IReadOnlyList<int> AccountIcons, bool ZeroAccountsIcon);
+
+    /// <summary>
+    /// docs/multi-account.md "Zero accounts": with no enabled account the app shows exactly one grey
+    /// icon (tooltip "Logga in för att visa kvoten", full menu, left click starts the add flow), so
+    /// the app and its Exit entry are always reachable. Otherwise the normal per-mode selection.
+    /// </summary>
+    public static TrayPlan PlanTray(IReadOnlyList<Candidate> accounts, AccountDisplayMode mode, int maxIcons, DateTimeOffset now)
+    {
+        if (!accounts.Any(a => a.Enabled)) return new TrayPlan(Array.Empty<int>(), ZeroAccountsIcon: true);
+        return new TrayPlan(SelectIconAccounts(accounts, mode, maxIcons, now), ZeroAccountsIcon: false);
+    }
+
     static bool HasRealVerdict(QuotaView view) =>
         view.Freshness != Freshness.Unknown && view.IconSeverity != QuotaState.Measuring;
 

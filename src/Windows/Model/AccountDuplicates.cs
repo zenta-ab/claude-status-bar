@@ -8,10 +8,10 @@ namespace ClaudeStatusBar.Model;
 /// Model/AccountDisplayPlan.cs is -- StatusBarApplicationContext.RefreshDuplicates is the only
 /// caller in the running app, applying this result to each AccountRuntime.SetDuplicate.
 ///
-/// The live bug this exists to fix: a follower entry (configDir null, "whatever the user is
-/// logged into") and a pinned entry can resolve to the same identity -- most commonly because the
-/// user logged the SAME account into both, or logged their terminal into an account already
-/// pinned to its own config directory. Before this, that produced two identical tray icons, two
+/// The live bug this exists to fix: two entries could resolve to the same identity -- back then
+/// mostly a "follow whatever I am logged into" entry (since removed, docs/multi-account.md "Why no
+/// follower") next to a pinned one. It can still happen to two slots (a login recovered from disk
+/// after accounts.json was lost). Without this the result was two identical tray icons, two
 /// identical panel rows, and a second claude.exe child polling the exact same account for no
 /// reason -- silently, nothing told the user anything was wrong.
 /// </summary>

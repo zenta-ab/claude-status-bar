@@ -12,15 +12,24 @@ public enum AccountDisplayMode
 }
 
 /// <summary>
-/// One entry in accounts.json's "accounts" array. ConfigDir null means "Claude Code's own
-/// default login" (docs/multi-account.md) -- resolved the same way Claude Code itself
-/// resolves it, see Data/AccountIdentity.ResolveDefaultConfigDir.
+/// One entry in accounts.json's "accounts" array: the metadata for one app-owned login slot
+/// (docs/multi-account.md "Slots"). The slot folder, not this entry, is the source of truth for
+/// whether an account exists -- Config/AccountReconciler.cs rebuilds this list from the folders.
 /// </summary>
 public sealed class AccountEntry
 {
-    public string? ConfigDir { get; set; }
+    /// <summary>The slot id, i.e. the folder name under %LOCALAPPDATA%\ClaudeStatusBar\accounts.</summary>
+    public string? Slot { get; set; }
     public string? Label { get; set; }
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Version 1 stored a "configDir" path instead of a slot id. It is read once so the migration
+    /// (AccountReconciler.Migrate) can turn it into a slot id, then cleared and never written again.
+    /// </summary>
+    [JsonPropertyName("configDir")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LegacyConfigDir { get; set; }
 
     /// <summary>
     /// Unknown per-account fields round-tripped through Load/Save ("preserved where
@@ -32,18 +41,44 @@ public sealed class AccountEntry
     public Dictionary<string, JsonElement>? ExtraFields { get; set; }
 }
 
+public enum AccountsConfigStatus
+{
+    /// <summary>Read and valid.</summary>
+    Loaded,
+    /// <summary>No file yet (first run): an empty account set, to be filled from the slots.</summary>
+    Missing,
+    /// <summary>Unreadable or invalid: renamed to accounts.bad-&lt;timestamp&gt;.json, an empty account set stands in for it.</summary>
+    Quarantined,
+}
+
+public readonly record struct AccountsConfigLoad(AccountsConfig Config, AccountsConfigStatus Status);
+
 /// <summary>
-/// %LOCALAPPDATA%\ClaudeStatusBar\accounts.json, per docs/multi-account.md. Load/Save never
-/// throw: a missing file gets the one-account default created on first run (zero setup for a
-/// first-time user); a malformed or partially-invalid file falls back to defaults (logged,
-/// never silently) and the broken file is renamed to accounts.bad-&lt;timestamp&gt;.json rather
-/// than being overwritten and lost -- the user (or a bug report) can still inspect it.
+/// %LOCALAPPDATA%\ClaudeStatusBar\accounts.json (docs/multi-account.md "Configuration"):
+/// { "version": 2, "displayMode", "maxIcons", "accounts": [ { "slot", "label", "enabled" } ] }.
+/// Metadata only -- the login slots are the source of truth, and an empty list is valid (the app
+/// then shows its "log in" state). Load/Save never throw: a malformed or invalid file is renamed
+/// to accounts.bad-&lt;timestamp&gt;.json rather than overwritten (the user, or a bug report, can
+/// still inspect it) and an empty config stands in; the caller then rebuilds the account set from
+/// the active slots, so no login is ever orphaned by a lost file.
 /// </summary>
 public sealed class AccountsConfig
 {
+    public const int CurrentVersion = 2;
+
+    List<AccountEntry> _accounts = new();
+
+    /// <summary>0 = the field was absent, i.e. a version 1 file; see AccountReconciler.Migrate.</summary>
+    public int Version { get; set; }
     public AccountDisplayMode DisplayMode { get; set; } = AccountDisplayMode.PerAccount;
     public int MaxIcons { get; set; } = 3;
-    public List<AccountEntry> Accounts { get; set; } = new();
+
+    /// <summary>"accounts": null is the same as an empty list.</summary>
+    public List<AccountEntry> Accounts
+    {
+        get => _accounts;
+        set => _accounts = value ?? new List<AccountEntry>();
+    }
 
     /// <summary>Unknown top-level fields, preserved the same way AccountEntry.ExtraFields is.</summary>
     [JsonExtensionData]
@@ -59,57 +94,44 @@ public sealed class AccountsConfig
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    /// <summary>The one-account default: configDir null (Claude Code's own login), enabled.</summary>
-    public static AccountsConfig Default() => new()
-    {
-        DisplayMode = AccountDisplayMode.PerAccount,
-        MaxIcons = 3,
-        Accounts = new List<AccountEntry> { new() { ConfigDir = null, Label = null, Enabled = true } },
-    };
+    /// <summary>A new, empty, current-version config.</summary>
+    public static AccountsConfig Empty() => new() { Version = CurrentVersion };
 
     /// <summary>
-    /// Loads accounts.json, creating the one-account default file the first time it is called
-    /// against a path that does not exist yet. Never throws: any failure (missing directory
-    /// permissions aside, which Save itself already tolerates) degrades to an in-memory default
-    /// so the app always has a usable config, exactly like a cold start.
+    /// Loads accounts.json. Never throws. A missing file is not an error (first run); an
+    /// unreadable or invalid one is quarantined and replaced, in memory, by an empty config. The
+    /// file itself is not (re)written here -- the caller saves once it has reconciled the account
+    /// set against the slots.
     /// </summary>
-    public static AccountsConfig LoadOrCreateDefault(string? path = null)
+    public static AccountsConfigLoad Load(string? path = null)
     {
         path ??= DefaultPath;
         try
         {
-            if (!File.Exists(path))
-            {
-                AccountsConfig created = Default();
-                Save(created, path);
-                return created;
-            }
+            if (!File.Exists(path)) return new AccountsConfigLoad(Empty(), AccountsConfigStatus.Missing);
 
             string text = File.ReadAllText(path);
             AccountsConfig? parsed = JsonSerializer.Deserialize<AccountsConfig>(text, SerializerOptions);
+            // A version 1 file is migrated, not judged: an out-of-range icon cap there is clamped, so the
+            // accounts it lists are not quarantined away over a setting. (A version 2 file is ours.)
+            if (parsed is { Version: < CurrentVersion, MaxIcons: < 1 }) parsed.MaxIcons = 1;
             if (parsed is null || !IsValid(parsed))
                 throw new InvalidDataException("accounts.json failed validation");
-            return parsed;
+            return new AccountsConfigLoad(parsed, AccountsConfigStatus.Loaded);
         }
         catch (Exception ex)
         {
-            SafeLog.Warn($"accounts.json invalid ({ex.GetType().Name}: {ex.Message}); falling back to defaults");
+            SafeLog.Warn($"accounts.json invalid ({ex.GetType().Name}); the account set is rebuilt from the login slots");
             Quarantine(path);
-            AccountsConfig fallback = Default();
-            try { Save(fallback, path); }
-            catch (Exception saveEx) { SafeLog.Warn($"failed writing default accounts.json: {saveEx.Message}"); }
-            return fallback;
+            return new AccountsConfigLoad(Empty(), AccountsConfigStatus.Quarantined);
         }
     }
 
     /// <summary>
-    /// Structurally valid JSON can still be a semantically broken config (an empty accounts
-    /// array, a non-positive maxIcons) -- "partially-invalid" in the task's own words. Both are
-    /// treated exactly like a parse failure: fall back to defaults rather than run with a config
-    /// that can never produce a usable account list or icon cap.
+    /// Structurally valid JSON can still be a semantically broken config -- a non-positive maxIcons
+    /// can never produce a usable icon cap. An empty (or null) accounts list is VALID.
     /// </summary>
-    static bool IsValid(AccountsConfig config) =>
-        config.Accounts is { Count: > 0 } && config.MaxIcons >= 1;
+    static bool IsValid(AccountsConfig config) => config.MaxIcons >= 1;
 
     /// <summary>Write-then-rename so a crash mid-write can never leave a half-written, corrupt accounts.json behind.</summary>
     public static void Save(AccountsConfig config, string? path = null)

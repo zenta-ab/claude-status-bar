@@ -33,9 +33,12 @@ public static class PanelAnchor
         Screen screen = iconRect is { } ir ? Screen.FromRectangle(ir) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
 
         float scale = GetDpiScale(screen);
+        // The panel never grows past the work area (the combined panel with many accounts would):
+        // its content scrolls instead. Leaves the taskbar gap and a margin at both ends.
+        int maxPhysicalHeight = Math.Max(1, screen.WorkingArea.Height - TaskbarGap - 2 * ScreenMargin);
         var physicalSize = new Size(
             (int)Math.Round(logicalSize.Width * scale),
-            (int)Math.Round(logicalSize.Height * scale));
+            Math.Min(maxPhysicalHeight, (int)Math.Round(logicalSize.Height * scale)));
         Point location = Compute(iconRect, screen.Bounds, screen.WorkingArea, physicalSize);
         return (location, physicalSize, scale);
     }

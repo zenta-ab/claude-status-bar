@@ -296,7 +296,7 @@ public class PanelTextTests
         WindowSectionText section = PanelText.Compose(View(session, weekly), Now, Tz).Weekly;
 
         Assert.Contains("av veckan har gått", section.TidLabel);
-        Assert.Matches(@"^återställs om .+ · (sön|mån|tis|ons|tor|fre|lör) \d{2}:\d{2}$", section.ResetHeader);
+        Assert.Matches(@"^återställs om .+ · ((sön|mån|tis|ons|tor|fre|lör)|\d{1,2} [a-zå]{3}) \d{2}:\d{2}$", section.ResetHeader);
     }
 
     [Fact]

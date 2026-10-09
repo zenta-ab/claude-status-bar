@@ -111,13 +111,16 @@ public class NotLoggedInTests
     }
 
     [Fact]
-    public void Icon_NeedsLogin_IsTheSameGreyRingAsUnknown()
+    public void Icon_NeedsLogin_IsTheGreyRingWithAPadlock_UnknownKeepsItsExclamationMark()
     {
         QuotaIconParams needs = QuotaIconParams.Build(NeedsLoginView(), 16, taskbarDark: true, Now);
         QuotaIconParams unknown = QuotaIconParams.Build(UnknownView(), 16, taskbarDark: true, Now);
 
         Assert.True(needs.Outline);
-        Assert.Equal(unknown, needs);
+        Assert.True(needs.Padlock);
+        Assert.True(unknown.Outline);
+        Assert.False(unknown.Padlock);
+        Assert.NotEqual(unknown, needs);
     }
 
     [Fact]

@@ -199,7 +199,7 @@ public static class GaugeRenderer
     /// exactly the reason RenderExhaustedGlyph below also draws directly instead of through
     /// Downsample.
     /// </summary>
-    public static Bitmap RenderOutline(int px)
+    public static Bitmap RenderOutline(int px, bool padlock = false)
     {
         int s = px * SS;
         using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
@@ -212,7 +212,90 @@ public static class GaugeRenderer
             g.DrawEllipse(pen, ringRect);
         }
         Bitmap ring = Downsample(hi, px, exhausted: false, dimAlpha: 1f);
-        return DrawUnknownMark(ring, px);
+        return padlock ? DrawPadlock(ring, px) : DrawUnknownMark(ring, px);
+    }
+
+    /// <summary>
+    /// "Not logged in" (zero accounts, NeedsLogin): the same grey ring as Unknown, with a padlock in
+    /// the centre instead of the "!" -- the fix is a login, not a retry. Drawn directly at output
+    /// resolution with every dimension pixel-snapped, for the same reason as the "!" (supersampling
+    /// would blur a 6-pixel glyph): a solid body, and a shackle built from straight bars so it stays
+    /// a crisp arch at 16/20/24/32 px. The ring's inner diameter is about 0.65 of px; the whole
+    /// lock stays inside it. Consumes and disposes `ring`.
+    /// </summary>
+    static Bitmap DrawPadlock(Bitmap ring, int px)
+    {
+        try
+        {
+            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
+            try
+            {
+                using (var g = Graphics.FromImage(outBmp))
+                {
+                    g.SmoothingMode = SmoothingMode.None;
+                    g.Clear(Color.Transparent);
+                    g.DrawImage(ring, 0, 0, px, px);
+
+                    PadlockRects r = PadlockLayout(px);
+                    using var brush = new SolidBrush(Color.FromArgb(235, Palette.Dead));
+                    g.FillRectangle(brush, r.Body);
+                    foreach (Rectangle bar in r.Shackle) g.FillRectangle(brush, bar);
+
+                    if (r.Keyhole is { } hole)
+                    {
+                        // Punch the keyhole through the body so it stays legible on any taskbar colour.
+                        g.CompositingMode = CompositingMode.SourceCopy;
+                        using var clear = new SolidBrush(Color.Transparent);
+                        g.FillRectangle(clear, hole);
+                    }
+                }
+                return outBmp;
+            }
+            catch
+            {
+                outBmp.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            ring.Dispose();
+        }
+    }
+
+    /// <summary>The padlock's pixel rectangles for a tray size (internal: the contrast tests measure inside them).</summary>
+    internal readonly record struct PadlockRects(Rectangle Body, Rectangle[] Shackle, Rectangle? Keyhole);
+
+    internal static PadlockRects PadlockLayout(int px)
+    {
+        int stroke = Math.Max(1, (int)MathF.Round(px * 0.075f));
+        int bodyW = Math.Max(6, (int)MathF.Round(px * 0.38f));
+        if ((bodyW - px) % 2 != 0) bodyW++;                            // same parity as px, so the lock is exactly centred
+        int bodyH = Math.Max(4, (int)MathF.Round(px * 0.25f));
+        int shackleH = Math.Max(3, (int)MathF.Round(px * 0.19f));
+        int shackleW = Math.Max(2 * stroke + 2, bodyW - 2 * Math.Max(1, (int)MathF.Round(px * 0.06f)));
+        if ((shackleW - px) % 2 != 0) shackleW++;
+
+        int total = shackleH + bodyH;
+        int top = (int)MathF.Round((px - total) / 2f);
+        int left = (px - bodyW) / 2;
+        int shackleLeft = (px - shackleW) / 2;
+
+        var body = new Rectangle(left, top + shackleH, bodyW, bodyH);
+        var shackle = new[]
+        {
+            new Rectangle(shackleLeft, top, shackleW, stroke),                              // top bar
+            new Rectangle(shackleLeft, top, stroke, shackleH),                              // left leg
+            new Rectangle(shackleLeft + shackleW - stroke, top, stroke, shackleH),          // right leg
+        };
+
+        Rectangle? keyhole = null;
+        if (px >= 20)
+        {
+            int hole = px >= 28 ? 2 : 1;
+            keyhole = new Rectangle((px - hole) / 2, body.Y + (bodyH - hole) / 2, hole, hole * (bodyH >= 7 ? 2 : 1));
+        }
+        return new PadlockRects(body, shackle, keyhole);
     }
 
     /// <summary>
@@ -344,7 +427,7 @@ public static class GaugeRenderer
     public static Bitmap RenderQuota(QuotaIconParams p)
     {
         if (p.Loading) return RenderLoading(p.Px, p.LoadingFrame, LoadingFrames.FrameCount);
-        if (p.Outline) return RenderOutline(p.Px);
+        if (p.Outline) return RenderOutline(p.Px, p.Padlock);
 
         // 0.85 on a dark taskbar, per docs/forecast-and-states.md "Exhausted": with the real
         // critical red (not a lightened tint) and a >= 3:1 target (not >= 5:1 -- this state

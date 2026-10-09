@@ -63,6 +63,13 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
   Stale; failures still go Stale/Unknown.
 - **Loading state** (grey ring without "!", a travelling arc, "Hämtar kvoten…", 30 s) and the **panel header**
   (title = the account's label, subtitle = plan · organisation) once the Mac app has the slot model.
+- **Padlock** in the grey ring for zero accounts and NeedsLogin (Unknown keeps the "!").
+- **Day-aware times everywhere:** a clock time that is not today names its day ("i morgon", weekday,
+  date from 7 days, "igår"), and the other-accounts rows say which quota is spent ("veckan slut ·
+  öppnar tis 15:00"). Windows tests run in a real Stockholm zone across midnight and both DST changes.
+- **"Visa alla konton i panelen"** (`"panelMode": "all"` in accounts.json, absent = single): one card
+  per enabled account, ordered like the menu-bar items left to right, then accounts without an item;
+  the clicked one marked, hover highlight, a card opens the detailed panel with "← Alla konton".
 
 ## From the own-login round (Windows, `docs/multi-account.md`)
 - **Mac parity: the same design.** Slots the app owns (`accounts/<id>/config` + `slot.json`), the path

@@ -126,9 +126,11 @@ public sealed class IconSlot : IDisposable
     /// verdict -- the verdict is the part answering "will I hit a wall", the label is just which
     /// account, so it is the one that can lose characters.
     /// </summary>
-    internal static string BuildTooltip(QuotaView view, string? accountLabel)
+    /// <param name="now">Test seam (default: the real clock).</param>
+    /// <param name="tz">Test seam (default: local time).</param>
+    internal static string BuildTooltip(QuotaView view, string? accountLabel, DateTimeOffset? now = null, TimeZoneInfo? tz = null)
     {
-        string verdict = ComposeTooltip(view);
+        string verdict = ComposeTooltip(view, now ?? DateTimeOffset.UtcNow, tz ?? TimeZoneInfo.Local);
         string truncatedVerdict = verdict.Length > TooltipMaxLength ? verdict[..TooltipMaxLength] : verdict;
         if (string.IsNullOrEmpty(accountLabel)) return truncatedVerdict;
 
@@ -143,9 +145,8 @@ public sealed class IconSlot : IDisposable
         return $"{truncatedLabel}{separator}{verdict}";
     }
 
-    static string ComposeTooltip(QuotaView view)
+    static string ComposeTooltip(QuotaView view, DateTimeOffset now, TimeZoneInfo tz)
     {
-        TimeZoneInfo tz = TimeZoneInfo.Local;
 
         if (view.Loading) return LoginText.LoadingTooltip;
 
@@ -155,21 +156,23 @@ public sealed class IconSlot : IDisposable
         if (view.Freshness == Freshness.Unknown) return "Kan inte läsa kvoten";
 
         if (view.BlockedUntil is { } blockedUntil)
-            return $"Kvoten slut · öppnar {TimeText.ClockOnly(blockedUntil, tz)}";
+            return view.Weekly.State == QuotaState.Spent
+                ? $"Veckokvoten slut · öppnar {TimeText.ClockWithDay(view.Weekly.ResetsAt ?? blockedUntil, now, tz)}"
+                : $"Kvoten slut · öppnar {TimeText.ClockWithDay(view.Session.ResetsAt ?? blockedUntil, now, tz)}";
 
         WindowView driver = (int)view.Session.State >= (int)view.Weekly.State ? view.Session : view.Weekly;
 
         return driver.State switch
         {
             QuotaState.DryEarly when driver.DepletesAt is { } dep =>
-                $"Slut kl {TimeText.ClockOnly(dep, tz)} — {TimeText.Duration(driver.Shortfall)} före reset",
+                $"Slut {TimeText.ClockWithDay(dep, now, tz)} — {TimeText.Duration(driver.Shortfall)} före reset",
             QuotaState.DryEarly => "Kvoten nästan slut",
             QuotaState.Tight when driver.ResetsAt is { } r =>
-                $"Tajt · ~{driver.ProjectedPctAtReset ?? driver.UsedPct ?? 0.0:F0}% vid reset {TimeText.ClockOnly(r, tz)}",
-            QuotaState.Measuring when driver.ResetsAt is { } r => $"Mäter takt · reset {TimeText.ClockOnly(r, tz)}",
+                $"Tajt · ~{driver.ProjectedPctAtReset ?? driver.UsedPct ?? 0.0:F0}% vid reset {TimeText.ClockWithDay(r, now, tz)}",
+            QuotaState.Measuring when driver.ResetsAt is { } r => $"Mäter takt · reset {TimeText.ClockWithDay(r, now, tz)}",
             QuotaState.Measuring => "Mäter takt…",
             _ when driver.ResetsAt is { } r =>
-                $"Räcker · ~{driver.ProjectedPctAtReset ?? driver.UsedPct ?? 0.0:F0}% vid reset {TimeText.ClockOnly(r, tz)}",
+                $"Räcker · ~{driver.ProjectedPctAtReset ?? driver.UsedPct ?? 0.0:F0}% vid reset {TimeText.ClockWithDay(r, now, tz)}",
             _ => "Hämtar…",
         };
     }

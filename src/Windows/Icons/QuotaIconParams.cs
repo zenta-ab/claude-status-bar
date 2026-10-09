@@ -28,7 +28,8 @@ public readonly record struct QuotaIconParams(
     int Px,
     bool TaskbarDark,
     bool Loading = false,
-    int LoadingFrame = 0)
+    int LoadingFrame = 0,
+    bool Padlock = false)
 {
     public static QuotaIconParams Build(QuotaView view, int px, bool taskbarDark, DateTimeOffset utcNow)
     {
@@ -36,6 +37,10 @@ public readonly record struct QuotaIconParams(
         // params, so a new frame is a change and IconSlot re-renders -- from LoadingFrames' cache.
         if (view.Loading)
             return new QuotaIconParams(Outline: false, false, 0, 0, 0, 0, 0, 0, false, px, taskbarDark, Loading: true, LoadingFrame: LoadingFrames.FrameAt(utcNow));
+
+        // Not logged in (the zero-accounts icon, NeedsLogin): the same ring, a padlock instead of the "!".
+        if (view.NeedsLogin)
+            return new QuotaIconParams(Outline: true, false, 0, 0, 0, 0, 0, 0, false, px, taskbarDark, Padlock: true);
 
         if (view.Freshness == Freshness.Unknown)
             return new QuotaIconParams(Outline: true, false, 0, 0, 0, 0, 0, 0, false, px, taskbarDark);

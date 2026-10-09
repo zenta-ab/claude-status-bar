@@ -282,9 +282,34 @@ are left out, and so is any part that just repeats the title (an account whose a
 "Max" shows no second "Max"); with nothing left there is no subtitle line. The DEMO badge and the freshness
 line are unchanged.
 
+## All accounts in one panel
+
+The tray menu toggle **"Visa alla konton i panelen"** (persisted as an optional `"panelMode": "all"` in
+accounts.json; absent = `single`, so nothing changes for an existing user until it is used) makes a click on
+ANY icon open one panel with a compact card per enabled account — accounts without an icon too (beyond
+`maxIcons`, or hidden by "Visa bara den som är närmast taket"). A card has the label, the "plan ·
+organisation" line, the short verdict in its colour (the status box's own first line, so the wording is the
+same), two thin bars (session, week) with the percent and the day-aware reset time, and a one-line note only
+when the account is not Live ("Hämtar…", "Inaktuell — …", "Senast avläst …", "Inte inloggad" with a "Logga in
+igen" button). Order (`AccountCards.Order`): the accounts that have an icon, in the order their icons appear
+on screen left to right (the icon rectangles `PanelAnchor` reads), then the accounts without an icon in config
+order; if any icon's rectangle cannot be read the icon group falls back to config order as a whole. The card of
+the clicked icon has an accent edge, the card under the mouse is highlighted, and clicking a card opens that
+account's detailed panel, which has a "← Alla konton" link back. The panel stays non-activating and never taller
+than the work area (`PanelAnchor` caps it; the cards scroll with the mouse wheel when they do not fit).
+
+## Times always carry their day
+
+A clock time that is not today says which day (`TimeText`): "i morgon" tomorrow, the weekday for 2–6 days
+ahead, the date ("14 okt") from 7 days (a weekday alone would be today's own), "igår" yesterday — by calendar
+day in local time, so midnight and daylight-saving changes are right (tested across both Stockholm changes). This
+covers the status boxes, section headers, tooltips, the footer's last-read time and the other-accounts rows. A row
+for a spent quota names the quota and the day: "veckan slut · öppnar tis 15:00", "sessionen slut · öppnar 17:19",
+"veckan slut · öppnar i morgon 07:00"; if the weekly quota is spent that is what the row reports.
+
 ## Zero accounts
 
-With no enabled account the app shows exactly one grey icon, tooltip "Logga in för att visa kvoten", the
+With no enabled account the app shows exactly one grey icon with a padlock in the ring (the same glyph as an account that needs a login; the "!" stays for a real read failure), tooltip "Logga in för att visa kvoten", the
 full menu (so "Lägg till konto…" and Exit are always reachable), and a left click that starts the add
 flow. This is also what a fresh install looks like.
 

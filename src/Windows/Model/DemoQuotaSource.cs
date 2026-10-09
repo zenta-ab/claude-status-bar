@@ -74,6 +74,7 @@ public static class DemoQuotaSource
             new("stale", View(safeSession, safeWeekly, Freshness.Stale, utcNow, TimeSpan.FromSeconds(150), utcNow.AddMinutes(-23))),
             new("unknown", UnknownView(utcNow)),
             new("loading", LoadingView(utcNow)),
+            new("not_logged_in", NotLoggedInView()),
         };
         return list;
     }
@@ -115,6 +116,9 @@ public static class DemoQuotaSource
             IconSeverity: QuotaState.Measuring,
             BlockedUntil: null,
             Loading: true);
+
+    /// <summary>Zero accounts / NeedsLogin: the grey ring with a padlock.</summary>
+    static QuotaView NotLoggedInView() => QuotaView.Initial with { NeedsLogin = true };
 
     static QuotaView UnknownView(DateTimeOffset utcNow) =>
         new(WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),

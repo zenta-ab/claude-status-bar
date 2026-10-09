@@ -1,3 +1,4 @@
+using ClaudeStatusBar.Model;
 using System.Globalization;
 
 namespace ClaudeStatusBar.Ui;
@@ -31,19 +32,53 @@ public static class TimeText
         return $"{(int)ts.TotalDays} d {ts.Hours} h";
     }
 
-    /// <summary>"kl 12:36" today; "i morgon kl 10:44" tomorrow; "sön kl 10:44" later. Calendar-date comparison in tz, not elapsed time, so it handles crossing midnight correctly.</summary>
-    public static string PointInTime(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz)
+    /// <summary>
+    /// "kl 12:36" today; "i morgon kl 10:44" tomorrow; "sön kl 10:44" up to six days ahead; "12 okt kl
+    /// 10:44" beyond that (a weekday alone would be ambiguous from a week away: it names today's own
+    /// weekday); "igår kl 22:10" yesterday. Calendar-date comparison in tz, not elapsed time, so it
+    /// handles crossing midnight (and DST changes) correctly. A time that is not today always carries its day.
+    /// </summary>
+    public static string PointInTime(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz) =>
+        $"{DayPrefix(t, now, tz)}kl {ClockOnly(t, tz)}";
+
+    /// <summary>"" today, else the day followed by a space: "i morgon ", "tis ", "12 okt ", "igår ".</summary>
+    static string DayPrefix(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz)
     {
-        DateTimeOffset local = TimeZoneInfo.ConvertTime(t, tz);
-        int dayDiff = DayDiff(t, now, tz);
-        string clock = ClockOnly(t, tz);
-        return dayDiff switch
+        string day = DayWord(t, now, tz);
+        return day.Length == 0 ? "" : day + " ";
+    }
+
+    /// <summary>The day a time falls on, relative to now's date in tz: "" today, "i morgon", "igår", the weekday for 2-6 days ahead, otherwise the date ("12 okt").</summary>
+    public static string DayWord(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz)
+    {
+        int diff = DayDiff(t, now, tz);
+        return diff switch
         {
-            0 => $"kl {clock}",
-            1 => $"i morgon kl {clock}",
-            _ => $"{WeekdayAbbrev[(int)local.DayOfWeek]} kl {clock}",
+            0 => "",
+            1 => "i morgon",
+            -1 => "igår",
+            >= 2 and <= 6 => Weekday(t, tz),
+            _ => DateLabel(t, tz),
         };
     }
+
+    /// <summary>"12 okt".</summary>
+    public static string DateLabel(DateTimeOffset t, TimeZoneInfo tz)
+    {
+        DateTimeOffset local = TimeZoneInfo.ConvertTime(t, tz);
+        return $"{local.Day} {SwedishText.MonthAbbrev[local.Month]}";
+    }
+
+    /// <summary>The weekday ("tis") for today and up to six days ahead; the date ("12 okt") otherwise -- for the weekly window, which always names its day.</summary>
+    public static string WeekdayOrDate(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz)
+    {
+        int diff = DayDiff(t, now, tz);
+        return diff is >= 0 and <= 6 ? Weekday(t, tz) : DateLabel(t, tz);
+    }
+
+    /// <summary>A bare clock with its day when it is not today: "15:00", "i morgon 07:00", "tis 15:00", "12 okt 15:00" -- the compact form for rows and tooltips.</summary>
+    public static string ClockWithDay(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz) =>
+        $"{DayPrefix(t, now, tz)}{ClockOnly(t, tz)}";
 
     /// <summary>Calendar-date difference between t and now, in tz -- 0 today, 1 tomorrow, etc. (negative if t is in the past relative to now's date).</summary>
     public static int DayDiff(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz)
@@ -66,6 +101,10 @@ public static class TimeText
     public static string ClockWithSeconds(DateTimeOffset t, TimeZoneInfo tz) =>
         TimeZoneInfo.ConvertTime(t, tz).ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
+    /// <summary>"kl 12:16:54" today, "igår kl 22:10:03" / "12 okt kl ..." otherwise: the footer's last-read time never hides which day it was.</summary>
+    public static string ClockWithSecondsAndDay(DateTimeOffset t, DateTimeOffset now, TimeZoneInfo tz) =>
+        $"{DayPrefix(t, now, tz)}kl {ClockWithSeconds(t, tz)}";
+
     /// <summary>
     /// "A reset always states both when and how long until": "kl 13:20 (om 37 min)" /
     /// "fre kl 07:00 (om 6 d 18 h)". forceWeekday is set for the weekly window,
@@ -79,7 +118,7 @@ public static class TimeText
     {
         TimeSpan span = resetsAt - now;
         if (span.TotalSeconds <= 0) return "nu";
-        string clock = forceWeekday ? $"{Weekday(resetsAt, tz)} kl {ClockOnly(resetsAt, tz)}" : PointInTime(resetsAt, now, tz);
+        string clock = forceWeekday ? $"{WeekdayOrDate(resetsAt, now, tz)} kl {ClockOnly(resetsAt, tz)}" : PointInTime(resetsAt, now, tz);
         return $"{clock} (om {Duration(span)})";
     }
 
@@ -104,7 +143,7 @@ public static class TimeText
     {
         TimeSpan span = dep - now;
         if (span.TotalSeconds <= 0) return "nu";
-        string clock = IsToday(dep, now, tz) ? $"kl {ClockOnly(dep, tz)}" : $"{Weekday(dep, tz)} kl {ClockOnly(dep, tz)}";
+        string clock = IsToday(dep, now, tz) ? $"kl {ClockOnly(dep, tz)}" : $"{WeekdayOrDate(dep, now, tz)} kl {ClockOnly(dep, tz)}";
         return $"{clock} (om {Duration(span)})";
     }
 }

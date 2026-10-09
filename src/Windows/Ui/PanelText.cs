@@ -66,18 +66,27 @@ public static class PanelText
         if (view.Freshness == Freshness.Unknown)
             return new OtherAccountRow(accountIndex, label, "går inte att läsa", PanelColorRole.Unknown);
 
+        // A spent quota says WHICH quota and WHEN it reopens, with the day when that is not today: a bare
+        // "öppnar 15:00" cannot tell a session that reopens this afternoon from a week that reopens in
+        // five days. If the weekly quota is spent that is what the row reports -- the session is
+        // irrelevant until the week reopens.
         if (view.BlockedUntil is { } blockedUntil)
-            return new OtherAccountRow(accountIndex, label, $"slut · öppnar {TimeText.ClockOnly(blockedUntil, tz)}", PanelColorRole.Dead);
+        {
+            if (view.Weekly.State == QuotaState.Spent)
+                return new OtherAccountRow(accountIndex, label, $"veckan slut · öppnar {TimeText.ClockWithDay(view.Weekly.ResetsAt ?? blockedUntil, now, tz)}", PanelColorRole.Dead);
+            return new OtherAccountRow(accountIndex, label, $"sessionen slut · öppnar {TimeText.ClockWithDay(view.Session.ResetsAt ?? blockedUntil, now, tz)}", PanelColorRole.Dead);
+        }
 
         WindowView driver = (int)view.Session.State >= (int)view.Weekly.State ? view.Session : view.Weekly;
+        string which = ReferenceEquals(driver, view.Weekly) ? "veckan" : "sessionen";
         (string line, PanelColorRole role) = driver.State switch
         {
             QuotaState.Measuring => ("mäter takt", PanelColorRole.Measuring),
             QuotaState.Tight => ("tajt — räcker precis", PanelColorRole.Tight),
-            QuotaState.DryEarly when driver.DepletesAt is { } dep => ($"slut {TimeText.ClockOnly(dep, tz)}", PanelColorRole.Crit),
+            QuotaState.DryEarly when driver.DepletesAt is { } dep => ($"{which} tar slut {TimeText.ClockWithDay(dep, now, tz)}", PanelColorRole.Crit),
             QuotaState.DryEarly => ("nästan slut", PanelColorRole.Crit),
-            QuotaState.Spent when driver.ResetsAt is { } r => ($"slut · öppnar {TimeText.ClockOnly(r, tz)}", PanelColorRole.Dead),
-            QuotaState.Spent => ("slut", PanelColorRole.Dead),
+            QuotaState.Spent when driver.ResetsAt is { } r => ($"{which} slut · öppnar {TimeText.ClockWithDay(r, now, tz)}", PanelColorRole.Dead),
+            QuotaState.Spent => ($"{which} slut", PanelColorRole.Dead),
             _ => ("räcker till reset", PanelColorRole.Safe),
         };
 
@@ -213,7 +222,7 @@ public static class PanelText
         string line1 = $"⚠ {kvotWordCap} tar slut {depletionText}";
 
         string resetClock = driver.ResetsAt is { } r
-            ? (driverIsWeekly ? $"{TimeText.Weekday(r, tz)} kl {TimeText.ClockOnly(r, tz)}" : $"kl {TimeText.ClockOnly(r, tz)}")
+            ? (driverIsWeekly ? $"{TimeText.WeekdayOrDate(r, now, tz)} kl {TimeText.ClockOnly(r, tz)}" : TimeText.PointInTime(r, now, tz))
             : "okänt";
         string line2 = $"{TimeText.Duration(driver.Shortfall)} före reset {resetClock}, om du fortsätter i samma takt";
 
@@ -295,7 +304,7 @@ public static class PanelText
         else
         {
             resetHeader = w.ResetsAt is { } r
-                ? $"återställs {TimeText.CountdownFragment(r - now)} · {(isWeekly ? $"{TimeText.Weekday(r, tz)} {TimeText.ClockOnly(r, tz)}" : $"kl {TimeText.ClockOnly(r, tz)}")}"
+                ? $"återställs {TimeText.CountdownFragment(r - now)} · {(isWeekly ? $"{TimeText.WeekdayOrDate(r, now, tz)} {TimeText.ClockOnly(r, tz)}" : TimeText.PointInTime(r, now, tz))}"
                 : "Väntar på data…";
 
             string windowLenText = isWeekly ? "veckan" : TimeText.Duration(TimeSpan.FromMinutes(w.WindowMinutes));
@@ -337,7 +346,7 @@ public static class PanelText
                     ? "nu"
                     : (TimeText.IsToday(d, now, tz)
                         ? $"kl {TimeText.ClockOnly(d, tz)} (om {TimeText.Duration(d - now)})"
-                        : $"{TimeText.Weekday(d, tz)} {TimeText.ClockOnly(d, tz)} (om {TimeText.Duration(d - now)})")
+                        : $"{TimeText.WeekdayOrDate(d, now, tz)} {TimeText.ClockOnly(d, tz)} (om {TimeText.Duration(d - now)})")
                 : "snart";
             return $"{pct} använt → slut {dep}";
         }

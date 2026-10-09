@@ -96,6 +96,30 @@ public sealed class PanelForm : Form
     QuotaView _view = QuotaView.Initial;
     bool _demo;
     float _lastHeight = -1f;
+
+    // ---- combined mode (docs/multi-account.md "All accounts in one panel") ----
+    bool _combined;
+    IReadOnlyList<AccountCard> _cards = Array.Empty<AccountCard>();
+    string? _markedSlot;
+    int _hoverCard = -1;
+    float _scrollY;
+    bool _backLink; // detailed panel opened from the combined one: shows "<- Alla konton"
+    const float CardGap = 8f;
+    const float CombinedHeaderHeight = 40f;
+    const string AllAccountsTitle = "Alla konton";
+    const string BackLinkText = "← Alla konton";
+    static readonly Color CardBackground = Color.FromArgb(255, 0x2A, 0x2A, 0x2A);
+    static readonly Color CardHover = Color.FromArgb(255, 0x36, 0x36, 0x36);
+    static readonly Color CardAccent = Color.FromArgb(255, 0x5B, 0x9B, 0xFF);
+
+    /// <summary>A card was clicked: open that account's detailed panel.</summary>
+    public event Action<string>? CardClicked;
+
+    /// <summary>The "Logga in igen" button on a card was clicked.</summary>
+    public event Action<string>? CardReloginClicked;
+
+    /// <summary>The "<- Alla konton" link of a detailed panel was clicked.</summary>
+    public event Action? BackToAllRequested;
     string? _accountLabel;
     string? _accountSubtitle;
 
@@ -225,10 +249,12 @@ public sealed class PanelForm : Form
     /// renders dimmed and ignores clicks while this is true, so it can never start a second
     /// concurrent poll for the same account.
     /// </param>
-    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null, string? accountSubtitle = null)
+    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null, string? accountSubtitle = null, bool showBackLink = false)
     {
         try
         {
+            _combined = false;
+            _backLink = showBackLink;
             _view = view;
             _demo = demo;
             _accountLabel = accountLabel;
@@ -237,12 +263,7 @@ public sealed class PanelForm : Form
             _refreshInFlight = refreshInFlight;
             _adviceLine = adviceLine;
 
-            if (Visible)
-            {
-                float height = BuildLayout(DateTimeOffset.UtcNow).TotalHeight;
-                if (Math.Abs(height - _lastHeight) > 0.5f) Reanchor();
-                else Invalidate();
-            }
+            RefitIfVisible();
         }
         catch (Exception ex)
         {
@@ -252,6 +273,47 @@ public sealed class PanelForm : Form
             SafeLog.Warn($"PanelForm.UpdateView threw: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// The combined panel: one compact card per account, in the order given. `markedSlot` is the card
+    /// of the icon that was clicked (accent edge). Same 1 Hz cadence and exception boundary as UpdateView.
+    /// </summary>
+    public void UpdateCombined(IReadOnlyList<AccountCard> cards, string? markedSlot, bool demo)
+    {
+        try
+        {
+            _combined = true;
+            _backLink = false;
+            _demo = demo;
+            _cards = cards;
+            _markedSlot = markedSlot;
+            if (_hoverCard >= cards.Count) _hoverCard = -1;
+            RefitIfVisible();
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"PanelForm.UpdateCombined threw: {ex.Message}");
+        }
+    }
+
+    public bool IsCombined => _combined;
+
+    /// <summary>Index of the card drawn with the accent edge (the clicked icon's), or -1.</summary>
+    public int MarkedCardIndex => _cards.ToList().FindIndex(c => c.Slot == _markedSlot);
+
+    /// <summary>Card rectangles in content coordinates (tests: ordering and that every account has one).</summary>
+    internal IReadOnlyList<RectangleF> CardRectsForTest => BuildCombinedLayout().CardRects;
+
+    void RefitIfVisible()
+    {
+        if (!Visible) return;
+        float height = MeasureTotalHeight(DateTimeOffset.UtcNow);
+        if (Math.Abs(height - _lastHeight) > 0.5f) Reanchor();
+        else Invalidate();
+    }
+
+    /// <summary>The content height of whichever view is showing (before the work-area cap).</summary>
+    float MeasureTotalHeight(DateTimeOffset now) => _combined ? BuildCombinedLayout().TotalHeight : BuildLayout(now).TotalHeight;
 
     public void Toggle()
     {
@@ -281,7 +343,28 @@ public sealed class PanelForm : Form
             if (e.Button != MouseButtons.Left || _scale <= 0f) return;
             var logicalPoint = new PointF(e.X / _scale, e.Y / _scale);
 
+            if (_combined)
+            {
+                CombinedLayout combinedLayout = BuildCombinedLayout();
+                var contentPoint = new PointF(logicalPoint.X, logicalPoint.Y + _scrollY);
+                if (logicalPoint.Y < CombinedHeaderHeight) return; // the fixed header: nothing to click
+                for (int i = 0; i < combinedLayout.CardRects.Count; i++)
+                {
+                    if (!combinedLayout.CardRects[i].Contains(contentPoint)) continue;
+                    if (_cards[i].OfferRelogin && combinedLayout.ReloginRects[i].Contains(contentPoint)) CardReloginClicked?.Invoke(_cards[i].Slot);
+                    else CardClicked?.Invoke(_cards[i].Slot);
+                    return;
+                }
+                return;
+            }
+
             PanelLayout layout = BuildLayout(DateTimeOffset.UtcNow);
+
+            if (_backLink && layout.BackLinkRect.Contains(logicalPoint))
+            {
+                BackToAllRequested?.Invoke();
+                return;
+            }
 
             // Checked first regardless of _otherAccounts: the reload button lives in the header,
             // well above the other-accounts rows, so there is no coordinate overlap to arbitrate.
@@ -322,13 +405,48 @@ public sealed class PanelForm : Form
         }
     }
 
+    /// <summary>The card under the mouse is highlighted.</summary>
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (!_combined || _scale <= 0f) return;
+        try
+        {
+            CombinedLayout layout = BuildCombinedLayout();
+            var p = new PointF(e.X / _scale, e.Y / _scale + _scrollY);
+            int hover = e.Y / _scale < CombinedHeaderHeight ? -1 : layout.CardRects.ToList().FindIndex(r => r.Contains(p));
+            if (hover != _hoverCard) { _hoverCard = hover; Invalidate(); }
+        }
+        catch (Exception ex) { SafeLog.Warn($"PanelForm.OnMouseMove threw: {ex.Message}"); }
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        if (_hoverCard != -1) { _hoverCard = -1; Invalidate(); }
+    }
+
+    /// <summary>Scrolls the combined panel when its cards do not fit the work area.</summary>
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (!_combined || _scale <= 0f) return;
+        _scrollY = ClampScroll(_scrollY - e.Delta / 120f * 40f);
+        Invalidate();
+    }
+
+    float ClampScroll(float value)
+    {
+        float max = Math.Max(0f, BuildCombinedLayout().TotalHeight - Height / _scale);
+        return Math.Clamp(value, 0f, max);
+    }
+
     public void ShowPanel()
     {
         if (Visible) return;
 
-        PanelLayout layout = BuildLayout(DateTimeOffset.UtcNow);
-        _lastHeight = layout.TotalHeight;
-        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(layout.TotalHeight)));
+        _lastHeight = MeasureTotalHeight(DateTimeOffset.UtcNow);
+        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(_lastHeight)));
         _scale = scale;
         Size = size;
         Location = location;
@@ -357,11 +475,11 @@ public sealed class PanelForm : Form
     /// <summary>Bottom edge stays 12px above the taskbar even as content height changes (wrapped status-box lines, secondary line, Stale note appearing/disappearing).</summary>
     void Reanchor()
     {
-        PanelLayout layout = BuildLayout(DateTimeOffset.UtcNow);
-        _lastHeight = layout.TotalHeight;
-        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(layout.TotalHeight)));
+        _lastHeight = MeasureTotalHeight(DateTimeOffset.UtcNow);
+        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(_lastHeight)));
         _scale = scale;
         Bounds = new Rectangle(location, size);
+        if (_combined) _scrollY = ClampScroll(_scrollY);
         Invalidate();
     }
 
@@ -370,17 +488,21 @@ public sealed class PanelForm : Form
     readonly record struct PanelLayout(
         PanelTextResult Text, float SubtitleY, float FreshnessY, float StatusBoxY, float StatusBoxHeight,
         float SessionY, float SessionHeight, float WeeklyY, float WeeklyHeight,
-        float RuleY, float FooterY, float AdviceY, float AdviceHeight, RectangleF AdviceHitRect,
+        float RuleY, float FooterY, float AdviceY, float AdviceHeight, RectangleF AdviceHitRect, RectangleF BackLinkRect,
         float OtherAccountsRuleY, float OtherAccountsY,
         IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, RectangleF LoginButtonRect, float TotalHeight);
 
     float ContentWidth => LogicalWidth - 2 * SidePadding;
 
+    /// <summary>The "<- Alla konton" row above the title in a detailed panel opened from the combined one.</summary>
+    float HeaderOffset => _backLink ? 18f : 0f;
+
     PanelLayout BuildLayout(DateTimeOffset now)
     {
         PanelTextResult text = PanelText.Compose(_view, now, TimeZoneInfo.Local);
 
-        float y = 12f;
+        float y = 12f + HeaderOffset;
+        var backLinkRect = _backLink ? new RectangleF(SidePadding, 10f, 110f, 16f) : RectangleF.Empty;
         // Title: the account's label (its own name or the automatic one). It may shrink or wrap, so it
         // is measured like everything else rather than assumed to be one 20px line.
         y += Math.Max(20f, DrawFitText(_measureG, TitleText, _fontTitle, TextPrimary, 0, 0, TitleWidth, draw: false));
@@ -462,7 +584,7 @@ public sealed class PanelForm : Form
         }
 
         return new PanelLayout(text, subtitleY, freshnessY, statusBoxY, statusBoxHeight, sessionY, sessionHeight,
-            weeklyY, weeklyHeight, ruleY, footerY, adviceY, adviceHeight, adviceHitRect,
+            weeklyY, weeklyHeight, ruleY, footerY, adviceY, adviceHeight, adviceHitRect, backLinkRect,
             otherAccountsRuleY, otherAccountsY, rowRects, refreshHitRect, loginButtonRect, y);
     }
 
@@ -512,6 +634,11 @@ public sealed class PanelForm : Form
             g.ScaleTransform(_scale, _scale); // everything from here on is in logical (96-DPI) px
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (_combined)
+            {
+                DrawCombined(g);
+                return;
+            }
             PanelLayout layout = BuildLayout(now);
 
             DrawHeader(g, layout);
@@ -540,14 +667,141 @@ public sealed class PanelForm : Form
         }
     }
 
-    void DrawHeader(Graphics g, PanelLayout layout)
-    {
-        DrawFitText(g, TitleText, _fontTitle, TextPrimary, SidePadding, 12f, TitleWidth);
+    // ---- the combined panel ----
 
+    readonly record struct CombinedLayout(IReadOnlyList<RectangleF> CardRects, IReadOnlyList<RectangleF> ReloginRects, IReadOnlyList<float> CardHeights, float TotalHeight);
+
+    const float CardPad = 10f;
+    const float CardBarCaptionWidth = 46f;
+    const float CardBarWidth = 76f;
+    const float CardRowHeight = 16f;
+
+    float CardInnerWidth => ContentWidth - 2 * CardPad;
+
+    CombinedLayout BuildCombinedLayout()
+    {
+        var rects = new List<RectangleF>();
+        var relogin = new List<RectangleF>();
+        var heights = new List<float>();
+        float y = CombinedHeaderHeight;
+        foreach (AccountCard card in _cards)
+        {
+            float h = CardPad + CardRowHeight + (card.Subtitle is null ? 0f : 14f) + 4f + CardRowHeight + 4f + 2 * CardRowHeight
+                + (card.Note is null ? 0f : 4f + 18f) + CardPad;
+            var rect = new RectangleF(SidePadding, y, ContentWidth, h);
+            rects.Add(rect);
+            relogin.Add(card.OfferRelogin
+                ? new RectangleF(rect.Right - CardPad - 96f, rect.Bottom - CardPad - 18f, 96f, 18f)
+                : RectangleF.Empty);
+            heights.Add(h);
+            y += h + CardGap;
+        }
+        return new CombinedLayout(rects, relogin, heights, y + 4f);
+    }
+
+    void DrawCombined(Graphics g)
+    {
+        CombinedLayout layout = BuildCombinedLayout();
+
+        var state = g.Save();
+        g.TranslateTransform(0, -_scrollY);
+        for (int i = 0; i < _cards.Count; i++) DrawCard(g, _cards[i], layout.CardRects[i], layout.ReloginRects[i], hover: i == _hoverCard, marked: _cards[i].Slot == _markedSlot);
+        g.Restore(state);
+
+        // The fixed header, painted over whatever scrolled beneath it.
+        using (var bg = new SolidBrush(PanelBackground)) g.FillRectangle(bg, 1, 1, LogicalWidth - 2, CombinedHeaderHeight - 1);
+        DrawFitText(g, AllAccountsTitle, _fontTitle, TextPrimary, SidePadding, 12f, TitleWidth);
         if (_demo)
         {
             const float badgeW = 46f, badgeH = 16f;
             var badgeRect = new RectangleF(LogicalWidth - SidePadding - badgeW, 13f, badgeW, badgeH);
+            using (var path = RoundedRect(badgeRect, 4f))
+            using (var bgb = new SolidBrush(DemoBadgeBg)) g.FillPath(bgb, path);
+            using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            using var textBrush = new SolidBrush(Color.Black);
+            g.DrawString("DEMO", _fontDemoBadge, textBrush, badgeRect, fmt);
+        }
+    }
+
+    void DrawCard(Graphics g, AccountCard card, RectangleF rect, RectangleF reloginRect, bool hover, bool marked)
+    {
+        using (var path = RoundedRect(rect, 6f))
+        using (var bg = new SolidBrush(hover ? CardHover : CardBackground))
+            g.FillPath(bg, path);
+        if (marked)
+        {
+            using var accent = new SolidBrush(CardAccent);
+            g.FillRectangle(accent, rect.X, rect.Y + 4f, 3f, rect.Height - 8f);
+        }
+
+        float x = rect.X + CardPad + 2f;
+        float w = rect.Width - 2 * CardPad - 2f;
+        float y = rect.Y + CardPad;
+
+        DrawFitText(g, card.Title, _fontSectionTitle, TextPrimary, x, y, w);
+        y += CardRowHeight;
+        if (card.Subtitle is { } sub)
+        {
+            DrawFitText(g, sub, _fontResetHeader, TextSecondary, x, y, w);
+            y += 14f;
+        }
+        y += 4f;
+
+        DrawFitText(g, card.Verdict, _fontStatusLine2, RoleColor(card.VerdictRole), x, y, w);
+        y += CardRowHeight + 4f;
+
+        DrawCardBar(g, card.Session, x, y, w);
+        y += CardRowHeight;
+        DrawCardBar(g, card.Week, x, y, w);
+        y += CardRowHeight;
+
+        if (card.Note is { } note)
+        {
+            y += 4f;
+            float noteWidth = card.OfferRelogin ? w - 104f : w;
+            DrawFitText(g, note, _fontStatusLine3, RoleColor(card.NoteRole), x, y + 2f, noteWidth);
+            if (card.OfferRelogin)
+            {
+                using var path = RoundedRect(reloginRect, 5f);
+                using var bg = new SolidBrush(Color.FromArgb(46, 255, 255, 255));
+                using var edge = new Pen(Color.FromArgb(90, 255, 255, 255), 1f);
+                g.FillPath(bg, path);
+                g.DrawPath(edge, path);
+                using var tb = new SolidBrush(TextPrimary);
+                using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                g.DrawString(LoginText.ReloginButton, _fontStatusLine3, tb, reloginRect, fmt);
+            }
+        }
+    }
+
+    void DrawCardBar(Graphics g, CardBar bar, float x, float y, float w)
+    {
+        using (var capBrush = new SolidBrush(TextTertiary))
+            g.DrawString(bar.Caption, _fontBarCaption, capBrush, x, y + 2f);
+
+        var track = new RectangleF(x + CardBarCaptionWidth, y + 5f, CardBarWidth, 5f);
+        FillBarTrack(g, track);
+        if (bar.Fraction > 0)
+        {
+            using var fill = new SolidBrush(RoleColor(bar.Role));
+            g.FillRectangle(fill, track.X, track.Y, (float)bar.Fraction * track.Width, track.Height);
+        }
+
+        float textX = track.Right + 8f;
+        DrawFitText(g, bar.Text, _fontBarLabel, TextSecondary, textX, y, x + w - textX);
+    }
+
+    void DrawHeader(Graphics g, PanelLayout layout)
+    {
+        if (_backLink)
+            DrawFitText(g, BackLinkText, _fontFreshness, TextSecondary, SidePadding, 10f, 110f);
+
+        DrawFitText(g, TitleText, _fontTitle, TextPrimary, SidePadding, 12f + HeaderOffset, TitleWidth);
+
+        if (_demo)
+        {
+            const float badgeW = 46f, badgeH = 16f;
+            var badgeRect = new RectangleF(LogicalWidth - SidePadding - badgeW, 13f + HeaderOffset, badgeW, badgeH);
             using (var path = RoundedRect(badgeRect, 4f))
             using (var bg = new SolidBrush(DemoBadgeBg))
                 g.FillPath(bg, path);
@@ -887,7 +1141,7 @@ public sealed class PanelForm : Form
 
     static string BuildFooter(QuotaView view) =>
         view.LastSuccessAt is { } lastPoll
-            ? $"Senast avläst kl {TimeText.ClockWithSeconds(lastPoll, TimeZoneInfo.Local)} · uppdateras var {TimeText.Duration(view.PollInterval)}"
+            ? $"Senast avläst {TimeText.ClockWithSecondsAndDay(lastPoll, DateTimeOffset.UtcNow, TimeZoneInfo.Local)} · uppdateras var {TimeText.Duration(view.PollInterval)}"
             : "Väntar på första avläsningen…";
 
     static Color RoleColor(PanelColorRole role) => role switch

@@ -69,7 +69,7 @@ public class PanelOtherAccountRowTests
 
         OtherAccountRow row = PanelText.ComposeOtherAccountRow(1, "Enterprise", View(session, weekly), Now, Tz);
 
-        Assert.StartsWith("slut ", row.Line);
+        Assert.StartsWith("sessionen tar slut ", row.Line);
         Assert.Equal(PanelColorRole.Crit, row.Role);
     }
 
@@ -81,7 +81,7 @@ public class PanelOtherAccountRowTests
 
         OtherAccountRow row = PanelText.ComposeOtherAccountRow(2, "Max", View(session, weekly, blockedUntil: session.ResetsAt), Now, Tz);
 
-        Assert.StartsWith("slut · öppnar ", row.Line);
+        Assert.StartsWith("sessionen slut · öppnar ", row.Line);
         Assert.Equal(PanelColorRole.Dead, row.Role);
     }
 

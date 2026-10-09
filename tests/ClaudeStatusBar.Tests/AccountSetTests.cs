@@ -155,9 +155,11 @@ public class AccountSetTests
     }
 
     [Fact]
-    public void ZeroAccountsIcon_IsTheGreyUnknownRing()
+    public void ZeroAccountsIcon_IsTheGreyRingWithAPadlock()
     {
-        // QuotaView.Initial is what the zero-accounts icon renders: Unknown freshness = grey ring with "!".
-        Assert.Equal(Freshness.Unknown, QuotaView.Initial.Freshness);
+        // The zero-accounts icon renders QuotaView.Initial flagged NeedsLogin: the grey ring with a padlock (not the "!").
+        QuotaView zero = QuotaView.Initial with { NeedsLogin = true };
+        Assert.Equal(Freshness.Unknown, zero.Freshness);
+        Assert.True(QuotaIconParams.Build(zero, 16, true, Now).Padlock);
     }
 }

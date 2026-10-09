@@ -144,6 +144,78 @@ public class IconContrastTests
             $"expected the Unknown glyph to draw ink (the exclamation mark) in the centre region at {px}px, not an empty ring");
     }
 
+    // ---- the padlock (zero accounts, NeedsLogin) ----
+
+    static QuotaView NeedsLoginView() => QuotaView.Initial with { NeedsLogin = true };
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(20)]
+    [InlineData(24)]
+    [InlineData(32)]
+    public void PadlockIcon_AtEverySize_DrawsABodyAndAShackleInsideTheRing(int px)
+    {
+        QuotaIconParams p = QuotaIconParams.Build(NeedsLoginView(), px, taskbarDark: true, UtcNow);
+        Assert.True(p.Padlock);
+
+        using Bitmap icon = GaugeRenderer.RenderQuota(p);
+        GaugeRenderer.PadlockRects r = GaugeRenderer.PadlockLayout(px);
+
+        // Ink where the body is (outside its keyhole) and in every shackle bar.
+        int bodyInk = 0, bodyPixels = 0;
+        for (int y = r.Body.Top; y < r.Body.Bottom; y++)
+            for (int x = r.Body.Left; x < r.Body.Right; x++)
+            {
+                if (r.Keyhole is { } k && k.Contains(x, y)) continue;
+                bodyPixels++;
+                if (icon.GetPixel(x, y).A >= 200) bodyInk++;
+            }
+        Assert.Equal(bodyPixels, bodyInk);
+        foreach (Rectangle bar in r.Shackle)
+            Assert.True(icon.GetPixel(bar.X + bar.Width / 2, bar.Y + bar.Height / 2).A >= 200, $"a shackle bar is empty at {px}px");
+
+        // Everything stays inside the ring's inner edge and clear of its band.
+        double innerRadius = px * 0.5 - px * 0.02 - px * 0.155; // inner edge of the ring stroke
+        double cx = px / 2.0, cy = px / 2.0;
+        foreach (Rectangle rect in r.Shackle.Append(r.Body))
+            foreach (Point corner in new[] { new Point(rect.Left, rect.Top), new Point(rect.Right, rect.Top), new Point(rect.Left, rect.Bottom), new Point(rect.Right, rect.Bottom) })
+                Assert.True(Math.Sqrt((corner.X - cx) * (corner.X - cx) + (corner.Y - cy) * (corner.Y - cy)) <= innerRadius + 0.5,
+                    $"the padlock touches the ring at {px}px (corner {corner})");
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(20)]
+    [InlineData(24)]
+    [InlineData(32)]
+    public void PadlockIcon_OnDarkTaskbar_MeetsMinimumContrast_AndHasInkInTheCentre(int px)
+    {
+        QuotaIconParams p = QuotaIconParams.Build(NeedsLoginView(), px, taskbarDark: true, UtcNow);
+
+        using Bitmap icon = GaugeRenderer.RenderQuota(p);
+        Assert.True(HasInkNearCentre(icon), $"no ink in the centre at {px}px");
+        GaugeRenderer.PadlockRects r = GaugeRenderer.PadlockLayout(px);
+        Color body = icon.GetPixel(r.Body.Left + 1, r.Body.Bottom - 2); // inside the body, clear of any keyhole
+        Assert.True(ContrastOn(body) >= 3.0, $"padlock body contrast {ContrastOn(body):F2}:1 at {px}px, need >= 3:1");
+    }
+
+    [Fact]
+    public void PadlockIcon_DiffersFromTheExclamationMark_AtEverySize()
+    {
+        foreach (int px in new[] { 16, 20, 24, 32 })
+        {
+            using Bitmap padlock = GaugeRenderer.RenderQuota(QuotaIconParams.Build(NeedsLoginView(), px, true, UtcNow));
+            using Bitmap unknown = GaugeRenderer.RenderQuota(QuotaIconParams.Build(QuotaView.Initial, px, true, UtcNow));
+            bool differs = false;
+            for (int y = 0; y < px && !differs; y++)
+                for (int x = 0; x < px && !differs; x++)
+                    differs = padlock.GetPixel(x, y) != unknown.GetPixel(x, y);
+            Assert.True(differs, $"padlock and \"!\" are identical at {px}px");
+        }
+    }
+
+    static double ContrastOn(Color c) => ContrastRatio(RelativeLuminance(Blend(c, DarkTaskbar)), RelativeLuminance(DarkTaskbar));
+
     static bool HasInkNearCentre(Bitmap icon)
     {
         int w = icon.Width, h = icon.Height;

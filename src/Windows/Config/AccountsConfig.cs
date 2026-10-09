@@ -41,6 +41,13 @@ public sealed class AccountEntry
     public Dictionary<string, JsonElement>? ExtraFields { get; set; }
 }
 
+/// <summary>docs/multi-account.md "All accounts in one panel": what clicking an icon opens. Single (the default) is the detailed panel of one account; All is one panel with a compact card per enabled account.</summary>
+public enum PanelDisplayMode
+{
+    Single,
+    All,
+}
+
 public enum AccountsConfigStatus
 {
     /// <summary>Read and valid.</summary>
@@ -72,6 +79,17 @@ public sealed class AccountsConfig
     public int Version { get; set; }
     public AccountDisplayMode DisplayMode { get; set; } = AccountDisplayMode.PerAccount;
     public int MaxIcons { get; set; } = 3;
+
+    /// <summary>
+    /// "panelMode": "single" | "all". Optional and absent by default (= single), so an existing
+    /// accounts.json is not changed until the user turns the setting on from the tray menu.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PanelDisplayMode? PanelMode { get; set; }
+
+    /// <summary>The effective mode: single unless "panelMode" says all.</summary>
+    [JsonIgnore]
+    public PanelDisplayMode EffectivePanelMode => PanelMode ?? PanelDisplayMode.Single;
 
     /// <summary>"accounts": null is the same as an empty list.</summary>
     public List<AccountEntry> Accounts

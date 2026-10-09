@@ -299,12 +299,20 @@ A click on ANY icon opens every enabled account's normal full panel — exactly 
 header, status box, session, week, footer, refresh button, "Logga in igen" — next to each other horizontally,
 accounts without an icon included. Order: the accounts that have an icon in the order their icons appear on
 screen left to right, then the rest in config order (`AccountCards.Order`, shared with the cards). It acts as
-ONE panel: non-activating, opened and closed together, one dismiss (a click in any of the panels is inside, a
-click anywhere else closes all). It is anchored above the tray with the row's right edge where one panel's right
+ONE panel: non-activating, one solid container with one background and one outer border (the normal
+panel's corner radius, border and shadow), opened and closed together, one dismiss (a click anywhere in the
+container, dividers included, is inside; a click anywhere else closes it). It is anchored above the tray with the row's right edge where one panel's right
 edge would be, inside the work area; a row wider than the work area is scrolled horizontally with the mouse wheel
-(Shift+wheel works too — the row has no vertical scroll). Panels are bottom-aligned on a common baseline, each at
-its natural height; the areas between and above them are click-through. The panel of the clicked icon has an
-accent edge (the cards' accent) and the one under the mouse is lifted slightly. The "ANDRA KONTON" section and
+(Shift+wheel works too — the row has no vertical scroll). The columns touch (no gaps), are
+separated by 1 px dividers in the panel-border colour inset a little from the top and bottom, and are all the
+same height â€” the tallest. The rows line up across columns like a table: header block, status box, AKTUELL
+SESSION, VECKA and footer start at the same y in every column; each block takes the height of the tallest
+column's block (the status boxes become equally tall, a column without a "Logga in igen" button leaves that
+space empty, a column with a wrapped title pushes the others' freshness row down). This is a layout pass over
+the columns (`PanelForm.BuildFullLayout`: measure every column with the ordinary `BuildLayout`, then lay each out
+again with the `RowMarks` maxima) â€” not a second layout. The clicked icon's column has a 3 px accent strip (the
+cards' accent) along its top edge inside the container, the column under the mouse a faint background lift;
+there are no per-column frames. The "ANDRA KONTON" section and
 the "← Alla konton" link are never shown here. Each panel's own controls act on its own account (the form reports
 the panel's slot). Implementation: one host form draws N `PanelModel`s with an x offset through the single
 panel's own layout and paint code (`PanelForm.DrawPanelContents`) — no second copy of the drawing.

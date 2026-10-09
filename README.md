@@ -91,8 +91,8 @@ account's quota, forecast and history never mixes with another's.
   to the browser; log in with the account you want and choose the right organisation there. Logging in
   as an account the app already follows is refused, and says which one it is.
 - **Panels** (right-click, **Panel**): **Ett konto i taget** (default) opens the account you clicked;
-  **Alla konton – fulla paneler sida vid sida** opens every account's full panel next to each other (the one
-  you clicked is marked; scroll sideways with the mouse wheel if they do not fit the screen); **Alla konton –
+  **Alla konton – fulla paneler sida vid sida** opens every account's full panel next to each other in one container (the one
+  you clicked is marked on top; scroll sideways with the mouse wheel if they do not fit the screen); **Alla konton –
   kompakta kort** opens one panel with a compact card per account, and a click on a card opens that account's
   details.
 - **Rename** (right-click, **Konton**, the account, **Byt namn…**): give an account a name of your own

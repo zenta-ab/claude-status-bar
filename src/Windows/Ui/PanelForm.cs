@@ -124,8 +124,8 @@ public sealed class PanelForm : Form
     IReadOnlyList<PanelModel> _models = Array.Empty<PanelModel>();
     int _hoverPanel = -1;
     float _scrollX;
-    const float PanelGap = 8f;
-    static readonly Color TransparentKey = Color.FromArgb(255, 1, 2, 3);
+    const float DividerInset = 10f;        // the thin vertical divider between two columns stops this far from the top and bottom
+    const float MarkStripHeight = 3f;      // the accent strip along the top of the clicked account's column
     float _lastHeight = -1f;
 
     // ---- combined mode (docs/multi-account.md "All accounts in one panel") ----
@@ -323,8 +323,9 @@ public sealed class PanelForm : Form
     public bool IsFull => _full;
 
     /// <summary>
-    /// Full mode: every account's full panel side by side, in the order given (bottom-aligned, each its
-    /// natural height). `markedSlot` is the panel of the icon that was clicked (accent edge). The panels
+    /// Full mode: every account's full panel side by side, in the order given, as ONE solid container of
+    /// equal-height columns whose rows line up. `markedSlot` is the panel of the icon that was clicked
+    /// (accent strip along its top). The panels
     /// are the single-account rendering exactly, except that the "other accounts" section and the back link
     /// are never shown here: every account is already on screen.
     /// </summary>
@@ -334,7 +335,7 @@ public sealed class PanelForm : Form
         {
             _combined = false;
             _full = true;
-            TransparencyKey = TransparentKey; // the gaps and the space above shorter panels are click-through
+            TransparencyKey = Color.Empty;
             _demo = demo;
             _models = models.Select(m => m with { OtherAccounts = Array.Empty<OtherAccountRow>(), BackLink = false }).ToList();
             _markedSlot = markedSlot;
@@ -357,8 +358,23 @@ public sealed class PanelForm : Form
     /// <summary>The slots of the full panels, in drawn order (tests).</summary>
     internal IReadOnlyList<string?> FullPanelSlots => _models.Select(m => m.Slot).ToList();
 
-    /// <summary>Natural height of every full panel (tests: the omitted section, the common baseline).</summary>
-    internal IReadOnlyList<float> FullPanelHeights => BuildFullLayout().Heights;
+    /// <summary>Height of every full column (tests): all the same, the tallest column's.</summary>
+    internal IReadOnlyList<float> FullPanelHeights => BuildFullLayout().Layouts.Select(l => l.TotalHeight).ToList();
+
+    /// <summary>Each column's block positions (tests: the rows line up across columns).</summary>
+    internal record FullRowYs(float StatusBoxY, float StatusBoxHeight, float SessionY, float WeeklyY, float RuleY, float FooterY, float Height);
+
+    internal IReadOnlyList<FullRowYs> FullRows => BuildFullLayout().Layouts
+        .Select(l => new FullRowYs(l.StatusBoxY, l.StatusBoxHeight, l.SessionY, l.WeeklyY, l.RuleY, l.FooterY, l.TotalHeight)).ToList();
+
+    /// <summary>x (logical, in the scrolled-off row) of each divider between two columns (tests).</summary>
+    internal IReadOnlyList<float> FullDividerXs => BuildFullLayout().Xs.Skip(1).ToList();
+
+    /// <summary>The accent strip of the marked column, in the row's own coordinates, or null (tests).</summary>
+    internal RectangleF? FullMarkStrip => MarkedPanelIndex is >= 0 and var i ? new RectangleF(BuildFullLayout().Xs[i], 0f, LogicalWidth, MarkStripHeight) : null;
+
+    /// <summary>Is this screen point inside the panel (the whole container, gaps and all, for dismissal)?</summary>
+    internal bool IsInsidePanelsForTest(Point screenPoint) => IsInsidePanels(screenPoint);
 
     /// <summary>Demo captures: show the panel of this slot as if the mouse were over it.</summary>
     internal void SetHoverPanelForDemo(string? slot) => _hoverPanel = _models.ToList().FindIndex(m => m.Slot == slot);
@@ -372,27 +388,46 @@ public sealed class PanelForm : Form
         finally { _m = previous; }
     }
 
-    readonly record struct FullLayout(IReadOnlyList<float> Xs, IReadOnlyList<float> Heights, float TotalWidth, float MaxHeight);
+    /// <summary>The columns of the full container: x offsets, one aligned layout each (all the same height), the total width.</summary>
+    readonly record struct FullLayout(IReadOnlyList<float> Xs, IReadOnlyList<PanelLayout> Layouts, float TotalWidth, float Height);
 
+    /// <summary>
+    /// Two passes over the columns, both through the ordinary single-panel BuildLayout: the first measures
+    /// every column's blocks (header, status box, session, week, content), the second lays each column out
+    /// again with every block at least as tall as the tallest column's -- so the status boxes, AKTUELL
+    /// SESSION, VECKA, the rule and the footer start at the same y in every column, and every column is
+    /// as tall as the tallest. The columns touch: one container, no gaps.
+    /// </summary>
     FullLayout BuildFullLayout()
     {
-        var xs = new List<float>();
-        var heights = new List<float>();
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        float x = 0f, maxH = 0f;
+        var natural = _models.Select(m => WithModel(m, () => BuildLayout(now))).ToList();
+        RowMarks? align = natural.Count == 0 ? null : new RowMarks(
+            natural.Max(l => l.StatusBoxY),
+            natural.Max(l => l.StatusBoxHeight),
+            natural.Max(l => l.SessionY - l.StatusBoxY - l.StatusBoxHeight),
+            natural.Max(l => l.SessionHeight),
+            natural.Max(l => l.WeeklyHeight));
+
+        var aligned = new List<PanelLayout>();
         foreach (PanelModel model in _models)
+            aligned.Add(WithModel(model, () => BuildLayout(now, align)));
+        float height = aligned.Count == 0 ? 0f : aligned.Max(l => l.TotalHeight);
+
+        var xs = new List<float>();
+        var layouts = new List<PanelLayout>();
+        float x = 0f;
+        foreach (PanelLayout layout in aligned)
         {
-            float h = WithModel(model, () => BuildLayout(now).TotalHeight);
+            layouts.Add(layout with { TotalHeight = height }); // every column as tall as the tallest
             xs.Add(x);
-            heights.Add(h);
-            maxH = Math.Max(maxH, h);
-            x += LogicalWidth + PanelGap;
+            x += LogicalWidth;
         }
-        return new FullLayout(xs, heights, Math.Max(LogicalWidth, x - PanelGap), maxH);
+        return new FullLayout(xs, layouts, Math.Max(LogicalWidth, x), height);
     }
 
-    /// <summary>The visible height in logical px (the window's, once it has one): panels sit on its bottom edge.</summary>
-    float FullViewHeight(FullLayout layout) => _scale > 0f && Height > 1 ? Height / _scale : layout.MaxHeight;
+    /// <summary>The visible height in logical px (the window's, once it has one); the container sits on its bottom edge.</summary>
+    float FullViewHeight(FullLayout layout) => _scale > 0f && Height > 1 ? Height / _scale : layout.Height;
 
     /// <summary>Which full panel a logical x (window coordinates) is over, or -1.</summary>
     int FullIndexAt(FullLayout layout, float logicalX)
@@ -403,19 +438,8 @@ public sealed class PanelForm : Form
         return -1;
     }
 
-    /// <summary>The panels' rectangles in SCREEN pixels: a click in any of them is inside the one panel, anywhere else is outside.</summary>
-    IEnumerable<Rectangle> FullScreenRects()
-    {
-        FullLayout layout = BuildFullLayout();
-        float viewH = FullViewHeight(layout);
-        for (int i = 0; i < layout.Xs.Count; i++)
-        {
-            float left = (layout.Xs[i] - _scrollX) * _scale, top = (viewH - layout.Heights[i]) * _scale;
-            yield return Rectangle.Intersect(Bounds, new Rectangle(Left + (int)Math.Round(left), Top + (int)Math.Round(top), (int)Math.Round(LogicalWidth * _scale), (int)Math.Round(layout.Heights[i] * _scale)));
-        }
-    }
-
-    bool IsInsidePanels(Point screenPoint) => _full ? FullScreenRects().Any(r => r.Contains(screenPoint)) : Bounds.Contains(screenPoint);
+    /// <summary>Inside the panel for dismissal: the whole window -- the container is solid, a click anywhere in it (dividers included) is a click in the panel.</summary>
+    bool IsInsidePanels(Point screenPoint) => Bounds.Contains(screenPoint);
 
     float ClampScrollX(float value) => Math.Clamp(value, 0f, Math.Max(0f, BuildFullLayout().TotalWidth - Width / _scale));
 
@@ -448,7 +472,7 @@ public sealed class PanelForm : Form
     /// <summary>The content size of whichever view is showing (before the work-area cap).</summary>
     (float Width, float Height) MeasureContent(DateTimeOffset now)
     {
-        if (_full) { FullLayout f = BuildFullLayout(); return (f.TotalWidth, f.MaxHeight); }
+        if (_full) { FullLayout f = BuildFullLayout(); return (f.TotalWidth, f.Height); }
         return (LogicalWidth, _combined ? BuildCombinedLayout().TotalHeight : BuildLayout(now).TotalHeight);
     }
 
@@ -503,10 +527,10 @@ public sealed class PanelForm : Form
                 FullLayout full = BuildFullLayout();
                 int i = FullIndexAt(full, logicalPoint.X);
                 if (i < 0) return;
-                float top = FullViewHeight(full) - full.Heights[i];
+                float top = FullViewHeight(full) - full.Height;
                 logicalPoint = new PointF(logicalPoint.X + _scrollX - full.Xs[i], logicalPoint.Y - top);
                 _m = _models[i];
-                layout = BuildLayout(DateTimeOffset.UtcNow);
+                layout = full.Layouts[i];
             }
             else
             {
@@ -660,12 +684,18 @@ public sealed class PanelForm : Form
         float OtherAccountsRuleY, float OtherAccountsY,
         IReadOnlyList<RectangleF> OtherAccountRowRects, RectangleF RefreshHitRect, RectangleF LoginButtonRect, float TotalHeight);
 
-    float ContentWidth => LogicalWidth - 2 * SidePadding;
+    /// <summary>
+    /// What the full container asks of every column so the rows line up like a table: the y where the
+    /// status box starts, and the (tallest column's) height of the status box, of the space between it and
+    /// AKTUELL SESSION (login button and margin), and of the two sections. Null/absent in the single panel.
+    /// </summary>
+    readonly record struct RowMarks(float StatusBoxY, float StatusBoxHeight, float StatusExtra, float SessionHeight, float WeeklyHeight);
 
+    float ContentWidth => LogicalWidth - 2 * SidePadding;
     /// <summary>The "<- Alla konton" row above the title in a detailed panel opened from the combined one.</summary>
     float HeaderOffset => _backLink ? 18f : 0f;
 
-    PanelLayout BuildLayout(DateTimeOffset now)
+    PanelLayout BuildLayout(DateTimeOffset now, RowMarks? align = null)
     {
         PanelTextResult text = PanelText.Compose(_view, now, TimeZoneInfo.Local);
 
@@ -684,8 +714,9 @@ public sealed class PanelForm : Form
             y += DrawFitText(_measureG, subtitle, _fontResetHeader, TextSecondary, 0, 0, ContentWidth, draw: false) + 4f;
         }
 
-        float freshnessY = y;
         const float freshnessRowHeight = 22f;
+        if (align is { } rows) y = Math.Max(y, rows.StatusBoxY - freshnessRowHeight); // the freshness row stays attached to the status box; the slack sits above it
+        float freshnessY = y;
         var refreshHitRect = new RectangleF(
             LogicalWidth - SidePadding - RefreshHitSize,
             freshnessY + (freshnessRowHeight - RefreshHitSize) / 2f,
@@ -693,7 +724,7 @@ public sealed class PanelForm : Form
         y += freshnessRowHeight;
 
         float statusBoxY = y;
-        float statusBoxHeight = MeasureStatusBox(text.StatusBox);
+        float statusBoxHeight = Math.Max(MeasureStatusBox(text.StatusBox), align?.StatusBoxHeight ?? 0f);
         y += statusBoxHeight;
 
         var loginButtonRect = RectangleF.Empty;
@@ -704,13 +735,14 @@ public sealed class PanelForm : Form
             y += LoginButtonHeight;
         }
         y += 14f;
+        if (align is { } block) y = Math.Max(y, statusBoxY + block.StatusBoxHeight + block.StatusExtra);
 
         float sessionY = y;
-        float sessionHeight = MeasureSection(text.Session, _view.Session);
+        float sessionHeight = Math.Max(MeasureSection(text.Session, _view.Session), align?.SessionHeight ?? 0f);
         y += sessionHeight + 16f;
 
         float weeklyY = y;
-        float weeklyHeight = MeasureSection(text.Weekly, _view.Weekly);
+        float weeklyHeight = Math.Max(MeasureSection(text.Weekly, _view.Weekly), align?.WeeklyHeight ?? 0f);
         y += weeklyHeight + 14f;
 
         float ruleY = y;
@@ -792,16 +824,11 @@ public sealed class PanelForm : Form
         try
         {
             Graphics g = e.Graphics;
-            if (_full)
-            {
-                g.Clear(TransparentKey); // each panel paints its own background and border (DrawFull)
-            }
-            else
-            {
-                g.Clear(PanelBackground);
-                using (var border = new Pen(BorderColor))
-                    g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
-            }
+            // One background and one outer frame for every mode: in full mode the whole row of columns is a
+            // single container (DrawFull only adds the dividers and the marks).
+            g.Clear(PanelBackground);
+            using (var border = new Pen(BorderColor))
+                g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
@@ -853,47 +880,60 @@ public sealed class PanelForm : Form
     }
 
     /// <summary>
-    /// Full mode: each panel is the ordinary single-panel rendering (DrawPanelContents) translated to its
-    /// x offset and bottom-aligned on the common baseline, on its own background and border. The panel of
-    /// the clicked icon gets the accent edge; the one under the mouse is lifted slightly.
+    /// Full mode: ONE container (the form's own background and border) holding a column per account. Each
+    /// column is the ordinary single-panel rendering (DrawPanelContents) at its x offset, on the aligned
+    /// layout of BuildFullLayout; a 1 px divider in the border colour, inset from the top and bottom, sits
+    /// between two columns. The clicked account's column has an accent strip along its top edge, the
+    /// column under the mouse a faint lift. The content scrolled out of the window is clipped cleanly by
+    /// the frame.
     /// </summary>
     void DrawFull(Graphics g, DateTimeOffset now)
     {
         FullLayout full = BuildFullLayout();
         float viewH = FullViewHeight(full);
+        float top = viewH - full.Height; // normally 0; negative when the work area caps the window (the container sits on the bottom edge)
+
+        var clipState = g.Save();
+        g.SetClip(new RectangleF(1, 1, Width / _scale - 2, Height / _scale - 2));
+        g.TranslateTransform(-_scrollX, top);
+
         for (int i = 0; i < _models.Count; i++)
         {
-            float h = full.Heights[i];
-            var state = g.Save();
-            g.TranslateTransform(full.Xs[i] - _scrollX, viewH - h);
-
-            // Plain square fills and a 1px border on whole pixels: the window's transparency key must not fringe.
-            SmoothingMode smoothing = g.SmoothingMode;
-            g.SmoothingMode = SmoothingMode.None;
-            using (var bg = new SolidBrush(PanelBackground)) g.FillRectangle(bg, 0, 0, LogicalWidth, h);
-            using (var border = new Pen(i == _hoverPanel ? HoverBorder : BorderColor)) g.DrawRectangle(border, 0, 0, LogicalWidth - 1, h - 1);
-            g.SmoothingMode = smoothing;
-
+            var colState = g.Save();
+            g.TranslateTransform(full.Xs[i], 0);
             PanelModel model = _models[i];
-            WithModel(model, () => { DrawPanelContents(g, BuildLayout(now), now); return 0; });
 
             if (i == _hoverPanel)
             {
-                using var lift = new SolidBrush(Color.FromArgb(12, 255, 255, 255));
-                g.FillRectangle(lift, 1, 1, LogicalWidth - 2, h - 2);
-            }
-            if (model.Slot is not null && model.Slot == _markedSlot)
-            {
+                SmoothingMode smoothing = g.SmoothingMode;
                 g.SmoothingMode = SmoothingMode.None;
-                using var accent = new SolidBrush(CardAccent);
-                g.FillRectangle(accent, 0, 0, 3f, h);
+                using var lift = new SolidBrush(Color.FromArgb(14, 255, 255, 255));
+                g.FillRectangle(lift, 0, 0, LogicalWidth, full.Height);
                 g.SmoothingMode = smoothing;
             }
-            g.Restore(state);
+
+            WithModel(model, () => { DrawPanelContents(g, full.Layouts[i], now); return 0; });
+
+            if (model.Slot is not null && model.Slot == _markedSlot)
+            {
+                SmoothingMode smoothing = g.SmoothingMode;
+                g.SmoothingMode = SmoothingMode.None;
+                using var accent = new SolidBrush(CardAccent);
+                g.FillRectangle(accent, 0, 0, LogicalWidth, MarkStripHeight);
+                g.SmoothingMode = smoothing;
+            }
+            g.Restore(colState);
         }
+
+        SmoothingMode sm = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.None;
+        using (var divider = new Pen(BorderColor, 1f))
+            foreach (float x in full.Xs.Skip(1))
+                g.DrawLine(divider, x, DividerInset, x, full.Height - DividerInset);
+        g.SmoothingMode = sm;
+        g.Restore(clipState);
     }
 
-    static readonly Color HoverBorder = Color.FromArgb(255, 0x6A, 0x6A, 0x6A);
 
     // ---- the combined panel ----
 

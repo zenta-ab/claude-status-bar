@@ -69,7 +69,7 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
   öppnar tis 15:00"). Windows tests run in a real Stockholm zone across midnight and both DST changes.
 - **Panel setting** (`"panelMode": "single" | "full" | "cards"` in accounts.json, absent = single; the old
   `"all"` reads as `cards`): `full` shows every account's full panel side by side (ordered like the menu-bar
-  items left to right, then accounts without an item; the clicked one marked, hover lift, "other accounts"
+  items left to right, then accounts without an item; one solid container, equal-height columns with aligned rows; the clicked one has a top accent strip, hover lift, "other accounts"
   section and back link omitted); `cards` is one compact card per account, a card opens the detailed panel
   with "← Alla konton".
 

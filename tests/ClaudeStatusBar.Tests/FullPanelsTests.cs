@@ -9,7 +9,7 @@ namespace ClaudeStatusBar.Tests;
 /// <summary>
 /// docs/multi-account.md "Panels": the three panel settings (parsing, the old "all" alias, persistence),
 /// and the full side-by-side mode of PanelForm -- panels in the order given, the marked one, the omitted
-/// "other accounts" section, bottom alignment, the mode switches, and that single and cards are unchanged.
+/// "other accounts" section, the one solid container (equal columns, aligned rows, dividers, the marking strip, dismissal), the mode switches, and that single and cards are unchanged.
 /// </summary>
 public class FullPanelsTests
 {
@@ -157,17 +157,127 @@ public class FullPanelsTests
         Assert.Equal(single.SingleHeightForTest, full.FullPanelHeights[0]);
     }
 
+    const string LongLabel = "Ett mycket langt kontonamn som maste brytas over flera rader i rubriken";
+
+    /// <summary>Three columns that differ in every block: a plain one, one needing a login (button), one with a wrapping title and subtitle.</summary>
+    static PanelModel[] UnevenColumns() => new[]
+    {
+        Model("a"),
+        Model("b", QuotaView.Initial with { NeedsLogin = true }),
+        new PanelModel("c", SafeView(), LongLabel, "Max - " + LongLabel, Array.Empty<OtherAccountRow>(), false, null, false),
+    };
+
     [Fact]
-    public void Full_PanelsKeepTheirOwnNaturalHeights()
+    public void Full_EveryColumnIsAsTallAsTheTallest()
     {
         using var panel = new PanelForm();
-        QuotaView needsLogin = QuotaView.Initial with { NeedsLogin = true }; // taller: it has the "Logga in igen" button
+        PanelModel[] columns = UnevenColumns();
 
-        panel.UpdateFull(new[] { Model("a"), Model("b", needsLogin) }, "a", false);
+        panel.UpdateFull(columns, "a", false);
 
         IReadOnlyList<float> heights = panel.FullPanelHeights;
-        Assert.NotEqual(heights[0], heights[1]);
-        Assert.All(heights, h => Assert.True(h > 200));
+        Assert.Equal(3, heights.Count);
+        Assert.Single(heights.Distinct());
+        Assert.True(heights[0] > 200);
+        // ... at least the tallest column's own natural height (they are tall in different blocks, so usually more)
+        var naturals = new List<float>();
+        foreach (PanelModel m in columns)
+        {
+            using var one = new PanelForm();
+            one.UpdateFull(new[] { m }, null, false);
+            naturals.Add(one.FullPanelHeights[0]);
+        }
+        Assert.True(naturals.Distinct().Count() > 1, "the fixture must have columns of different natural heights");
+        Assert.True(heights[0] >= naturals.Max());
+    }
+
+    [Fact]
+    public void Full_TheRowsLineUpAcrossColumns_LikeATable()
+    {
+        using var panel = new PanelForm();
+
+        panel.UpdateFull(UnevenColumns(), "a", false);
+
+        IReadOnlyList<PanelForm.FullRowYs> rows = panel.FullRows;
+        Assert.Equal(3, rows.Count);
+        Assert.Single(rows.Select(r => r.StatusBoxY).Distinct());
+        Assert.Single(rows.Select(r => r.StatusBoxHeight).Distinct());
+        Assert.Single(rows.Select(r => r.SessionY).Distinct());
+        Assert.Single(rows.Select(r => r.WeeklyY).Distinct());
+        Assert.Single(rows.Select(r => r.RuleY).Distinct());
+        Assert.Single(rows.Select(r => r.FooterY).Distinct());
+        Assert.Single(rows.Select(r => r.Height).Distinct());
+    }
+
+    [Fact]
+    public void Full_AColumnTallerInOneBlockOnlyPushesTheOthersDown_NeverShrinksAnyone()
+    {
+        using var alone = new PanelForm();
+        using var together = new PanelForm();
+        PanelModel plain = Model("a");
+
+        alone.UpdateFull(new[] { plain }, "a", false);
+        together.UpdateFull(UnevenColumns(), "a", false);
+
+        Assert.True(together.FullRows[0].SessionY > alone.FullRows[0].SessionY, "the plain column made room for the login button");
+        Assert.True(together.FullRows[0].FooterY > alone.FullRows[0].FooterY);
+    }
+
+    [Fact]
+    public void Full_ColumnsTouch_DividersSitOnTheJoints_AndAreOneColumnApart()
+    {
+        using var panel = new PanelForm();
+
+        panel.UpdateFull(new[] { Model("a"), Model("b"), Model("c"), Model("d") }, "a", false);
+
+        IReadOnlyList<float> dividers = panel.FullDividerXs;
+        Assert.Equal(3, dividers.Count); // n columns, n-1 dividers
+        float width = dividers[0];       // the first column ends where the first divider is: no gap, no margin
+        Assert.True(width > 300);
+        Assert.Equal(new[] { width, 2 * width, 3 * width }, dividers);
+    }
+
+    [Fact]
+    public void Full_OneColumn_HasNoDivider()
+    {
+        using var panel = new PanelForm();
+
+        panel.UpdateFull(new[] { Model("a") }, "a", false);
+
+        Assert.Empty(panel.FullDividerXs);
+    }
+
+    [Fact]
+    public void Full_TheClickedColumnHasAnAccentStripAlongItsTop_NoOtherDoes()
+    {
+        using var panel = new PanelForm();
+        panel.UpdateFull(new[] { Model("a"), Model("b"), Model("c") }, "b", false);
+
+        RectangleF strip = panel.FullMarkStrip!.Value;
+
+        Assert.Equal(panel.FullDividerXs[0], strip.X);  // the second column
+        Assert.Equal(0f, strip.Y);                      // along the top edge
+        Assert.InRange(strip.Height, 2f, 3f);
+        Assert.Equal(panel.FullDividerXs[0], strip.Width);
+
+        panel.UpdateFull(new[] { Model("a"), Model("b"), Model("c") }, "zzz", false);
+        Assert.Null(panel.FullMarkStrip);
+    }
+
+    [Fact]
+    public void Full_TheWholeContainerIsInsideForDismissal_AnythingOutsideIsNot()
+    {
+        using var panel = new PanelForm();
+        panel.UpdateFull(UnevenColumns(), "a", false);
+        panel.Bounds = new Rectangle(100, 100, 1020, 480);
+
+        // corners, the joints between columns (divider and the strip above/below it) and the middle: all inside
+        foreach (Point p in new[] { new Point(100, 100), new Point(1119, 579), new Point(100, 579), new Point(1119, 100),
+                                    new Point(440, 110), new Point(440, 575), new Point(440, 340), new Point(780, 340), new Point(500, 340) })
+            Assert.True(panel.IsInsidePanelsForTest(p), $"{p} is inside the container");
+
+        foreach (Point p in new[] { new Point(99, 300), new Point(1120, 300), new Point(500, 99), new Point(500, 580) })
+            Assert.False(panel.IsInsidePanelsForTest(p), $"{p} is outside");
     }
 
     [Fact]

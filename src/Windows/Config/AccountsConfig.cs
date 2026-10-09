@@ -41,11 +41,42 @@ public sealed class AccountEntry
     public Dictionary<string, JsonElement>? ExtraFields { get; set; }
 }
 
-/// <summary>docs/multi-account.md "All accounts in one panel": what clicking an icon opens. Single (the default) is the detailed panel of one account; All is one panel with a compact card per enabled account.</summary>
+/// <summary>
+/// docs/multi-account.md "Panels": what clicking an icon opens. Single (the default): the detailed
+/// panel of one account. Full: every enabled account's full panel, side by side. Cards: one panel with a
+/// compact card per enabled account. Persisted as "single" | "full" | "cards"; the earlier value "all"
+/// is read as "cards" and written back as "cards" the next time the file is saved.
+/// </summary>
+[JsonConverter(typeof(PanelDisplayModeConverter))]
 public enum PanelDisplayMode
 {
     Single,
-    All,
+    Full,
+    Cards,
+}
+
+/// <summary>Reads "single" | "full" | "cards" (and the old "all" as cards); anything else is an error, so the file is quarantined like any other invalid one.</summary>
+public sealed class PanelDisplayModeConverter : JsonConverter<PanelDisplayMode>
+{
+    public override PanelDisplayMode Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        string? text = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+        return text?.ToLowerInvariant() switch
+        {
+            "single" => PanelDisplayMode.Single,
+            "full" => PanelDisplayMode.Full,
+            "cards" or "all" => PanelDisplayMode.Cards,
+            _ => throw new JsonException("unknown panelMode"),
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, PanelDisplayMode value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value switch
+        {
+            PanelDisplayMode.Full => "full",
+            PanelDisplayMode.Cards => "cards",
+            _ => "single",
+        });
 }
 
 public enum AccountsConfigStatus
@@ -81,13 +112,13 @@ public sealed class AccountsConfig
     public int MaxIcons { get; set; } = 3;
 
     /// <summary>
-    /// "panelMode": "single" | "all". Optional and absent by default (= single), so an existing
-    /// accounts.json is not changed until the user turns the setting on from the tray menu.
+    /// "panelMode": "single" | "full" | "cards". Optional and absent by default (= single), so an
+    /// existing accounts.json is not changed until the user picks another panel from the tray menu.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PanelDisplayMode? PanelMode { get; set; }
 
-    /// <summary>The effective mode: single unless "panelMode" says all.</summary>
+    /// <summary>The effective mode: single unless "panelMode" says otherwise.</summary>
     [JsonIgnore]
     public PanelDisplayMode EffectivePanelMode => PanelMode ?? PanelDisplayMode.Single;
 
@@ -109,7 +140,7 @@ public sealed class AccountsConfig
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+        Converters = { new PanelDisplayModeConverter(), new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
     /// <summary>A new, empty, current-version config.</summary>

@@ -282,11 +282,36 @@ are left out, and so is any part that just repeats the title (an account whose a
 "Max" shows no second "Max"); with nothing left there is no subtitle line. The DEMO badge and the freshness
 line are unchanged.
 
-## All accounts in one panel
+## Panels
 
-The tray menu toggle **"Visa alla konton i panelen"** (persisted as an optional `"panelMode": "all"` in
-accounts.json; absent = `single`, so nothing changes for an existing user until it is used) makes a click on
-ANY icon open one panel with a compact card per enabled account — accounts without an icon too (beyond
+The tray submenu **"Panel ▸"** has three radio items — what a click on an icon opens (persisted as an optional
+`"panelMode": "single" | "full" | "cards"` in accounts.json; absent = `single`, so nothing changes for an
+existing user until another is picked; the earlier value `"all"` is read as `cards` and written back as `cards`
+the next time the file is saved; an unknown value is quarantined like any invalid file):
+
+- **"Ett konto i taget"** (`single`, the default): that account's detailed panel.
+- **"Alla konton – fulla paneler sida vid sida"** (`full`): see below.
+- **"Alla konton – kompakta kort"** (`cards`): see "Cards" below.
+
+### Full panels side by side
+
+A click on ANY icon opens every enabled account's normal full panel — exactly the single-account rendering:
+header, status box, session, week, footer, refresh button, "Logga in igen" — next to each other horizontally,
+accounts without an icon included. Order: the accounts that have an icon in the order their icons appear on
+screen left to right, then the rest in config order (`AccountCards.Order`, shared with the cards). It acts as
+ONE panel: non-activating, opened and closed together, one dismiss (a click in any of the panels is inside, a
+click anywhere else closes all). It is anchored above the tray with the row's right edge where one panel's right
+edge would be, inside the work area; a row wider than the work area is scrolled horizontally with the mouse wheel
+(Shift+wheel works too — the row has no vertical scroll). Panels are bottom-aligned on a common baseline, each at
+its natural height; the areas between and above them are click-through. The panel of the clicked icon has an
+accent edge (the cards' accent) and the one under the mouse is lifted slightly. The "ANDRA KONTON" section and
+the "← Alla konton" link are never shown here. Each panel's own controls act on its own account (the form reports
+the panel's slot). Implementation: one host form draws N `PanelModel`s with an x offset through the single
+panel's own layout and paint code (`PanelForm.DrawPanelContents`) — no second copy of the drawing.
+
+### Cards
+
+The **cards** panel is one panel with a compact card per enabled account — accounts without an icon too (beyond
 `maxIcons`, or hidden by "Visa bara den som är närmast taket"). A card has the label, the "plan ·
 organisation" line, the short verdict in its colour (the status box's own first line, so the wording is the
 same), two thin bars (session, week) with the percent and the day-aware reset time, and a one-line note only

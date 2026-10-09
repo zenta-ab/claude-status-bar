@@ -9,6 +9,19 @@ using ClaudeStatusBar.Model;
 namespace ClaudeStatusBar.Ui;
 
 /// <summary>
+/// Everything one rendering of the full panel shows: the account's quota view, its header texts, the
+/// "other accounts" rows, the reload button's busy flag, the advice line. The form draws ONE model in
+/// single mode and N of them side by side in full mode with exactly the same layout and drawing code.
+/// Slot is the account the panel's own controls (refresh, "Logga in igen") act on.
+/// </summary>
+public sealed record PanelModel(
+    string? Slot, QuotaView View, string? Label, string? Subtitle,
+    IReadOnlyList<OtherAccountRow> OtherAccounts, bool RefreshInFlight, string? AdviceLine, bool BackLink)
+{
+    public static PanelModel Empty { get; } = new(null, QuotaView.Initial, null, null, Array.Empty<OtherAccountRow>(), false, null, false);
+}
+
+/// <summary>
 /// The tray flyout: a borderless, custom-painted, never-activated popup showing
 /// the complete quota panel, panel-v2 "answer first" layout (docs/panel-v2.md).
 /// Window-style approach (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST +
@@ -93,8 +106,26 @@ public sealed class PanelForm : Form
     readonly Font _fontDemoBadge;
 
     float _scale = 1f;
-    QuotaView _view = QuotaView.Initial;
+    // The model being measured / drawn / hit-tested right now. In single mode it is the one model; in full
+    // mode the layout, paint and click code point it at each panel in turn (WithModel).
+    PanelModel _m = PanelModel.Empty;
+    PanelModel _single = PanelModel.Empty;
+    QuotaView _view => _m.View;
+    bool _backLink => _m.BackLink;
+    string? _accountLabel => _m.Label;
+    string? _accountSubtitle => _m.Subtitle;
+    IReadOnlyList<OtherAccountRow> _otherAccounts => _m.OtherAccounts;
+    bool _refreshInFlight => _m.RefreshInFlight;
+    string? _adviceLine => _m.AdviceLine;
     bool _demo;
+
+    // ---- full mode (docs/multi-account.md "Panels"): every account's full panel side by side ----
+    bool _full;
+    IReadOnlyList<PanelModel> _models = Array.Empty<PanelModel>();
+    int _hoverPanel = -1;
+    float _scrollX;
+    const float PanelGap = 8f;
+    static readonly Color TransparentKey = Color.FromArgb(255, 1, 2, 3);
     float _lastHeight = -1f;
 
     // ---- combined mode (docs/multi-account.md "All accounts in one panel") ----
@@ -103,7 +134,6 @@ public sealed class PanelForm : Form
     string? _markedSlot;
     int _hoverCard = -1;
     float _scrollY;
-    bool _backLink; // detailed panel opened from the combined one: shows "<- Alla konton"
     const float CardGap = 8f;
     const float CombinedHeaderHeight = 40f;
     const string AllAccountsTitle = "Alla konton";
@@ -120,18 +150,12 @@ public sealed class PanelForm : Form
 
     /// <summary>The "<- Alla konton" link of a detailed panel was clicked.</summary>
     public event Action? BackToAllRequested;
-    string? _accountLabel;
-    string? _accountSubtitle;
-
     /// <summary>The header's first line when no account label is given (the single-account demo frames).</summary>
     const string DefaultTitle = "Claude Code";
 
     /// <summary>The header title is the account's label; the DEMO badge, when shown, takes the right end of that row.</summary>
     string TitleText => _accountLabel ?? DefaultTitle;
     float TitleWidth => ContentWidth - (_demo ? 54f : 0f);
-    IReadOnlyList<OtherAccountRow> _otherAccounts = Array.Empty<OtherAccountRow>();
-    bool _refreshInFlight;
-    string? _adviceLine;
 
     /// <summary>
     /// docs/multi-account.md "Panel": fired when the user clicks one of the "other accounts"
@@ -150,10 +174,10 @@ public sealed class PanelForm : Form
     /// RequestImmediateRefresh -- this form only knows "the user asked to refresh right now",
     /// never which account that means.
     /// </summary>
-    public event Action? RefreshRequested;
+    public event Action<string?>? RefreshRequested;
 
     /// <summary>docs/multi-account.md "NeedsLogin": fired when the user clicks the "Logga in igen" button shown under the status box of an account that needs a login. The caller knows which account is shown and starts that account's re-login flow.</summary>
-    public event Action? ReloginRequested;
+    public event Action<string?>? ReloginRequested;
 
     public PanelForm(NotifyIcon? trayIcon = null)
     {
@@ -249,19 +273,17 @@ public sealed class PanelForm : Form
     /// renders dimmed and ignores clicks while this is true, so it can never start a second
     /// concurrent poll for the same account.
     /// </param>
-    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null, string? accountSubtitle = null, bool showBackLink = false)
+    public void UpdateView(QuotaView view, bool demo, string? accountLabel = null, IReadOnlyList<OtherAccountRow>? otherAccounts = null, bool refreshInFlight = false, string? adviceLine = null, string? accountSubtitle = null, bool showBackLink = false, string? slot = null)
     {
         try
         {
             _combined = false;
-            _backLink = showBackLink;
-            _view = view;
+            _full = false;
+            TransparencyKey = Color.Empty;
             _demo = demo;
-            _accountLabel = accountLabel;
-            _accountSubtitle = string.IsNullOrWhiteSpace(accountSubtitle) ? null : accountSubtitle;
-            _otherAccounts = otherAccounts ?? Array.Empty<OtherAccountRow>();
-            _refreshInFlight = refreshInFlight;
-            _adviceLine = adviceLine;
+            _single = new PanelModel(slot, view, accountLabel, string.IsNullOrWhiteSpace(accountSubtitle) ? null : accountSubtitle,
+                otherAccounts ?? Array.Empty<OtherAccountRow>(), refreshInFlight, adviceLine, showBackLink);
+            _m = _single;
 
             RefitIfVisible();
         }
@@ -283,7 +305,8 @@ public sealed class PanelForm : Form
         try
         {
             _combined = true;
-            _backLink = false;
+            _full = false;
+            TransparencyKey = Color.Empty;
             _demo = demo;
             _cards = cards;
             _markedSlot = markedSlot;
@@ -297,6 +320,114 @@ public sealed class PanelForm : Form
     }
 
     public bool IsCombined => _combined;
+    public bool IsFull => _full;
+
+    /// <summary>
+    /// Full mode: every account's full panel side by side, in the order given (bottom-aligned, each its
+    /// natural height). `markedSlot` is the panel of the icon that was clicked (accent edge). The panels
+    /// are the single-account rendering exactly, except that the "other accounts" section and the back link
+    /// are never shown here: every account is already on screen.
+    /// </summary>
+    public void UpdateFull(IReadOnlyList<PanelModel> models, string? markedSlot, bool demo)
+    {
+        try
+        {
+            _combined = false;
+            _full = true;
+            TransparencyKey = TransparentKey; // the gaps and the space above shorter panels are click-through
+            _demo = demo;
+            _models = models.Select(m => m with { OtherAccounts = Array.Empty<OtherAccountRow>(), BackLink = false }).ToList();
+            _markedSlot = markedSlot;
+            if (_hoverPanel >= _models.Count) _hoverPanel = -1;
+            if (_models.Count > 0) _m = _models[0];
+            RefitIfVisible();
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"PanelForm.UpdateFull threw: {ex.Message}");
+        }
+    }
+
+    /// <summary>Index of the panel drawn with the accent edge, or -1.</summary>
+    public int MarkedPanelIndex => _models.ToList().FindIndex(m => m.Slot == _markedSlot);
+
+    /// <summary>Natural height of the single-mode panel (tests: single is unchanged and full panels equal it).</summary>
+    internal float SingleHeightForTest => WithModel(_single, () => BuildLayout(DateTimeOffset.UtcNow).TotalHeight);
+
+    /// <summary>The slots of the full panels, in drawn order (tests).</summary>
+    internal IReadOnlyList<string?> FullPanelSlots => _models.Select(m => m.Slot).ToList();
+
+    /// <summary>Natural height of every full panel (tests: the omitted section, the common baseline).</summary>
+    internal IReadOnlyList<float> FullPanelHeights => BuildFullLayout().Heights;
+
+    /// <summary>Demo captures: show the panel of this slot as if the mouse were over it.</summary>
+    internal void SetHoverPanelForDemo(string? slot) => _hoverPanel = _models.ToList().FindIndex(m => m.Slot == slot);
+
+    /// <summary>Runs `work` with the model pointer on `model`, then puts it back.</summary>
+    T WithModel<T>(PanelModel model, Func<T> work)
+    {
+        PanelModel previous = _m;
+        _m = model;
+        try { return work(); }
+        finally { _m = previous; }
+    }
+
+    readonly record struct FullLayout(IReadOnlyList<float> Xs, IReadOnlyList<float> Heights, float TotalWidth, float MaxHeight);
+
+    FullLayout BuildFullLayout()
+    {
+        var xs = new List<float>();
+        var heights = new List<float>();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        float x = 0f, maxH = 0f;
+        foreach (PanelModel model in _models)
+        {
+            float h = WithModel(model, () => BuildLayout(now).TotalHeight);
+            xs.Add(x);
+            heights.Add(h);
+            maxH = Math.Max(maxH, h);
+            x += LogicalWidth + PanelGap;
+        }
+        return new FullLayout(xs, heights, Math.Max(LogicalWidth, x - PanelGap), maxH);
+    }
+
+    /// <summary>The visible height in logical px (the window's, once it has one): panels sit on its bottom edge.</summary>
+    float FullViewHeight(FullLayout layout) => _scale > 0f && Height > 1 ? Height / _scale : layout.MaxHeight;
+
+    /// <summary>Which full panel a logical x (window coordinates) is over, or -1.</summary>
+    int FullIndexAt(FullLayout layout, float logicalX)
+    {
+        float cx = logicalX + _scrollX;
+        for (int i = 0; i < layout.Xs.Count; i++)
+            if (cx >= layout.Xs[i] && cx < layout.Xs[i] + LogicalWidth) return i;
+        return -1;
+    }
+
+    /// <summary>The panels' rectangles in SCREEN pixels: a click in any of them is inside the one panel, anywhere else is outside.</summary>
+    IEnumerable<Rectangle> FullScreenRects()
+    {
+        FullLayout layout = BuildFullLayout();
+        float viewH = FullViewHeight(layout);
+        for (int i = 0; i < layout.Xs.Count; i++)
+        {
+            float left = (layout.Xs[i] - _scrollX) * _scale, top = (viewH - layout.Heights[i]) * _scale;
+            yield return Rectangle.Intersect(Bounds, new Rectangle(Left + (int)Math.Round(left), Top + (int)Math.Round(top), (int)Math.Round(LogicalWidth * _scale), (int)Math.Round(layout.Heights[i] * _scale)));
+        }
+    }
+
+    bool IsInsidePanels(Point screenPoint) => _full ? FullScreenRects().Any(r => r.Contains(screenPoint)) : Bounds.Contains(screenPoint);
+
+    float ClampScrollX(float value) => Math.Clamp(value, 0f, Math.Max(0f, BuildFullLayout().TotalWidth - Width / _scale));
+
+    /// <summary>On opening, scroll a row that does not fit so that the marked panel is in view.</summary>
+    void ScrollMarkedIntoView()
+    {
+        if (!_full) { _scrollX = 0f; return; }
+        FullLayout layout = BuildFullLayout();
+        int marked = MarkedPanelIndex;
+        float centre = marked >= 0 ? layout.Xs[marked] + LogicalWidth / 2f : layout.TotalWidth;
+        _scrollX = ClampScrollX(centre - Width / _scale / 2f);
+    }
 
     /// <summary>Index of the card drawn with the accent edge (the clicked icon's), or -1.</summary>
     public int MarkedCardIndex => _cards.ToList().FindIndex(c => c.Slot == _markedSlot);
@@ -307,13 +438,19 @@ public sealed class PanelForm : Form
     void RefitIfVisible()
     {
         if (!Visible) return;
-        float height = MeasureTotalHeight(DateTimeOffset.UtcNow);
-        if (Math.Abs(height - _lastHeight) > 0.5f) Reanchor();
+        (float width, float height) = MeasureContent(DateTimeOffset.UtcNow);
+        if (Math.Abs(height - _lastHeight) > 0.5f || Math.Abs(width - _lastWidth) > 0.5f) Reanchor();
         else Invalidate();
     }
 
-    /// <summary>The content height of whichever view is showing (before the work-area cap).</summary>
-    float MeasureTotalHeight(DateTimeOffset now) => _combined ? BuildCombinedLayout().TotalHeight : BuildLayout(now).TotalHeight;
+    float _lastWidth = LogicalWidth;
+
+    /// <summary>The content size of whichever view is showing (before the work-area cap).</summary>
+    (float Width, float Height) MeasureContent(DateTimeOffset now)
+    {
+        if (_full) { FullLayout f = BuildFullLayout(); return (f.TotalWidth, f.MaxHeight); }
+        return (LogicalWidth, _combined ? BuildCombinedLayout().TotalHeight : BuildLayout(now).TotalHeight);
+    }
 
     public void Toggle()
     {
@@ -358,7 +495,23 @@ public sealed class PanelForm : Form
                 return;
             }
 
-            PanelLayout layout = BuildLayout(DateTimeOffset.UtcNow);
+            PanelLayout layout;
+            if (_full)
+            {
+                // Find the panel under the click, then run the ordinary single-panel hit test on it
+                // with the point translated into that panel's own coordinates.
+                FullLayout full = BuildFullLayout();
+                int i = FullIndexAt(full, logicalPoint.X);
+                if (i < 0) return;
+                float top = FullViewHeight(full) - full.Heights[i];
+                logicalPoint = new PointF(logicalPoint.X + _scrollX - full.Xs[i], logicalPoint.Y - top);
+                _m = _models[i];
+                layout = BuildLayout(DateTimeOffset.UtcNow);
+            }
+            else
+            {
+                layout = BuildLayout(DateTimeOffset.UtcNow);
+            }
 
             if (_backLink && layout.BackLinkRect.Contains(logicalPoint))
             {
@@ -373,13 +526,13 @@ public sealed class PanelForm : Form
             // is the other half, for the timer-driven case).
             if (!_refreshInFlight && layout.RefreshHitRect.Contains(logicalPoint))
             {
-                RefreshRequested?.Invoke();
+                RefreshRequested?.Invoke(_m.Slot);
                 return;
             }
 
             if (_view.NeedsLogin && layout.LoginButtonRect.Contains(logicalPoint))
             {
-                ReloginRequested?.Invoke();
+                ReloginRequested?.Invoke(_m.Slot);
                 return;
             }
 
@@ -409,6 +562,12 @@ public sealed class PanelForm : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+        if (_full && _scale > 0f)
+        {
+            int hoverPanel = FullIndexAt(BuildFullLayout(), e.X / _scale);
+            if (hoverPanel != _hoverPanel) { _hoverPanel = hoverPanel; Invalidate(); }
+            return;
+        }
         if (!_combined || _scale <= 0f) return;
         try
         {
@@ -423,13 +582,20 @@ public sealed class PanelForm : Form
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hoverCard != -1) { _hoverCard = -1; Invalidate(); }
+        if (_hoverCard != -1 || _hoverPanel != -1) { _hoverCard = -1; _hoverPanel = -1; Invalidate(); }
     }
 
     /// <summary>Scrolls the combined panel when its cards do not fit the work area.</summary>
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
+        if (_full && _scale > 0f)
+        {
+            // Plain wheel and Shift+wheel both scroll the row: the panels have no vertical scroll.
+            _scrollX = ClampScrollX(_scrollX - e.Delta / 120f * 80f);
+            Invalidate();
+            return;
+        }
         if (!_combined || _scale <= 0f) return;
         _scrollY = ClampScroll(_scrollY - e.Delta / 120f * 40f);
         Invalidate();
@@ -445,11 +611,12 @@ public sealed class PanelForm : Form
     {
         if (Visible) return;
 
-        _lastHeight = MeasureTotalHeight(DateTimeOffset.UtcNow);
-        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(_lastHeight)));
+        (_lastWidth, _lastHeight) = MeasureContent(DateTimeOffset.UtcNow);
+        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size((int)Math.Ceiling(_lastWidth), (int)Math.Ceiling(_lastHeight)), _full ? LogicalWidth : 0);
         _scale = scale;
         Size = size;
         Location = location;
+        ScrollMarkedIntoView();
 
         Show(); // ShowWithoutActivation + WS_EX_NOACTIVATE: never takes focus or foreground
         _tickTimer.Start();
@@ -460,7 +627,7 @@ public sealed class PanelForm : Form
         // (StatusBarApplicationContext) sees a hidden panel and reopens it -- one click that
         // should close the panel instead leaves it open.
         _dismissWatcher.Start(
-            screenPoint => Bounds.Contains(screenPoint),
+            IsInsidePanels,
             screenPoint => PanelAnchor.TryGetIconRect(_trayIcon, out Rectangle iconRect) && iconRect.Contains(screenPoint));
     }
 
@@ -475,11 +642,12 @@ public sealed class PanelForm : Form
     /// <summary>Bottom edge stays 12px above the taskbar even as content height changes (wrapped status-box lines, secondary line, Stale note appearing/disappearing).</summary>
     void Reanchor()
     {
-        _lastHeight = MeasureTotalHeight(DateTimeOffset.UtcNow);
-        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size(LogicalWidth, (int)Math.Ceiling(_lastHeight)));
+        (_lastWidth, _lastHeight) = MeasureContent(DateTimeOffset.UtcNow);
+        var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size((int)Math.Ceiling(_lastWidth), (int)Math.Ceiling(_lastHeight)), _full ? LogicalWidth : 0);
         _scale = scale;
         Bounds = new Rectangle(location, size);
         if (_combined) _scrollY = ClampScroll(_scrollY);
+        if (_full) _scrollX = ClampScrollX(_scrollX);
         Invalidate();
     }
 
@@ -624,9 +792,16 @@ public sealed class PanelForm : Form
         try
         {
             Graphics g = e.Graphics;
-            g.Clear(PanelBackground);
-            using (var border = new Pen(BorderColor))
-                g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+            if (_full)
+            {
+                g.Clear(TransparentKey); // each panel paints its own background and border (DrawFull)
+            }
+            else
+            {
+                g.Clear(PanelBackground);
+                using (var border = new Pen(BorderColor))
+                    g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+            }
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
@@ -639,22 +814,13 @@ public sealed class PanelForm : Form
                 DrawCombined(g);
                 return;
             }
+            if (_full)
+            {
+                DrawFull(g, now);
+                return;
+            }
             PanelLayout layout = BuildLayout(now);
-
-            DrawHeader(g, layout);
-            DrawStatusBox(g, layout);
-            DrawLoginButton(g, layout);
-            DrawSection(g, layout.SessionY, layout.Text.Session, _view.Session, now);
-            DrawSection(g, layout.WeeklyY, layout.Text.Weekly, _view.Weekly, now);
-
-            using (var rulePen = new Pen(RuleColor))
-                g.DrawLine(rulePen, SidePadding, layout.RuleY, LogicalWidth - SidePadding, layout.RuleY);
-
-            using (var footerBrush = new SolidBrush(TextTertiary))
-                g.DrawString(BuildFooter(_view), _fontFooter, footerBrush, SidePadding, layout.FooterY);
-
-            DrawAdvice(g, layout);
-            DrawOtherAccounts(g, layout);
+            DrawPanelContents(g, layout, now);
         }
         catch (Exception ex)
         {
@@ -666,6 +832,68 @@ public sealed class PanelForm : Form
             try { BeginInvoke(new Action(HidePanel)); } catch { /* handle may already be gone */ }
         }
     }
+
+    /// <summary>Everything inside one panel's rectangle, in that panel's own coordinates. The ONE drawing path of both single and full mode.</summary>
+    void DrawPanelContents(Graphics g, PanelLayout layout, DateTimeOffset now)
+    {
+        DrawHeader(g, layout);
+        DrawStatusBox(g, layout);
+        DrawLoginButton(g, layout);
+        DrawSection(g, layout.SessionY, layout.Text.Session, _view.Session, now);
+        DrawSection(g, layout.WeeklyY, layout.Text.Weekly, _view.Weekly, now);
+
+        using (var rulePen = new Pen(RuleColor))
+            g.DrawLine(rulePen, SidePadding, layout.RuleY, LogicalWidth - SidePadding, layout.RuleY);
+
+        using (var footerBrush = new SolidBrush(TextTertiary))
+            g.DrawString(BuildFooter(_view), _fontFooter, footerBrush, SidePadding, layout.FooterY);
+
+        DrawAdvice(g, layout);
+        DrawOtherAccounts(g, layout);
+    }
+
+    /// <summary>
+    /// Full mode: each panel is the ordinary single-panel rendering (DrawPanelContents) translated to its
+    /// x offset and bottom-aligned on the common baseline, on its own background and border. The panel of
+    /// the clicked icon gets the accent edge; the one under the mouse is lifted slightly.
+    /// </summary>
+    void DrawFull(Graphics g, DateTimeOffset now)
+    {
+        FullLayout full = BuildFullLayout();
+        float viewH = FullViewHeight(full);
+        for (int i = 0; i < _models.Count; i++)
+        {
+            float h = full.Heights[i];
+            var state = g.Save();
+            g.TranslateTransform(full.Xs[i] - _scrollX, viewH - h);
+
+            // Plain square fills and a 1px border on whole pixels: the window's transparency key must not fringe.
+            SmoothingMode smoothing = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None;
+            using (var bg = new SolidBrush(PanelBackground)) g.FillRectangle(bg, 0, 0, LogicalWidth, h);
+            using (var border = new Pen(i == _hoverPanel ? HoverBorder : BorderColor)) g.DrawRectangle(border, 0, 0, LogicalWidth - 1, h - 1);
+            g.SmoothingMode = smoothing;
+
+            PanelModel model = _models[i];
+            WithModel(model, () => { DrawPanelContents(g, BuildLayout(now), now); return 0; });
+
+            if (i == _hoverPanel)
+            {
+                using var lift = new SolidBrush(Color.FromArgb(12, 255, 255, 255));
+                g.FillRectangle(lift, 1, 1, LogicalWidth - 2, h - 2);
+            }
+            if (model.Slot is not null && model.Slot == _markedSlot)
+            {
+                g.SmoothingMode = SmoothingMode.None;
+                using var accent = new SolidBrush(CardAccent);
+                g.FillRectangle(accent, 0, 0, 3f, h);
+                g.SmoothingMode = smoothing;
+            }
+            g.Restore(state);
+        }
+    }
+
+    static readonly Color HoverBorder = Color.FromArgb(255, 0x6A, 0x6A, 0x6A);
 
     // ---- the combined panel ----
 

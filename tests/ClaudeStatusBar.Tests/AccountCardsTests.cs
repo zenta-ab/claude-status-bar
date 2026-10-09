@@ -227,11 +227,11 @@ public class AccountCardsTests
         string path = TempPath();
         try
         {
-            var config = new AccountsConfig { Version = 2, PanelMode = PanelDisplayMode.All };
+            var config = new AccountsConfig { Version = 2, PanelMode = PanelDisplayMode.Cards };
             AccountsConfig.Save(config, path);
 
-            Assert.Contains("\"panelMode\": \"all\"", File.ReadAllText(path));
-            Assert.Equal(PanelDisplayMode.All, AccountsConfig.Load(path).Config.EffectivePanelMode);
+            Assert.Contains("\"panelMode\": \"cards\"", File.ReadAllText(path));
+            Assert.Equal(PanelDisplayMode.Cards, AccountsConfig.Load(path).Config.EffectivePanelMode);
         }
         finally { Directory.Delete(Path.GetDirectoryName(path)!, true); }
     }
@@ -242,7 +242,7 @@ public class AccountCardsTests
         string path = TempPath();
         try
         {
-            var config = new AccountsConfig { Version = 2, PanelMode = PanelDisplayMode.All };
+            var config = new AccountsConfig { Version = 2, PanelMode = PanelDisplayMode.Cards };
             config.PanelMode = null;
             AccountsConfig.Save(config, path);
             Assert.DoesNotContain("panelMode", File.ReadAllText(path));

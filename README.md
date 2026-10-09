@@ -90,8 +90,11 @@ account's quota, forecast and history never mixes with another's.
 - **Add an account**: right-click the icon and choose **Lägg till konto…**. A console opens and sends you
   to the browser; log in with the account you want and choose the right organisation there. Logging in
   as an account the app already follows is refused, and says which one it is.
-- **All accounts in one panel**: right-click, **Visa alla konton i panelen**. Clicking any icon then opens a
-  panel with a compact card per account (also those without an icon); click a card for that account's details.
+- **Panels** (right-click, **Panel**): **Ett konto i taget** (default) opens the account you clicked;
+  **Alla konton – fulla paneler sida vid sida** opens every account's full panel next to each other (the one
+  you clicked is marked; scroll sideways with the mouse wheel if they do not fit the screen); **Alla konton –
+  kompakta kort** opens one panel with a compact card per account, and a click on a card opens that account's
+  details.
 - **Rename** (right-click, **Konton**, the account, **Byt namn…**): give an account a name of your own
   (up to 40 characters); leave it empty to go back to the automatic one. When two accounts would get the
   same automatic name, the email domain tells them apart ("Max (example.com)" / "Max (example.org)").

@@ -86,7 +86,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     readonly record struct DisplayAccount(string Slot, string? Label, QuotaView View, bool IsDuplicate = false, OtherAccountRow? DuplicateRow = null, string? DuplicateSuffix = null, string? Title = null, string? Subtitle = null);
 
     /// <summary>One step of the --demo / --capture-states cycle: either a legacy single-account state (Accounts.Count == 1, Label null) or a MultiAccountDemoSource frame.</summary>
-    readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex, bool Combined = false, bool DetailOfCombined = false);
+    readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex, PanelDisplayMode Panel = PanelDisplayMode.Single, bool DetailOfCombined = false, int HoverIndex = -1);
 
     readonly bool _demoMode;
     readonly PanelForm _panel;
@@ -98,7 +98,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     readonly Dictionary<string, TrayIconHandle> _iconsBySlot = new();
     readonly ContextMenuStrip _trayMenu;
     readonly ToolStripMenuItem _toggleModeItem;
-    ToolStripMenuItem? _panelModeItem;
+    readonly Dictionary<PanelDisplayMode, ToolStripMenuItem> _panelModeItems = new();
     PanelDisplayMode _panelMode = PanelDisplayMode.Single; // docs/multi-account.md "All accounts in one panel"
     bool _combinedOpen;       // the panel is showing the combined view (only meaningful with _panelMode == All)
     string? _markedSlot;      // the card of the icon that was clicked
@@ -142,7 +142,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         _panel.BackToAllRequested += () => { _combinedOpen = true; Tick(); };
         _panel.CardReloginClicked += slot => StartLoginFlow(slot);
         _panel.RefreshRequested += OnRefreshRequested;
-        _panel.ReloginRequested += () => { if (_shownSlot is { } slot) StartLoginFlow(slot); };
+        _panel.ReloginRequested += slot => { if ((slot ?? _shownSlot) is { } s) StartLoginFlow(s); };
         _panel.AdviceClicked += () => OpenStatisticsWindow();
 
         _evalTimer = new System.Windows.Forms.Timer { Interval = (int)EvalTickInterval.TotalMilliseconds };
@@ -469,8 +469,21 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         var toggleItem = new ToolStripMenuItem { ForeColor = DarkMenuColors.Foreground };
         toggleItem.Click += (_, _) => ToggleDisplayMode();
 
-        _panelModeItem = new ToolStripMenuItem(PanelModeMenuText) { ForeColor = DarkMenuColors.Foreground, CheckOnClick = false };
-        _panelModeItem.Click += (_, _) => TogglePanelMode();
+        // "Panel >": what clicking an icon opens -- three radio items (docs/multi-account.md "Panels").
+        var panelMenu = new ToolStripMenuItem(PanelMenuText) { ForeColor = DarkMenuColors.Foreground };
+        panelMenu.DropDown.Renderer = menu.Renderer;
+        panelMenu.DropDown.BackColor = DarkMenuColors.Background;
+        foreach ((PanelDisplayMode mode, string text) in new[]
+        {
+            (PanelDisplayMode.Single, PanelSingleText), (PanelDisplayMode.Full, PanelFullText), (PanelDisplayMode.Cards, PanelCardsText),
+        })
+        {
+            var item = new ToolStripMenuItem(text) { ForeColor = DarkMenuColors.Foreground };
+            PanelDisplayMode captured = mode;
+            item.Click += (_, _) => SetPanelMode(captured);
+            _panelModeItems[mode] = item;
+            panelMenu.DropDownItems.Add(item);
+        }
 
         var statisticsItem = new ToolStripMenuItem("Statistik…") { ForeColor = DarkMenuColors.Foreground };
         statisticsItem.Click += (_, _) => OpenStatisticsWindow();
@@ -487,7 +500,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
 
         menu.Items.Add(showPanelItem);
         menu.Items.Add(toggleItem);
-        menu.Items.Add(_panelModeItem);
+        menu.Items.Add(panelMenu);
         menu.Items.Add(statisticsItem);
         menu.Items.Add(addAccountItem);
         menu.Items.Add(accountsItem);
@@ -646,24 +659,33 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         if (!_demoMode) RenderAccounts(BuildLiveDisplayAccounts(), _displayMode, _maxIcons);
     }
 
-    public const string PanelModeMenuText = "Visa alla konton i panelen";
+    public const string PanelMenuText = "Panel";
+    public const string PanelSingleText = "Ett konto i taget";
+    public const string PanelFullText = "Alla konton – fulla paneler sida vid sida";
+    public const string PanelCardsText = "Alla konton – kompakta kort";
 
     void UpdatePanelModeItem()
     {
-        if (_panelModeItem is not null) _panelModeItem.Checked = _panelMode == PanelDisplayMode.All;
+        foreach ((PanelDisplayMode mode, ToolStripMenuItem item) in _panelModeItems) item.Checked = mode == _panelMode;
     }
 
-    /// <summary>The tray menu toggle: clicking an icon opens one panel with a card per account (All) or the detailed panel of that account (Single, the default). Persisted as "panelMode" in accounts.json.</summary>
-    void TogglePanelMode()
+    /// <summary>
+    /// The tray submenu "Panel": clicking an icon opens that account's panel (Single, the default), every
+    /// account's full panel side by side (Full), or one panel of compact cards (Cards). Persisted as
+    /// "panelMode" in accounts.json (absent = single).
+    /// </summary>
+    void SetPanelMode(PanelDisplayMode mode)
     {
-        _panelMode = _panelMode == PanelDisplayMode.All ? PanelDisplayMode.Single : PanelDisplayMode.All;
+        if (mode == _panelMode) return;
+        _panelMode = mode;
         _combinedOpen = false;
+        _panel.HidePanel();
         UpdatePanelModeItem();
         if (!_demoMode)
         {
             try
             {
-                _accountsConfig.PanelMode = _panelMode == PanelDisplayMode.All ? PanelDisplayMode.All : null; // absent = single
+                _accountsConfig.PanelMode = mode == PanelDisplayMode.Single ? null : mode; // absent = single
                 AccountsConfig.Save(_accountsConfig);
             }
             catch (Exception ex)
@@ -675,18 +697,19 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// A click on a tray icon (or "Visa panel"). Single: that account's detailed panel. All: the combined
-    /// panel, with the clicked icon's card marked; a second click on the same icon closes it.
+    /// A click on a tray icon (or "Visa panel"). Single: that account's detailed panel. Cards / Full: the
+    /// combined panel / the row of full panels, with the clicked icon's card / panel marked; a second click
+    /// on the same icon closes it.
     /// </summary>
     void OnIconClicked(string slot)
     {
-        if (_panelMode != PanelDisplayMode.All) { FocusSlot(slot); return; }
+        if (_panelMode == PanelDisplayMode.Single) { FocusSlot(slot); return; }
 
         if (_panel.Visible && _combinedOpen && _markedSlot == slot) { _panel.Toggle(); return; }
         _combinedOpen = true;
         _markedSlot = slot;
+        Tick(); // build the view first, so the panel opens at its real size
         if (!_panel.Visible) _panel.ShowPanel();
-        Tick();
     }
 
     /// <summary>Shows the ACTION the click would perform (what mode you'd switch TO), the common toggle-item idiom.</summary>
@@ -839,8 +862,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// <summary>Demo frames say whether they show the combined panel.</summary>
     void ApplyFramePanelMode(DemoFrame frame)
     {
-        _panelMode = frame.Combined ? PanelDisplayMode.All : PanelDisplayMode.Single;
-        _combinedOpen = frame.Combined && !frame.DetailOfCombined;
+        _panelMode = frame.Panel;
+        _combinedOpen = frame.Panel != PanelDisplayMode.Single && !frame.DetailOfCombined;
         _markedSlot = frame.Accounts[frame.FocusIndex < frame.Accounts.Count ? frame.FocusIndex : 0].Slot;
     }
 
@@ -927,9 +950,14 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         _shownSlot = current[panelIndex].Slot;
         DisplayAccount shown = current[panelIndex];
 
-        if (_panelMode == PanelDisplayMode.All && _combinedOpen)
+        if (_panelMode == PanelDisplayMode.Cards && _combinedOpen)
         {
             RenderCombined(current, now);
+            return;
+        }
+        if (_panelMode == PanelDisplayMode.Full && _combinedOpen)
+        {
+            RenderFull(current, now);
             return;
         }
 
@@ -958,32 +986,58 @@ public sealed class StatusBarApplicationContext : ApplicationContext
 
         // The panel title is the account's label (or, in the legacy single-account demo frames, none);
         // the line under it is the plan and organisation.
-        _panel.UpdateView(shown.View, _demoMode, shown.Title ?? (multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null), otherRows, refreshInFlight, adviceLine, shown.Subtitle, showBackLink: _panelMode == PanelDisplayMode.All);
+        _panel.UpdateView(shown.View, _demoMode, shown.Title ?? (multi ? shown.Label ?? $"Konto {panelIndex + 1}" : null), otherRows, refreshInFlight, adviceLine, shown.Subtitle, showBackLink: _panelMode == PanelDisplayMode.Cards, slot: shown.Slot);
         UpdateLoadingTimer(current);
         _panel.SetAnchorIcon(_iconsBySlot.TryGetValue(shown.Slot, out TrayIconHandle? anchorHandle)
             ? anchorHandle.NotifyIcon
             : _iconsBySlot.Values.Select(h => h.NotifyIcon).FirstOrDefault());
     }
 
-    /// <summary>
-    /// The combined panel (docs/multi-account.md "All accounts in one panel"): a card per enabled
-    /// account -- icon or not -- ordered like the icons on screen, then the accounts without an icon in
-    /// config order. The clicked icon's card is marked.
-    /// </summary>
-    void RenderCombined(IReadOnlyList<DisplayAccount> current, DateTimeOffset now)
+    /// <summary>The accounts to show in a multi-account panel, in order: icons left to right, then the rest in config order.</summary>
+    List<DisplayAccount> OrderedForMultiPanel(IReadOnlyList<DisplayAccount> current)
     {
         List<DisplayAccount> shownAccounts = current.Where(a => !a.IsDuplicate).ToList();
         IReadOnlyList<string> order = AccountCards.Order(
             _iconsBySlot.Select(kv => (kv.Key, PanelAnchor.TryGetIconRect(kv.Value.NotifyIcon, out Rectangle r) ? (Rectangle?)r : null)).ToList(),
             shownAccounts.Select(a => a.Slot).ToList());
-
         var bySlot = shownAccounts.ToDictionary(a => a.Slot, StringComparer.Ordinal);
-        var cards = new List<AccountCard>();
-        foreach (string slot in order)
+        return order.Select(slot => bySlot[slot]).ToList();
+    }
+
+    /// <summary>
+    /// Full mode (docs/multi-account.md "Panels"): every enabled account's ordinary full panel, side by side,
+    /// in the same order as the cards. Each model carries its own account's refresh state and advice line, so
+    /// the panel's own controls act on its own account.
+    /// </summary>
+    void RenderFull(IReadOnlyList<DisplayAccount> current, DateTimeOffset now)
+    {
+        var models = new List<PanelModel>();
+        foreach (DisplayAccount a in OrderedForMultiPanel(current))
         {
-            DisplayAccount a = bySlot[slot];
-            int position = current.ToList().FindIndex(x => x.Slot == slot);
-            cards.Add(AccountCards.Compose(new CardInput(slot, a.Title ?? a.Label ?? $"Konto {position + 1}", a.Subtitle, a.View), now, TimeZoneInfo.Local));
+            int position = current.ToList().FindIndex(x => x.Slot == a.Slot);
+            AccountRuntime? runtime = _demoMode ? null : _accounts.FirstOrDefault(r => r.Slot == a.Slot);
+            models.Add(new PanelModel(a.Slot, a.View, a.Title ?? a.Label ?? $"Konto {position + 1}", a.Subtitle,
+                Array.Empty<OtherAccountRow>(), runtime?.IsPolling ?? false, runtime?.AdviceLine, BackLink: false));
+        }
+
+        _shownSlot = null; // no single "shown" account: each panel's controls carry their own slot
+        _panel.UpdateFull(models, _markedSlot, _demoMode);
+        _panel.SetAnchorIcon(_markedSlot is { } m && _iconsBySlot.TryGetValue(m, out TrayIconHandle? h) ? h.NotifyIcon : _iconsBySlot.Values.Select(x => x.NotifyIcon).FirstOrDefault());
+        UpdateLoadingTimer(current);
+    }
+
+    /// <summary>
+    /// The combined panel (docs/multi-account.md "Panels", cards): a card per enabled
+    /// account -- icon or not -- ordered like the icons on screen, then the accounts without an icon in
+    /// config order. The clicked icon's card is marked.
+    /// </summary>
+    void RenderCombined(IReadOnlyList<DisplayAccount> current, DateTimeOffset now)
+    {
+        var cards = new List<AccountCard>();
+        foreach (DisplayAccount a in OrderedForMultiPanel(current))
+        {
+            int position = current.ToList().FindIndex(x => x.Slot == a.Slot);
+            cards.Add(AccountCards.Compose(new CardInput(a.Slot, a.Title ?? a.Label ?? $"Konto {position + 1}", a.Subtitle, a.View), now, TimeZoneInfo.Local));
         }
 
         _shownSlot = null; // no single account is "the shown one": the reload button / per-account actions do not apply here
@@ -1029,10 +1083,11 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     /// call. Re-ticks immediately afterward so the button's busy state shows up without waiting
     /// up to 1s for the next regular eval tick (the same pattern FocusSlot already uses).
     /// </summary>
-    void OnRefreshRequested()
+    void OnRefreshRequested(string? requestedSlot)
     {
         if (_demoMode || _flows is { IsMutating: true }) return;
-        if (_shownSlot is not { } slot || _accounts.FirstOrDefault(a => a.Slot == slot) is not { } account) return;
+        // The panel says which account's refresh button was clicked (full mode shows several panels).
+        if ((requestedSlot ?? _shownSlot) is not { } slot || _accounts.FirstOrDefault(a => a.Slot == slot) is not { } account) return;
 
         // Defensive (docs/multi-account.md "Duplicate accounts"): _shownSlot should never
         // point at a duplicate -- RenderAccounts resets _explicitPanelSlot away from one
@@ -1123,9 +1178,9 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         // The combined panel (docs/multi-account.md "All accounts in one panel") for 1, 2 and 3 accounts.
         MultiAccountDemoSource.MultiState three = MultiAccountDemoSource.Build(utcNow).First(s => s.Key == "multi_per_account");
         IReadOnlyList<DisplayAccount> threeAccounts = three.Accounts.Select((a, i) => new DisplayAccount($"demo-{i}", a.Label, a.View, Title: a.Label, Subtitle: a.Subtitle)).ToList();
-        frames.Add(new DemoFrame("combined_1", AccountDisplayMode.PerAccount, threeAccounts.Take(1).ToList(), FocusIndex: 0, Combined: true));
-        frames.Add(new DemoFrame("combined_2", AccountDisplayMode.PerAccount, threeAccounts.Take(2).ToList(), FocusIndex: 1, Combined: true));
-        frames.Add(new DemoFrame("combined_3", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Combined: true));
+        frames.Add(new DemoFrame("combined_1", AccountDisplayMode.PerAccount, threeAccounts.Take(1).ToList(), FocusIndex: 0, Panel: PanelDisplayMode.Cards));
+        frames.Add(new DemoFrame("combined_2", AccountDisplayMode.PerAccount, threeAccounts.Take(2).ToList(), FocusIndex: 1, Panel: PanelDisplayMode.Cards));
+        frames.Add(new DemoFrame("combined_3", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Cards));
         // ... with one account in each unusual state, and the account without an icon (binding shows one icon).
         MultiAccountDemoSource.MultiState states = MultiAccountDemoSource.Build(utcNow).First(s => s.Key == "multi_needs_login");
         MultiAccountDemoSource.MultiState loading = MultiAccountDemoSource.Build(utcNow).First(s => s.Key == "multi_loading");
@@ -1135,8 +1190,20 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             new("demo-3", states.Accounts[1].Label, states.Accounts[1].View, Title: "Konto utan inloggning", Subtitle: states.Accounts[1].Subtitle),
             new("demo-4", loading.Accounts[1].Label, loading.Accounts[1].View, Title: "Nytt konto", Subtitle: loading.Accounts[1].Subtitle),
         };
-        frames.Add(new DemoFrame("combined_detail", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Combined: true, DetailOfCombined: true));
-        frames.Add(new DemoFrame("combined_5_binding", AccountDisplayMode.Binding, mixed, FocusIndex: 2, Combined: true));
+        frames.Add(new DemoFrame("combined_detail", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Cards, DetailOfCombined: true));
+        frames.Add(new DemoFrame("combined_5_binding", AccountDisplayMode.Binding, mixed, FocusIndex: 2, Panel: PanelDisplayMode.Cards));
+
+        // Full panels side by side (docs/multi-account.md "Panels"): two and three accounts (one marked, one
+        // hovered), and a row that does not fit the work area width.
+        frames.Add(new DemoFrame("full_2", AccountDisplayMode.PerAccount, threeAccounts.Take(2).ToList(), FocusIndex: 0, Panel: PanelDisplayMode.Full, HoverIndex: 1));
+        frames.Add(new DemoFrame("full_3", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Full, HoverIndex: 2));
+        var wide = new List<DisplayAccount>();
+        for (int i = 0; i < 8; i++)
+        {
+            DisplayAccount source = mixed[i % mixed.Count];
+            wide.Add(source with { Slot = $"demo-w{i}" });
+        }
+        frames.Add(new DemoFrame("full_8_wide", AccountDisplayMode.PerAccount, wide, FocusIndex: 6, Panel: PanelDisplayMode.Full));
 
         return frames;
     }
@@ -1193,6 +1260,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             _explicitPanelSlot = frames[i].Accounts[frames[i].FocusIndex < frames[i].Accounts.Count ? frames[i].FocusIndex : 0].Slot;
             ApplyFramePanelMode(frames[i]);
             RenderAccounts(frames[i].Accounts, frames[i].Mode, DemoMaxIcons);
+            _panel.SetHoverPanelForDemo(frames[i].HoverIndex >= 0 ? frames[i].Accounts[frames[i].HoverIndex].Slot : null);
             _panel.ShowPanel();
             waitingToCapture = true;
             stepTimer.Interval = 500; // let layout/paint settle before the screenshot

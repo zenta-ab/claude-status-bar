@@ -27,7 +27,7 @@ public static class PanelAnchor
     /// is no need to track a live monitor move the way a draggable window would),
     /// and the on-screen location for the resulting physical-pixel size.
     /// </summary>
-    public static (Point Location, Size Size, float Scale) Resolve(NotifyIcon? notifyIcon, Size logicalSize)
+    public static (Point Location, Size Size, float Scale) Resolve(NotifyIcon? notifyIcon, Size logicalSize, int rightAlignSingleLogicalWidth = 0)
     {
         Rectangle? iconRect = TryGetIconRect(notifyIcon, out Rectangle r) ? r : null;
         Screen screen = iconRect is { } ir ? Screen.FromRectangle(ir) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
@@ -36,10 +36,13 @@ public static class PanelAnchor
         // The panel never grows past the work area (the combined panel with many accounts would):
         // its content scrolls instead. Leaves the taskbar gap and a margin at both ends.
         int maxPhysicalHeight = Math.Max(1, screen.WorkingArea.Height - TaskbarGap - 2 * ScreenMargin);
+        // Likewise in width: a row of panels wider than the work area is scrolled horizontally.
+        int maxPhysicalWidth = Math.Max(1, screen.WorkingArea.Width - 2 * ScreenMargin);
         var physicalSize = new Size(
-            (int)Math.Round(logicalSize.Width * scale),
+            Math.Min(maxPhysicalWidth, (int)Math.Round(logicalSize.Width * scale)),
             Math.Min(maxPhysicalHeight, (int)Math.Round(logicalSize.Height * scale)));
-        Point location = Compute(iconRect, screen.Bounds, screen.WorkingArea, physicalSize);
+        Point location = Compute(iconRect, screen.Bounds, screen.WorkingArea, physicalSize,
+            (int)Math.Round(rightAlignSingleLogicalWidth * scale));
         return (location, physicalSize, scale);
     }
 
@@ -71,18 +74,24 @@ public static class PanelAnchor
     }
 
     /// <summary>Pure geometry, split out from Compute() so anchor placement can be exercised without a real NotifyIcon.</summary>
-    internal static Point Compute(Rectangle? iconRect, Rectangle screenBounds, Rectangle workArea, Size panelSize)
+    internal static Point Compute(Rectangle? iconRect, Rectangle screenBounds, Rectangle workArea, Size panelSize, int rightAlignSinglePhysicalWidth = 0)
     {
         Point anchor = iconRect is { } ir
             ? new Point(ir.X + ir.Width / 2, ir.Y + ir.Height / 2)
             : new Point(workArea.Right, workArea.Bottom);
+
+        // A row of several panels (docs/multi-account.md "Panels"): its right edge sits where the right
+        // edge of ONE panel would -- centred on the icon -- and the row extends to the left.
+        int centredX = rightAlignSinglePhysicalWidth > 0
+            ? anchor.X + rightAlignSinglePhysicalWidth / 2 - panelSize.Width
+            : anchor.X - panelSize.Width / 2;
 
         int x, y;
         switch (TaskbarEdge(screenBounds, workArea))
         {
             case Edge.Top:
                 y = workArea.Top + TaskbarGap;
-                x = anchor.X - panelSize.Width / 2;
+                x = centredX;
                 break;
             case Edge.Right:
                 x = workArea.Right - TaskbarGap - panelSize.Width;
@@ -94,7 +103,7 @@ public static class PanelAnchor
                 break;
             default: // bottom, or no taskbar edge detected -- the common case
                 y = workArea.Bottom - TaskbarGap - panelSize.Height;
-                x = anchor.X - panelSize.Width / 2;
+                x = centredX;
                 break;
         }
 

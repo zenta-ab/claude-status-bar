@@ -55,16 +55,17 @@ public readonly record struct QuotaIconParams(
             // the target here is >= 3:1 contrast (not >= 5:1), specifically so this state reads
             // as quieter/duller than the active Tight/Safe glyphs -- see IconContrastTests'
             // relative-brightness assertion. Only the pie moves; the ring itself never changes.
+            Color exhaustedColour = Palette.ForTaskbar(Palette.Crit, taskbarDark, GaugeRenderer.ExhaustedDimAlpha);
             double countdown = Quantize(CountdownFrac(view, blockedUntil, utcNow));
             return new QuotaIconParams(
                 Outline: false, Exhausted: true, RingFrac: 1.0, PieFrac: countdown, ForecastFrac: 0, SessionForecastFrac: countdown,
-                RingArgb: Palette.Crit.ToArgb(), PieArgb: Palette.Crit.ToArgb(), Stale: stale, px, taskbarDark);
+                RingArgb: exhaustedColour.ToArgb(), PieArgb: exhaustedColour.ToArgb(), Stale: stale, px, taskbarDark);
         }
 
         double ringFrac = Quantize((view.Weekly.UsedPct ?? 0.0) / 100.0);
         double pieFrac = Quantize((view.Session.UsedPct ?? 0.0) / 100.0);
-        Color ringColor = Palette.ColorForState(view.Weekly.State);
-        Color pieColor = Palette.ColorForState(view.Session.State);
+        Color ringColor = Palette.ForTaskbar(Palette.ColorForState(view.Weekly.State), taskbarDark);
+        Color pieColor = Palette.ForTaskbar(Palette.ColorForState(view.Session.State), taskbarDark);
 
         // Gated on State, never on ProjectedPctAtReset's nullability: Measuring must
         // never draw a wedge even if the model still carries a stale forecast number.

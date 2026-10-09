@@ -18,17 +18,17 @@ public static class LoadingFrames
     public const int FramesPerSecond = 8;
     public const int FrameIntervalMs = 1000 / FramesPerSecond;
 
-    static readonly ConcurrentDictionary<(int Px, int Frame), byte[]> Cache = new();
+    static readonly ConcurrentDictionary<(int Px, int Frame, bool Dark), byte[]> Cache = new();
 
     /// <summary>Which of the frames shows at this instant: the same for every icon, so several loading accounts spin in step.</summary>
     public static int FrameAt(DateTimeOffset now) =>
         (int)(now.ToUnixTimeMilliseconds() / FrameIntervalMs % FrameCount);
 
     /// <summary>The frame's ICO bytes for a tray size; rendered the first time it is asked for, then cached.</summary>
-    public static byte[] GetIcoBytes(int px, int frame) =>
-        Cache.GetOrAdd((px, ((frame % FrameCount) + FrameCount) % FrameCount), key =>
+    public static byte[] GetIcoBytes(int px, int frame, bool taskbarDark = true) =>
+        Cache.GetOrAdd((px, ((frame % FrameCount) + FrameCount) % FrameCount, taskbarDark), key =>
         {
-            using Bitmap bmp = GaugeRenderer.RenderLoading(key.Px, key.Frame, FrameCount);
+            using Bitmap bmp = GaugeRenderer.RenderLoading(key.Px, key.Frame, FrameCount, key.Dark);
             return IconFactory.BuildIco(bmp);
         });
 

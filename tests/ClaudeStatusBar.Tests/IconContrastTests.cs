@@ -37,22 +37,100 @@ public class IconContrastTests
             Error: null, IconSeverity: QuotaState.Spent, BlockedUntil: session.ResetsAt);
     }
 
-    [Fact]
-    public void ExhaustedIcon_At16px_OnDarkTaskbar_MeetsMinimumContrast()
+    /// <summary>
+    /// Every glyph is antialiased, so its edge pixels have every alpha from 0 to full and no cutoff means
+    /// anything on them. What a person sees as "the colour" is the glyph's CORE: the pixels whose coverage
+    /// is at least 95 % (alpha at least 0.95 of the glyph's own ceiling -- 255, or the exhausted glyph's
+    /// dim level). The 3:1 requirement is on the MEDIAN contrast of that core against the taskbar, on a
+    /// dark AND a light taskbar, at every tray size. (The stale, awaiting-reset and empty "measuring"
+    /// glyphs are quiet by design, and their core is a 1-4 pixel dot or tick, so they are not measured.)
+    /// </summary>
+    public static IEnumerable<object[]> CoreContrastCases()
     {
-        // 60 min into the 180-min countdown: the pie is partially filled, not empty/full,
-        // so both the ring AND the pie wedge have real pixels to measure.
-        QuotaIconParams p = QuotaIconParams.Build(SpentView(), px: 16, taskbarDark: true, UtcNow.AddMinutes(60));
-        Assert.True(p.Exhausted);
-
-        using Bitmap icon = GaugeRenderer.RenderQuota(p);
-        (double MinContrast, int Count, Color WorstPixel, int Wx, int Wy) result = MeasureMinContrast(icon, DarkTaskbar);
-
-        Assert.True(result.Count > 0, "no near-fully-opaque glyph core pixels found to measure -- the ring/pie may be sub-pixel at 16px");
-        Assert.True(result.MinContrast >= 3.0,
-            $"exhausted icon contrast on #202020 at 16px measured {result.MinContrast:F2}:1 over {result.Count} px, need >= 3:1 " +
-            $"(worst pixel at ({result.Wx},{result.Wy}): A={result.WorstPixel.A} R={result.WorstPixel.R} G={result.WorstPixel.G} B={result.WorstPixel.B})");
+        foreach (string state in new[] { "safe", "tight", "dry_early", "dry_early_weekly", "spent_session", "spent_weekly", "unknown", "loading", "not_logged_in" })
+            foreach (int px in new[] { 16, 20, 24, 32 })
+                foreach (bool dark in new[] { true, false })
+                    yield return new object[] { state, px, dark };
     }
+
+    [Theory]
+    [MemberData(nameof(CoreContrastCases))]
+    public void GlyphCore_MeetsThreeToOne_OnDarkAndLightTaskbars_AtEveryTraySize(string state, int px, bool dark)
+    {
+        QuotaView view = DemoQuotaSource.Build(UtcNow).First(s => s.Key == state).View;
+        QuotaIconParams p = QuotaIconParams.Build(view, px, dark, UtcNow);
+        using Bitmap icon = GaugeRenderer.RenderQuota(p);
+        Color background = dark ? DarkTaskbar : LightTaskbar;
+
+        (double median, int count) = MedianCoreContrast(icon, background);
+
+        Assert.True(count > 0, $"{state} {px}px: no core pixels (coverage >= 95%) to measure");
+        Assert.True(median >= 3.0, $"{state} {px}px on {(dark ? "dark" : "light")}: core contrast {median:F2}:1 over {count} px, need >= 3:1");
+    }
+
+    /// <summary>
+    /// The antialiasing regression: the spent glyph used to be drawn with antialiasing OFF, so its ring and
+    /// pie were pure stair-steps (every pixel fully on or fully off). Every glyph with a curve must have a
+    /// graded edge: a healthy number of pixels strictly between transparent and its ceiling.
+    /// </summary>
+    [Theory]
+    [InlineData("spent_session")]
+    [InlineData("spent_weekly")]
+    [InlineData("safe")]
+    [InlineData("dry_early")]
+    [InlineData("unknown")]
+    [InlineData("not_logged_in")]
+    [InlineData("loading")]
+    [InlineData("stale")]
+    public void EveryGlyph_HasAGradedEdge_AtEveryTraySize(string state)
+    {
+        foreach (int px in new[] { 16, 20, 24, 32 })
+        {
+            QuotaView view = DemoQuotaSource.Build(UtcNow).First(s => s.Key == state).View;
+            using Bitmap icon = GaugeRenderer.RenderQuota(QuotaIconParams.Build(view, px, taskbarDark: true, UtcNow));
+            int maxA = MaxAlpha(icon);
+            int partial = 0, distinct;
+            var levels = new HashSet<int>();
+            for (int y = 0; y < px; y++)
+                for (int x = 0; x < px; x++)
+                {
+                    int a = icon.GetPixel(x, y).A;
+                    if (a > 24 && a < 0.9 * maxA) partial++;
+                    if (a > 0) levels.Add(a / 16);
+                }
+            distinct = levels.Count;
+
+            Assert.True(partial >= px, $"{state} {px}px has only {partial} partially covered pixels: its edges are stair-stepped");
+            Assert.True(distinct >= 5, $"{state} {px}px uses only {distinct} alpha levels");
+        }
+    }
+
+    static int MaxAlpha(Bitmap icon)
+    {
+        int max = 0;
+        for (int y = 0; y < icon.Height; y++)
+            for (int x = 0; x < icon.Width; x++) max = Math.Max(max, icon.GetPixel(x, y).A);
+        return max;
+    }
+
+    /// <summary>Median contrast against `background` of the pixels with at least 95 % of the glyph's own maximum alpha (the "core").</summary>
+    static (double Median, int Count) MedianCoreContrast(Bitmap icon, Color background)
+    {
+        int ceiling = MaxAlpha(icon);
+        var contrasts = new List<double>();
+        for (int y = 0; y < icon.Height; y++)
+            for (int x = 0; x < icon.Width; x++)
+            {
+                Color px = icon.GetPixel(x, y);
+                if (px.A < 0.95 * ceiling) continue;
+                contrasts.Add(ContrastRatio(RelativeLuminance(Blend(px, background)), RelativeLuminance(background)));
+            }
+        if (contrasts.Count == 0) return (0, 0);
+        contrasts.Sort();
+        return (contrasts[contrasts.Count / 2], contrasts.Count);
+    }
+
+    static readonly Color LightTaskbar = Color.FromArgb(255, 0xF3, 0xF3, 0xF3);
 
     /// <summary>
     /// The user's actual requirement, not just a contrast floor: "red and dimmed, but full" --
@@ -75,9 +153,9 @@ public class IconContrastTests
         using Bitmap tight = GaugeRenderer.RenderQuota(tightParams);
         using Bitmap safe = GaugeRenderer.RenderQuota(safeParams);
 
-        double spentContrast = MeasureMinContrast(spent, DarkTaskbar).MinContrast;
-        double tightContrast = MeasureMinContrast(tight, DarkTaskbar).MinContrast;
-        double safeContrast = MeasureMinContrast(safe, DarkTaskbar).MinContrast;
+        double spentContrast = MedianCoreContrast(spent, DarkTaskbar).Median;
+        double tightContrast = MedianCoreContrast(tight, DarkTaskbar).Median;
+        double safeContrast = MedianCoreContrast(safe, DarkTaskbar).Median;
 
         Assert.True(spentContrast < tightContrast,
             $"exhausted icon (measured {spentContrast:F2}:1) must read as quieter than the Tight icon " +
@@ -170,9 +248,9 @@ public class IconContrastTests
                 bodyPixels++;
                 if (icon.GetPixel(x, y).A >= 200) bodyInk++;
             }
-        Assert.Equal(bodyPixels, bodyInk);
+        Assert.True(bodyInk >= bodyPixels - 4, $"padlock body is hollow at {px}px ({bodyInk}/{bodyPixels} inked)"); // up to the four antialiased corner pixels
         foreach (Rectangle bar in r.Shackle)
-            Assert.True(icon.GetPixel(bar.X + bar.Width / 2, bar.Y + bar.Height / 2).A >= 200, $"a shackle bar is empty at {px}px");
+            Assert.True(icon.GetPixel(bar.X + bar.Width / 2, bar.Y + bar.Height / 2).A >= 120, $"a shackle bar is empty at {px}px"); // the top bar is an arc: antialiased, never empty
 
         // Everything stays inside the ring's inner edge and clear of its band.
         double innerRadius = px * 0.5 - px * 0.02 - px * 0.155; // inner edge of the ring stroke
@@ -273,35 +351,6 @@ public class IconContrastTests
                 $"ring has a gap at bucket {b} ({b * 360.0 / buckets:F0}-{(b + 1) * 360.0 / buckets:F0} deg) -- " +
                 "expected a continuous ring, not a dashed one");
         }
-    }
-
-    static (double MinContrast, int Count, Color WorstPixel, int Wx, int Wy) MeasureMinContrast(Bitmap icon, Color background)
-    {
-        double minContrast = double.PositiveInfinity;
-        int count = 0;
-        Color worst = default;
-        int wx = -1, wy = -1;
-        for (int y = 0; y < icon.Height; y++)
-        {
-            for (int x = 0; x < icon.Width; x++)
-            {
-                Color px = icon.GetPixel(x, y);
-                // Anti-aliasing puts a smooth alpha gradient across every stroke edge; at any
-                // cutoff there will always be some pixel sitting just above it. What "the
-                // colour" actually looks like -- and what the spec's 5:1 requirement is about
-                // -- is the near-fully-opaque core of the stroke/pie, not the 1px AA fringe.
-                // The exhausted state's own dimAlpha (0.85 on a dark taskbar) already caps
-                // every pixel's deliverable alpha at round(0.85*255)=217 by design, so the
-                // core-pixel cutoff has to sit just below that ceiling, not near 255.
-                if (px.A < 208) continue;
-
-                Color blended = Blend(px, background);
-                double contrast = ContrastRatio(RelativeLuminance(blended), RelativeLuminance(background));
-                count++;
-                if (contrast < minContrast) { minContrast = contrast; worst = px; wx = x; wy = y; }
-            }
-        }
-        return (minContrast, count, worst, wx, wy);
     }
 
     static Color Blend(Color fg, Color bg)

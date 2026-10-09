@@ -395,11 +395,33 @@ window does not keep presenting an expired forecast as current: once `resets_at`
 with no later window observed yet, that window reads **Measuring** ("Nytt fönster väntas"), its
 countdown shows "Återställs nu…", and freshness is Stale via the `resets_at + 60 s` rule above.
 
+## How every tray glyph is drawn (2026-10-09)
+
+NOTHING in a tray icon may look pixelated. Every glyph -- the gauge, the exhausted ring and pie, the "!", the
+padlock, the stale dot, the loading arc -- is drawn **antialiased** at 16x the output size and box-filtered
+down once (`GaugeRenderer.Downsample`: the exact area average of each 16x16 block, on premultiplied colour so
+no dark/light halo, output as straight ARGB). Straight edges (the padlock body, the "!" bar) sit on the
+OUTPUT pixel grid, so they stay crisp and only curves are softened. Dimming (the exhausted glyph, the stale
+fade) is a single multiplication of the final alpha. An earlier version drew the exhausted glyph with
+antialiasing OFF so its interior pixels would reach full alpha for the contrast test; that is what produced the
+stair-stepped red rings. The route to Windows is `IconFactory.BuildIco`: 32-bit frames with real alpha and an
+all-zero AND mask, so transparency comes from alpha alone (`IconFactoryTests` also loads the bytes through
+`new Icon(stream, size)` and compares alpha).
+
+**Contrast is measured on the glyph's core**, not its antialiased fringe: the pixels with at least 95 % of the
+glyph's own alpha ceiling (255, or the exhausted dim level). The median contrast of that core must be >= 3:1
+against the taskbar on a dark (`#202020`) AND a light (`#F3F3F3`) taskbar at 16/20/24/32 px, for every state
+with a solid stroke (`IconContrastTests`). The palette is tuned for the dark taskbar; on a light one the colours
+are darkened (hue kept) just far enough to clear 3:1 (`Palette.ForTaskbar`), the ring's empty track is
+translucent black instead of white, and the stale dot is dark. `ClaudeStatusBar.exe --capture-icon-compare <dir>`
+writes a sheet per tray size with every state, on both taskbar colours, drawn through the real
+`Icon` path and enlarged 6x with nearest-neighbour -- the thing to LOOK at after touching a glyph.
+
 ## Exhausted (any window Spent)
 
 - `BlockedUntil` = the latest `resets_at` among spent windows.
-- The whole icon dims (brightness 0.85 on a dark taskbar, 0.42 on light -- see GaugeRenderer.
-  RenderQuota's own note), the ring is a FULL, continuous ring in the real critical colour
+- The whole icon dims (alpha 0.85 on both taskbars -- `GaugeRenderer.ExhaustedDimAlpha`; on a light taskbar
+  the red is darkened instead, `Palette.ForTaskbar`), the ring is a FULL, continuous ring in the real critical colour
   `Palette.Crit` (`#E23D28`), dimmed -- not the earlier dashed grey outline, which read as a
   lifebuoy rather than "blocked", and not a lightened tint either (an earlier round used
   `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST

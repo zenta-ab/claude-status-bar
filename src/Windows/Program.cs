@@ -13,6 +13,9 @@ internal static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        if (GetArgValue(args, "--capture-icon-compare") is { } compareDir)
+            return IconCompareSheet.Run(compareDir);
+
         if (args.Contains("--selftest"))
             return HandleCensus.RunSelfTest();
 

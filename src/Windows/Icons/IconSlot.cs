@@ -74,7 +74,7 @@ public sealed class IconSlot : IDisposable
             if (p.Loading)
             {
                 // A cached, ready-made frame: only an Icon is built, nothing is drawn.
-                using var ms = new MemoryStream(LoadingFrames.GetIcoBytes(px, p.LoadingFrame), writable: false);
+                using var ms = new MemoryStream(LoadingFrames.GetIcoBytes(px, p.LoadingFrame, p.TaskbarDark), writable: false);
                 next = new Icon(ms, new Size(px, px));
             }
             else
@@ -199,7 +199,7 @@ public sealed class IconSlot : IDisposable
     /// Plain GetSystemMetrics(SM_CXSMICON) reports the *process's* DPI awareness, which on
     /// this machine returns 16 regardless of the actual taskbar scale -- measured wrong.
     /// </summary>
-    static int QueryTrayIconPixelSize()
+    internal static int QueryTrayIconPixelSize()
     {
         const int SM_CXSMICON = 49;
         const int fallback = 16;

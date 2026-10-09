@@ -18,7 +18,7 @@ namespace ClaudeStatusBar.Icons;
 /// </summary>
 public static class GaugeRenderer
 {
-    const int SS = 8; // supersample factor
+    const int SS = 16; // supersample factor (box-filtered down, see Downsample)
 
     /// <summary>
     /// px                  output side in pixels (16/20/24/32)
@@ -58,7 +58,7 @@ public static class GaugeRenderer
 
             var (band, rOuter, ringRect) = RingGeometry(s);
 
-            using (var trackPen = new Pen(Color.FromArgb(exhausted ? 40 : 70, 255, 255, 255), band))
+            using (var trackPen = new Pen(TrackColor(exhausted ? 40 : 70, taskbarDark), band))
                 g.DrawArc(trackPen, ringRect, 0, 360);
 
             // forecast wedge: wider band, protrudes radially, dark outline.
@@ -190,80 +190,136 @@ public static class GaugeRenderer
     }
 
     /// <summary>
-    /// Freshness.Unknown: a grey ring (unchanged) plus an exclamation mark in the centre, so
-    /// it reads as "can't read the quota" rather than "still loading" -- the old glyph was an
-    /// empty ring, indistinguishable from a genuinely 0%-used icon. The mark is composited
-    /// directly at output resolution with no antialiasing/interpolation (see DrawUnknownMark):
-    /// at 16px it is only a 1-2px bar plus a dot, and the supersample+bicubic/bilinear
-    /// softening the rest of this pipeline uses would blur it past legibility at that size,
-    /// exactly the reason RenderExhaustedGlyph below also draws directly instead of through
-    /// Downsample.
+    /// The "can't show a quota" glyph: the grey ring with a mark in its centre -- "!" for a real read
+    /// failure (Freshness.Unknown), a padlock for "not logged in" (the zero-accounts icon, NeedsLogin).
+    /// Everything is drawn antialiased at SS times the output size and box-filtered down once, with the
+    /// mark's geometry sitting on the OUTPUT pixel grid (so a straight edge stays a crisp edge and only
+    /// curves are softened), at every tray size (16/20/24/32).
     /// </summary>
-    public static Bitmap RenderOutline(int px, bool padlock = false)
+    public static Bitmap RenderOutline(int px, bool padlock = false, bool taskbarDark = true)
     {
         int s = px * SS;
         using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(hi))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
+            ConfigureHiRes(g);
             var (band, _, ringRect) = RingGeometry(s);
-            using var pen = new Pen(Color.FromArgb(170, Palette.Dead), band * 0.45f);
+            Color grey = Palette.ForTaskbar(Palette.Dead, taskbarDark, 0.92);
+            using var pen = new Pen(Color.FromArgb(170, grey), band * 0.45f);
             g.DrawEllipse(pen, ringRect);
+
+            if (padlock) DrawPadlockHi(g, px, grey);
+            else DrawExclamationHi(g, px, grey);
         }
-        Bitmap ring = Downsample(hi, px, exhausted: false, dimAlpha: 1f);
-        return padlock ? DrawPadlock(ring, px) : DrawUnknownMark(ring, px);
+        return Downsample(hi, px, exhausted: false, dimAlpha: 1f);
     }
 
-    /// <summary>
-    /// "Not logged in" (zero accounts, NeedsLogin): the same grey ring as Unknown, with a padlock in
-    /// the centre instead of the "!" -- the fix is a login, not a retry. Drawn directly at output
-    /// resolution with every dimension pixel-snapped, for the same reason as the "!" (supersampling
-    /// would blur a 6-pixel glyph): a solid body, and a shackle built from straight bars so it stays
-    /// a crisp arch at 16/20/24/32 px. The ring's inner diameter is about 0.65 of px; the whole
-    /// lock stays inside it. Consumes and disposes `ring`.
-    /// </summary>
-    static Bitmap DrawPadlock(Bitmap ring, int px)
+    /// <summary>How much the exhausted glyph is quieted: its alpha ceiling. The same on both taskbars (the light one gets a darker red instead, Palette.ForTaskbar).</summary>
+    public const float ExhaustedDimAlpha = 0.85f;
+
+    /// <summary>The ring's empty track: translucent white on a dark taskbar, translucent black on a light one (white would vanish there).</summary>
+    static Color TrackColor(int alpha, bool taskbarDark) =>
+        taskbarDark ? Color.FromArgb(alpha, 255, 255, 255) : Color.FromArgb((int)(alpha * 0.75), 0, 0, 0);
+
+    /// <summary>Antialiased, half-pixel offset: coordinates are exact positions on the (hi-res) pixel grid.</summary>
+    static void ConfigureHiRes(Graphics g)
     {
-        try
-        {
-            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
-            try
-            {
-                using (var g = Graphics.FromImage(outBmp))
-                {
-                    g.SmoothingMode = SmoothingMode.None;
-                    g.Clear(Color.Transparent);
-                    g.DrawImage(ring, 0, 0, px, px);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
+        g.CompositingQuality = CompositingQuality.HighQuality;
+        g.Clear(Color.Transparent);
+    }
 
-                    PadlockRects r = PadlockLayout(px);
-                    using var brush = new SolidBrush(Color.FromArgb(235, Palette.Dead));
-                    g.FillRectangle(brush, r.Body);
-                    foreach (Rectangle bar in r.Shackle) g.FillRectangle(brush, bar);
+    /// <summary>The "!": a rounded bar over a dot, on the output pixel grid, as wide as the dot (even widths, so it is centred exactly).</summary>
+    static void DrawExclamationHi(Graphics g, int px, Color colour)
+    {
+        float d = px <= 24 ? 2f : 4f;                                        // bar width = dot diameter, in output px
+        float barH = MathF.Max(3f, MathF.Round(px * 0.33f));
+        float gap = MathF.Max(1f, MathF.Round(px * 0.07f));
+        float totalH = barH + gap + d;
+        float top = MathF.Round((px - totalH) / 2f);
+        float left = (px - d) / 2f;
 
-                    if (r.Keyhole is { } hole)
-                    {
-                        // Punch the keyhole through the body so it stays legible on any taskbar colour.
-                        g.CompositingMode = CompositingMode.SourceCopy;
-                        using var clear = new SolidBrush(Color.Transparent);
-                        g.FillRectangle(clear, hole);
-                    }
-                }
-                return outBmp;
-            }
-            catch
-            {
-                outBmp.Dispose();
-                throw;
-            }
-        }
-        finally
+        using var brush = new SolidBrush(Color.FromArgb(235, colour));
+        using (GraphicsPath bar = RoundedRectPath(left * SS, top * SS, d * SS, barH * SS, d * SS / 2f))
+            g.FillPath(brush, bar);
+        g.FillEllipse(brush, left * SS, (top + barH + gap) * SS, d * SS, d * SS);
+    }
+
+    /// <summary>The padlock (see PadlockLayout): a rounded body with a keyhole and an arched shackle, antialiased, edges on the pixel grid.</summary>
+    static void DrawPadlockHi(Graphics g, int px, Color colour)
+    {
+        PadlockRects r = PadlockLayout(px);
+        using var brush = new SolidBrush(Color.FromArgb(235, colour));
+
+        float bodyRadius = (px >= 24 ? 1.2f : 0.8f) * SS;
+        using (GraphicsPath body = RoundedRectPath(r.Body.X * SS, r.Body.Y * SS, r.Body.Width * SS, r.Body.Height * SS, bodyRadius))
+            g.FillPath(brush, body);
+
+        using (GraphicsPath shackle = ShacklePath(r, px))
+            g.FillPath(brush, shackle);
+
+        if (r.Keyhole is { } hole)
         {
-            ring.Dispose();
+            // Punch the keyhole through the body so it stays legible on any taskbar colour.
+            g.CompositingMode = CompositingMode.SourceCopy;
+            using var clear = new SolidBrush(Color.Transparent);
+            g.FillRectangle(clear, hole.X * SS, hole.Y * SS, hole.Width * SS, hole.Height * SS);
+            g.CompositingMode = CompositingMode.SourceOver;
         }
     }
 
-    /// <summary>The padlock's pixel rectangles for a tray size (internal: the contrast tests measure inside them).</summary>
+    /// <summary>The shackle as one outline: two legs and a rounded top, `stroke` px thick, open at the bottom (it disappears into the body).</summary>
+    static GraphicsPath ShacklePath(PadlockRects r, int px)
+    {
+        Rectangle topBar = r.Shackle[0];
+        float stroke = topBar.Height * (float)SS;
+        float x0 = topBar.X * (float)SS, x1 = (topBar.X + topBar.Width) * (float)SS;
+        float y0 = topBar.Y * (float)SS, y1 = r.Body.Y * (float)SS + stroke;     // runs into the body, so no seam shows
+        float w = x1 - x0;
+        float R = MathF.Min(w / 2f, MathF.Max(1.5f * SS, stroke * 1.5f));
+        float ri = MathF.Max(0f, R - stroke);
+
+        var p = new GraphicsPath(FillMode.Winding);
+        p.StartFigure();
+        p.AddLine(x0, y1, x0, y0 + R);
+        p.AddArc(x0, y0, 2 * R, 2 * R, 180, 90);
+        p.AddLine(x0 + R, y0, x1 - R, y0);
+        p.AddArc(x1 - 2 * R, y0, 2 * R, 2 * R, 270, 90);
+        p.AddLine(x1, y0 + R, x1, y1);
+        p.AddLine(x1, y1, x1 - stroke, y1);
+        if (ri > 0.01f)
+        {
+            p.AddLine(x1 - stroke, y1, x1 - stroke, y0 + stroke + ri);
+            p.AddArc(x1 - stroke - 2 * ri, y0 + stroke, 2 * ri, 2 * ri, 0, -90);
+            p.AddLine(x1 - stroke - ri, y0 + stroke, x0 + stroke + ri, y0 + stroke);
+            p.AddArc(x0 + stroke, y0 + stroke, 2 * ri, 2 * ri, 270, -90);
+            p.AddLine(x0 + stroke, y0 + stroke + ri, x0 + stroke, y1);
+        }
+        else
+        {
+            p.AddLine(x1 - stroke, y1, x1 - stroke, y0 + stroke);
+            p.AddLine(x1 - stroke, y0 + stroke, x0 + stroke, y0 + stroke);
+            p.AddLine(x0 + stroke, y0 + stroke, x0 + stroke, y1);
+        }
+        p.CloseFigure();
+        return p;
+    }
+
+    static GraphicsPath RoundedRectPath(float x, float y, float w, float h, float radius)
+    {
+        float r = MathF.Min(radius, MathF.Min(w, h) / 2f);
+        var p = new GraphicsPath();
+        if (r <= 0.01f) { p.AddRectangle(new RectangleF(x, y, w, h)); return p; }
+        p.AddArc(x, y, 2 * r, 2 * r, 180, 90);
+        p.AddArc(x + w - 2 * r, y, 2 * r, 2 * r, 270, 90);
+        p.AddArc(x + w - 2 * r, y + h - 2 * r, 2 * r, 2 * r, 0, 90);
+        p.AddArc(x, y + h - 2 * r, 2 * r, 2 * r, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    /// <summary>The padlock's pixel rectangles for a tray size (internal: the tests measure inside them).</summary>
     internal readonly record struct PadlockRects(Rectangle Body, Rectangle[] Shackle, Rectangle? Keyhole);
 
     internal static PadlockRects PadlockLayout(int px)
@@ -304,7 +360,7 @@ public static class GaugeRenderer
     /// position is `frame` of `frameCount` steps round the ring. Goes through the same supersample +
     /// downsample pipeline as the other ring glyphs; LoadingFrames renders each frame once and caches it.
     /// </summary>
-    public static Bitmap RenderLoading(int px, int frame, int frameCount)
+    public static Bitmap RenderLoading(int px, int frame, int frameCount, bool taskbarDark = true)
     {
         int s = px * SS;
         using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
@@ -314,107 +370,89 @@ public static class GaugeRenderer
             g.Clear(Color.Transparent);
             var (band, _, ringRect) = RingGeometry(s);
 
-            using (var track = new Pen(Color.FromArgb(170, Palette.Dead), band * 0.45f))
+            Color grey = Palette.ForTaskbar(Palette.Dead, taskbarDark);
+            using (var track = new Pen(Color.FromArgb(170, grey), band * 0.45f))
                 g.DrawEllipse(track, ringRect);
 
             float start = -90f + 360f * frame / frameCount;
-            using var arc = new Pen(Color.FromArgb(255, Palette.Dead), band * 0.95f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            using var arc = new Pen(Color.FromArgb(255, grey), band * 0.95f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             g.DrawArc(arc, ringRect, start, 100f);
         }
         return Downsample(hi, px, exhausted: false, dimAlpha: 1f);
     }
 
     /// <summary>
-    /// Composites the "!" onto the already-downsampled ring bitmap (consumes and disposes
-    /// it): a rounded bar over a dot, every dimension pixel-snapped (Math.Round) and sized as
-    /// a fraction of px, so it stays a crisp two-part mark at every tray size (16/20/24/32)
-    /// instead of softening into a grey smear the way scaled vector text would at 16px.
+    /// Freshness.Stale overlay: 70 % opacity plus a small dot at 4 o'clock, per
+    /// docs/forecast-and-states.md "Freshness ladder". The fade multiplies the alpha exactly once and the
+    /// dot is antialiased (supersampled), so neither makes a stair-step. Consumes and disposes src.
     /// </summary>
-    static Bitmap DrawUnknownMark(Bitmap ring, int px)
+    public static Bitmap ApplyStaleOverlay(Bitmap src, int px, bool taskbarDark = true)
     {
         try
         {
-            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
+            Bitmap faded = ScaleAlpha(src, 0.70f);
             try
             {
-                using (var g = Graphics.FromImage(outBmp))
+                // 4 o'clock: 120 degrees clockwise from 12.
+                float cx = px * 0.5f, cy = px * 0.5f;
+                float r = px * 0.40f;
+                double angle = 120.0 * Math.PI / 180.0;
+                float dx = cx + r * (float)Math.Sin(angle);
+                float dy = cy - r * (float)Math.Cos(angle);
+                float dotR = Math.Max(1.3f, px * 0.10f);
+
+                int s = px * SS;
+                using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(hi))
                 {
-                    g.SmoothingMode = SmoothingMode.None;
-                    g.Clear(Color.Transparent);
-                    g.DrawImage(ring, 0, 0, px, px);
-
-                    float barW = MathF.Max(1f, MathF.Round(px * 0.11f));
-                    float barH = MathF.Max(3f, MathF.Round(px * 0.33f));
-                    float gap = MathF.Max(1f, MathF.Round(px * 0.07f));
-                    float dotD = MathF.Max(1f, MathF.Round(px * 0.13f));
-                    float totalH = barH + gap + dotD;
-                    float cx = MathF.Round(px / 2f);
-                    float top = MathF.Round((px - totalH) / 2f);
-
-                    using var brush = new SolidBrush(Color.FromArgb(235, Palette.Dead));
-                    g.FillRectangle(brush, MathF.Round(cx - barW / 2f), top, barW, barH);
-                    g.FillEllipse(brush, MathF.Round(cx - dotD / 2f), top + barH + gap, dotD, dotD);
+                    ConfigureHiRes(g);
+                    using var dotBrush = new SolidBrush(taskbarDark ? Color.FromArgb(235, 0xF2, 0xF2, 0xF2) : Color.FromArgb(235, 0x2A, 0x2A, 0x2A));
+                    g.FillEllipse(dotBrush, (dx - dotR) * SS, (dy - dotR) * SS, dotR * 2 * SS, dotR * 2 * SS);
                 }
-                return outBmp;
+                using Bitmap dot = Downsample(hi, px, exhausted: false, dimAlpha: 1f);
+
+                using var g2 = Graphics.FromImage(faded);
+                g2.CompositingMode = CompositingMode.SourceOver;
+                g2.InterpolationMode = InterpolationMode.NearestNeighbor; // same size: a pixel-exact composite
+                g2.PixelOffsetMode = PixelOffsetMode.Half;
+                g2.DrawImage(dot, new Rectangle(0, 0, px, px), 0, 0, px, px, GraphicsUnit.Pixel);
+                return faded;
             }
             catch
             {
-                outBmp.Dispose();
-                throw;
-            }
-        }
-        finally
-        {
-            ring.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// Freshness.Stale overlay: 70% global opacity plus a small dot at 4 o'clock,
-    /// per docs/forecast-and-states.md "Freshness ladder". Consumes and disposes src.
-    /// </summary>
-    public static Bitmap ApplyStaleOverlay(Bitmap src, int px)
-    {
-        // src is consumed and disposed on every path (Codex review Medium #16); outBmp is
-        // disposed too if anything throws before ownership transfers to the caller via return.
-        try
-        {
-            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
-            try
-            {
-                using (var g = Graphics.FromImage(outBmp))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.Clear(Color.Transparent);
-
-                    var cm = new ColorMatrix { Matrix33 = 0.70f };
-                    using (var ia = new ImageAttributes())
-                    {
-                        ia.SetColorMatrix(cm);
-                        g.DrawImage(src, new Rectangle(0, 0, px, px), 0, 0, px, px, GraphicsUnit.Pixel, ia);
-                    }
-
-                    // 4 o'clock: 120 degrees clockwise from 12.
-                    float cx = px * 0.5f, cy = px * 0.5f;
-                    float r = px * 0.40f;
-                    double angle = 120.0 * Math.PI / 180.0;
-                    float dx = cx + r * (float)Math.Sin(angle);
-                    float dy = cy - r * (float)Math.Cos(angle);
-                    float dotR = Math.Max(1.3f, px * 0.10f);
-                    using var dotBrush = new SolidBrush(Color.FromArgb(235, 0xF2, 0xF2, 0xF2));
-                    g.FillEllipse(dotBrush, dx - dotR, dy - dotR, dotR * 2, dotR * 2);
-                }
-                return outBmp;
-            }
-            catch
-            {
-                outBmp.Dispose();
+                faded.Dispose();
                 throw;
             }
         }
         finally
         {
             src.Dispose();
+        }
+    }
+
+    /// <summary>A copy of `src` with every pixel's (straight) alpha multiplied by `factor`; colours untouched.</summary>
+    static Bitmap ScaleAlpha(Bitmap src, float factor)
+    {
+        int w = src.Width, h = src.Height;
+        var data = src.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        byte[] bytes = new byte[data.Stride * h];
+        try { System.Runtime.InteropServices.Marshal.Copy(data.Scan0, bytes, 0, bytes.Length); }
+        finally { src.UnlockBits(data); }
+
+        for (int i = 3; i < bytes.Length; i += 4) bytes[i] = (byte)Math.Clamp((int)MathF.Round(bytes[i] * factor), 0, 255);
+
+        var outBmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        try
+        {
+            var od = outBmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try { System.Runtime.InteropServices.Marshal.Copy(bytes, 0, od.Scan0, bytes.Length); }
+            finally { outBmp.UnlockBits(od); }
+            return outBmp;
+        }
+        catch
+        {
+            outBmp.Dispose();
+            throw;
         }
     }
 
@@ -426,134 +464,123 @@ public static class GaugeRenderer
     /// </summary>
     public static Bitmap RenderQuota(QuotaIconParams p)
     {
-        if (p.Loading) return RenderLoading(p.Px, p.LoadingFrame, LoadingFrames.FrameCount);
-        if (p.Outline) return RenderOutline(p.Px, p.Padlock);
+        if (p.Loading) return RenderLoading(p.Px, p.LoadingFrame, LoadingFrames.FrameCount, p.TaskbarDark);
+        if (p.Outline) return RenderOutline(p.Px, p.Padlock, p.TaskbarDark);
 
         // 0.85 on a dark taskbar, per docs/forecast-and-states.md "Exhausted": with the real
         // critical red (not a lightened tint) and a >= 3:1 target (not >= 5:1 -- this state
         // must read as quieter than an active one, not merely legible), 0.85 clears 3:1 with a
         // real margin (measured ~3.1:1; see IconContrastTests) while dimming it well below the
         // undimmed Tight/Safe glyphs.
-        float dimAlpha = p.TaskbarDark ? 0.85f : 0.42f;
+        float dimAlpha = ExhaustedDimAlpha;
         Bitmap bmp = p.Exhausted
-            ? RenderExhaustedGlyph(p.Px, p.PieFrac, Color.FromArgb(p.RingArgb), dimAlpha)
+            ? RenderExhaustedGlyph(p.Px, p.PieFrac, Color.FromArgb(p.RingArgb), dimAlpha, p.TaskbarDark)
             : Render(p.Px, p.RingFrac, p.PieFrac, p.ForecastFrac, p.SessionForecastFrac, Color.FromArgb(p.RingArgb), Color.FromArgb(p.PieArgb), exhausted: false, p.TaskbarDark, dimAlpha);
 
-        return p.Stale ? ApplyStaleOverlay(bmp, p.Px) : bmp;
+        return p.Stale ? ApplyStaleOverlay(bmp, p.Px, p.TaskbarDark) : bmp;
     }
 
     /// <summary>
-    /// The exhausted glyph (solid ring + countdown pie, docs/forecast-and-states.md
-    /// "Exhausted"): a FULL, continuous ring in the critical colour (dimmed), not the
-    /// earlier dashed outline -- the dashes read as a lifebuoy rather than "blocked".
-    /// Only the inner countdown pie moves; the ring's circumference never changes.
-    /// Drawn directly at output resolution rather than through the supersample+downsample
-    /// pipeline the other renders use. Measured reason: at 16px the ring's stroke is only
-    /// ~2px wide, and downsampling a supersampled version of it (bicubic OR bilinear)
-    /// never lets its interior reach true alpha 255 -- every "solid" pixel stayed
-    /// partially blended with the transparent supersampled edges, eating into the margin
-    /// above the required 3:1 (see IconContrastTests). Drawing directly at 16px with GDI+'s
-    /// own edge-only antialiasing leaves the stroke's actual interior at full alpha, which
-    /// the dimAlpha ColorMatrix then scales exactly once -- no compounding, no interpolation
-    /// loss.
+    /// The exhausted glyph (solid ring + countdown pie, docs/forecast-and-states.md "Exhausted"): a FULL,
+    /// continuous ring in the critical colour (dimmed), not the earlier dashed outline -- the dashes read as
+    /// a lifebuoy rather than "blocked". Only the inner countdown pie moves.
+    ///
+    /// Antialiased like every other glyph: drawn at SS times the size and box-filtered down once, with the
+    /// dim applied exactly once, as a plain multiplication of the final alpha (Downsample). The stroke is
+    /// wide enough that its core reaches full coverage -- so the core's alpha is exactly the dim level and
+    /// the contrast tests measure that core (IconContrastTests), never the antialiased fringe. (An earlier
+    /// version turned antialiasing OFF to get there, which left the stair-stepped ring users saw.)
     /// </summary>
-    static Bitmap RenderExhaustedGlyph(int px, double pieFrac, Color color, float dimAlpha)
+    static Bitmap RenderExhaustedGlyph(int px, double pieFrac, Color color, float dimAlpha, bool taskbarDark)
     {
-        var canvas = new Bitmap(px, px, PixelFormat.Format32bppArgb);
-        try
+        int s = px * SS;
+        using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(hi))
         {
-            using (var g = Graphics.FromImage(canvas))
+            ConfigureHiRes(g);
+            var (band, rOuter, ringRect) = RingGeometry(s);
+
+            using (var trackPen = new Pen(TrackColor(40, taskbarDark), band))
+                g.DrawArc(trackPen, ringRect, 0, 360);
+
+            using (var ring = new Pen(color, Math.Max(1.6f * SS, band * 0.95f)))
+                g.DrawEllipse(ring, ringRect);
+
+            float gap = band * 0.42f;
+            float rPieOuter = rOuter - band * 0.5f - gap;
+            using (var erase = new SolidBrush(Color.Transparent))
             {
-                // No antialiasing here: dimAlpha (0.85 on a dark taskbar) already caps every
-                // pixel's deliverable alpha well below 255, leaving little headroom for AA's
-                // partial pixel coverage on top of that without dropping under the required 3:1
-                // contrast. A crisp edge is an acceptable look for a solid "blocked" ring, and
-                // it is what lets every interior pixel hit the true ceiling.
-                g.SmoothingMode = SmoothingMode.None;
-                g.CompositingQuality = CompositingQuality.HighQuality;
-                g.Clear(Color.Transparent);
-
-                var (band, rOuter, ringRect) = RingGeometry(px);
-
-                using (var trackPen = new Pen(Color.FromArgb(40, 255, 255, 255), band))
-                    g.DrawArc(trackPen, ringRect, 0, 360);
-
-                using (var ring = new Pen(color, Math.Max(1.6f, band * 0.95f)))
-                    g.DrawEllipse(ring, ringRect);
-
-                float gap = band * 0.42f;
-                float rPieOuter = rOuter - band * 0.5f - gap;
-                using (var erase = new SolidBrush(Color.Transparent))
-                {
-                    g.CompositingMode = CompositingMode.SourceCopy;
-                    float rk = rPieOuter + gap;
-                    g.FillEllipse(erase, px * 0.5f - rk, px * 0.5f - rk, rk * 2, rk * 2);
-                    g.CompositingMode = CompositingMode.SourceOver;
-                }
-
-                if (pieFrac > 0)
-                {
-                    using var pb = new SolidBrush(color);
-                    var pr = new RectangleF(px * 0.5f - rPieOuter, px * 0.5f - rPieOuter, rPieOuter * 2, rPieOuter * 2);
-                    g.FillPie(pb, pr, -90f, (float)(Math.Min(1.0, pieFrac) * 360.0));
-                }
+                g.CompositingMode = CompositingMode.SourceCopy;
+                float rk = rPieOuter + gap;
+                g.FillEllipse(erase, s * 0.5f - rk, s * 0.5f - rk, rk * 2, rk * 2);
+                g.CompositingMode = CompositingMode.SourceOver;
             }
 
-            var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
-            try
+            if (pieFrac > 0)
             {
-                using (var g2 = Graphics.FromImage(outBmp))
-                {
-                    var cm = new ColorMatrix { Matrix33 = dimAlpha };
-                    using var ia = new ImageAttributes();
-                    ia.SetColorMatrix(cm);
-                    g2.DrawImage(canvas, new Rectangle(0, 0, px, px), 0, 0, px, px, GraphicsUnit.Pixel, ia);
-                }
-                return outBmp;
-            }
-            catch
-            {
-                outBmp.Dispose();
-                throw;
+                using var pb = new SolidBrush(color);
+                var pr = new RectangleF(s * 0.5f - rPieOuter, s * 0.5f - rPieOuter, rPieOuter * 2, rPieOuter * 2);
+                g.FillPie(pb, pr, -90f, (float)(Math.Min(1.0, pieFrac) * 360.0));
             }
         }
-        finally
-        {
-            // canvas is a newly-owned intermediate bitmap (Codex review Medium #16): must be
-            // disposed on every path, not only the success path the original code covered.
-            canvas.Dispose();
-        }
+        return Downsample(hi, px, exhausted: true, dimAlpha);
     }
 
+    /// <summary>
+    /// Box-filters a supersampled glyph down to px x px: every output pixel is the exact area average of
+    /// its SS x SS block, computed on premultiplied colour so a transparent neighbour never tints an edge
+    /// (the usual dark/light halo). The result is straight (non-premultiplied) ARGB, which is what the
+    /// ICO writer and GDI+ expect. `dimAlpha` (the exhausted glyph's quiet-down) multiplies the final
+    /// alpha exactly once; colours are untouched. A stroke whose core is fully covered ends at alpha
+    /// 255 x dim, exactly.
+    /// </summary>
     static Bitmap Downsample(Bitmap hi, int px, bool exhausted, float dimAlpha)
     {
-        // outBmp is the value this hands off to its caller; disposed here only if something
-        // throws before that handoff completes (Codex review Medium #16).
+        int s = hi.Width;
+        int f = s / px;
+        var data = hi.LockBits(new Rectangle(0, 0, s, s), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        byte[] src = new byte[data.Stride * s];
+        int stride = data.Stride;
+        try { System.Runtime.InteropServices.Marshal.Copy(data.Scan0, src, 0, src.Length); }
+        finally { hi.UnlockBits(data); }
+
+        float dim = exhausted ? dimAlpha : 1f;
+        byte[] dst = new byte[px * px * 4];
+        double area = (double)f * f;
+        for (int oy = 0; oy < px; oy++)
+        {
+            for (int ox = 0; ox < px; ox++)
+            {
+                double sa = 0, sr = 0, sg = 0, sb = 0;
+                for (int yy = oy * f; yy < (oy + 1) * f; yy++)
+                {
+                    int row = yy * stride;
+                    for (int xx = ox * f; xx < (ox + 1) * f; xx++)
+                    {
+                        int i = row + xx * 4;
+                        double a = src[i + 3];
+                        sa += a;
+                        sb += src[i] * a;
+                        sg += src[i + 1] * a;
+                        sr += src[i + 2] * a;
+                    }
+                }
+
+                int o = (oy * px + ox) * 4;
+                if (sa <= 0) continue;
+                dst[o] = (byte)Math.Clamp((int)Math.Round(sb / sa), 0, 255);
+                dst[o + 1] = (byte)Math.Clamp((int)Math.Round(sg / sa), 0, 255);
+                dst[o + 2] = (byte)Math.Clamp((int)Math.Round(sr / sa), 0, 255);
+                dst[o + 3] = (byte)Math.Clamp((int)Math.Round(sa / area * dim), 0, 255);
+            }
+        }
+
         var outBmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
         try
         {
-            using var g2 = Graphics.FromImage(outBmp);
-            // Bilinear, not bicubic: bicubic's negative-lobe overshoot/undershoot keeps even a
-            // fully-opaque supersampled stroke from downsampling to alpha 255 unless it is many
-            // output pixels wide -- measured to cap the exhausted ring's alpha around 200/255,
-            // which was not enough headroom to clear 5:1 contrast on #202020 at 16px (see
-            // IconContrastTests). Bilinear is a plain weighted average, so a stroke a couple of
-            // output pixels wide still downsamples its interior to true full alpha.
-            g2.InterpolationMode = InterpolationMode.HighQualityBilinear;
-            g2.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g2.CompositingQuality = CompositingQuality.HighQuality;
-            g2.Clear(Color.Transparent);
-            if (exhausted)
-            {
-                var cm = new ColorMatrix { Matrix33 = dimAlpha };
-                using var ia = new ImageAttributes();
-                ia.SetColorMatrix(cm);
-                g2.DrawImage(hi, new Rectangle(0, 0, px, px), 0, 0, hi.Width, hi.Height, GraphicsUnit.Pixel, ia);
-            }
-            else
-            {
-                g2.DrawImage(hi, new Rectangle(0, 0, px, px));
-            }
+            var od = outBmp.LockBits(new Rectangle(0, 0, px, px), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try { System.Runtime.InteropServices.Marshal.Copy(dst, 0, od.Scan0, dst.Length); }
+            finally { outBmp.UnlockBits(od); }
             return outBmp;
         }
         catch

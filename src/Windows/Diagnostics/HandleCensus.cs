@@ -32,7 +32,8 @@ public static class HandleCensus
         int single = RunSingleIconSelfTest(iterations, threshold);
         int multi = RunMultiAccountIconSelfTest(threshold: 8);
         int loading = RunLoadingIconSelfTest(iterations, threshold);
-        return single == 0 && multi == 0 && loading == 0 ? 0 : 1;
+        int countdown = RunCountdownIconSelfTest(iterations, threshold);
+        return single == 0 && multi == 0 && loading == 0 && countdown == 0 ? 0 : 1;
     }
 
     /// <summary>
@@ -63,6 +64,41 @@ public static class HandleCensus
             $"USER {before.user}->{after.user} (d={dUser})  threshold={threshold}  cachedFrames={LoadingFrames.CachedFrames}");
 
         return Math.Abs(dGdi) <= threshold && Math.Abs(dUser) <= threshold && LoadingFrames.CachedFrames <= LoadingFrames.FrameCount * 4 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The exhausted icon with its countdown text: every step is a NEW text ("5m", "45m", alternating, 20 s
+    /// apart so the 15 s render guard lets each through), so every update renders, assigns and retires an
+    /// Icon. The handle counts must stay flat like everywhere else.
+    /// </summary>
+    static int RunCountdownIconSelfTest(int iterations, int threshold)
+    {
+        using var notifyIcon = new NotifyIcon { Visible = false };
+        using var slot = new IconSlot(notifyIcon);
+        DateTimeOffset start = DateTimeOffset.UtcNow;
+        QuotaView spent = DemoQuotaSource.Build(start).First(s => s.Key == "spent_weekly").View;
+
+        void Step(int i)
+        {
+            DateTimeOffset at = start.AddSeconds(20 * i);
+            slot.Update(spent with { BlockedUntil = at.AddMinutes(i % 2 == 0 ? 4.5 : 44.5) }, nowOverride: at);
+        }
+
+        for (int i = 0; i < 25; i++) Step(i);
+
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var before = Sample();
+        for (int i = 0; i < iterations; i++) Step(i + 25);
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var after = Sample();
+
+        int dGdi = after.gdi - before.gdi;
+        int dUser = after.user - before.user;
+        Console.WriteLine(
+            $"selftest(countdown) n={iterations}  GDI {before.gdi}->{after.gdi} (d={dGdi})  " +
+            $"USER {before.user}->{after.user} (d={dUser})  threshold={threshold}");
+
+        return Math.Abs(dGdi) <= threshold && Math.Abs(dUser) <= threshold ? 0 : 1;
     }
 
     static int RunSingleIconSelfTest(int iterations, int threshold)

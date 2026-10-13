@@ -62,7 +62,9 @@ public class IconContrastTests
         using Bitmap icon = GaugeRenderer.RenderQuota(p);
         Color background = dark ? DarkTaskbar : LightTaskbar;
 
-        (double median, int count) = MedianCoreContrast(icon, background);
+        // The exhausted glyph's countdown text is undimmed white/black (measured by CountdownIconTests); here the
+        // thing measured is the RING, so the text's own pixels are left out.
+        (double median, int count) = MedianCoreContrast(icon, background, InkOf(p));
 
         Assert.True(count > 0, $"{state} {px}px: no core pixels (coverage >= 95%) to measure");
         Assert.True(median >= 3.0, $"{state} {px}px on {(dark ? "dark" : "light")}: core contrast {median:F2}:1 over {count} px, need >= 3:1");
@@ -113,14 +115,29 @@ public class IconContrastTests
         return max;
     }
 
-    /// <summary>Median contrast against `background` of the pixels with at least 95 % of the glyph's own maximum alpha (the "core").</summary>
-    static (double Median, int Count) MedianCoreContrast(Bitmap icon, Color background)
+    /// <summary>The pixels of the exhausted glyph's countdown text (none for any other glyph).</summary>
+    internal static HashSet<(int X, int Y)> InkOf(QuotaIconParams p)
     {
-        int ceiling = MaxAlpha(icon);
+        var ink = new HashSet<(int, int)>();
+        if (p.Exhausted && p.Countdown is { } text)
+            foreach (Rectangle r in CountdownGlyphs.For(text, p.Px).Ink)
+                for (int y = r.Top; y < r.Bottom; y++)
+                    for (int x = r.Left; x < r.Right; x++) ink.Add((x, y));
+        return ink;
+    }
+
+    /// <summary>Median contrast against `background` of the pixels with at least 95 % of the glyph's own maximum alpha (the "core"), leaving out the pixels in `skip`.</summary>
+    static (double Median, int Count) MedianCoreContrast(Bitmap icon, Color background, HashSet<(int X, int Y)>? skip = null)
+    {
+        int ceiling = 0;
+        for (int y = 0; y < icon.Height; y++)
+            for (int x = 0; x < icon.Width; x++)
+                if (skip is null || !skip.Contains((x, y))) ceiling = Math.Max(ceiling, icon.GetPixel(x, y).A);
         var contrasts = new List<double>();
         for (int y = 0; y < icon.Height; y++)
             for (int x = 0; x < icon.Width; x++)
             {
+                if (skip is not null && skip.Contains((x, y))) continue;
                 Color px = icon.GetPixel(x, y);
                 if (px.A < 0.95 * ceiling) continue;
                 contrasts.Add(ContrastRatio(RelativeLuminance(Blend(px, background)), RelativeLuminance(background)));
@@ -134,7 +151,7 @@ public class IconContrastTests
 
     /// <summary>
     /// The user's actual requirement, not just a contrast floor: "red and dimmed, but full" --
-    /// the exhausted glyph must visibly read as QUIETER than the active Tight/Safe glyphs, not
+    /// the exhausted glyph's RING must visibly read as QUIETER than the active Tight/Safe glyphs, not
     /// merely above the 3:1 legibility floor. A previous round cleared 5:1 by lightening the red
     /// to a pink-ish tint (Palette.CritDimmed, #FF7A63) at full strength, which made it the
     /// BRIGHTEST glyph on the whole contact sheet -- the opposite of "quieter". This pins the
@@ -153,7 +170,7 @@ public class IconContrastTests
         using Bitmap tight = GaugeRenderer.RenderQuota(tightParams);
         using Bitmap safe = GaugeRenderer.RenderQuota(safeParams);
 
-        double spentContrast = MedianCoreContrast(spent, DarkTaskbar).Median;
+        double spentContrast = MedianCoreContrast(spent, DarkTaskbar, InkOf(spentParams)).Median; // the ring; the text is undimmed on purpose
         double tightContrast = MedianCoreContrast(tight, DarkTaskbar).Median;
         double safeContrast = MedianCoreContrast(safe, DarkTaskbar).Median;
 
@@ -191,14 +208,12 @@ public class IconContrastTests
     [Fact]
     public void ExhaustedIcon_At16px_RingHasNoGapsAroundItsCircumference()
     {
-        // pieFrac only changes the inner pie's ANGULAR sweep, never its radius, so the
-        // radius-based inner-annulus cut in AssertRingHasNoGaps excludes the whole pie disc
-        // regardless of how filled it is -- any point in the countdown works here.
+        // The countdown text sits inside the ring (its pixels are left out below), whatever it says.
         QuotaIconParams p = QuotaIconParams.Build(SpentView(), px: 16, taskbarDark: true, UtcNow.AddMinutes(60));
         Assert.True(p.Exhausted);
 
         using Bitmap icon = GaugeRenderer.RenderQuota(p);
-        AssertRingHasNoGaps(icon);
+        AssertRingHasNoGaps(icon, InkOf(p));
     }
 
     /// <summary>
@@ -318,7 +333,7 @@ public class IconContrastTests
     /// dash. Generic over the actual ring geometry (band width, radius) rather than
     /// duplicating GaugeRenderer's private constants.
     /// </summary>
-    static void AssertRingHasNoGaps(Bitmap icon)
+    static void AssertRingHasNoGaps(Bitmap icon, HashSet<(int X, int Y)> skip)
     {
         int w = icon.Width, h = icon.Height;
         double cx = w / 2.0, cy = h / 2.0;
@@ -331,11 +346,12 @@ public class IconContrastTests
         {
             for (int x = 0; x < w; x++)
             {
+                if (skip.Contains((x, y))) continue;
                 Color px = icon.GetPixel(x, y);
                 if (px.A < 150) continue; // comfortably below the dimmed ring's own alpha ceiling
                 double dx = x + 0.5 - cx, dy = y + 0.5 - cy;
                 double dist = Math.Sqrt(dx * dx + dy * dy);
-                if (dist < w * 0.30) continue; // exclude the inner pie/erased gap -- the ring lives in the outer annulus
+                if (dist < w * 0.30) continue; // exclude the inside -- the ring lives in the outer annulus
                 totalRingPixels++;
 
                 double angleDeg = (Math.Atan2(dy, dx) * 180.0 / Math.PI + 360.0) % 360.0;

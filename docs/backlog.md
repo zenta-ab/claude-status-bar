@@ -53,6 +53,15 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
 
+## Mac parity for the exhausted countdown (2026-10-13)
+- **The exhausted tray icon shows the time left** instead of the countdown pie: `CountdownText.Format` (days /
+  hours / minutes, always rounded up, a round-up that reaches the next unit moves to it, cap 99d) over
+  `BlockedUntil − now`; the red ring thinner while text is shown; a pixel font for 0-9, d, h, m (3x5 px at
+  16 px, the `1` 2 px wide, 7 rows at 20/24 px, 2 px cells from 32 px) set pixel-exact on the finished ring,
+  white on a dark menu bar and near-black on a light one, undimmed. The macOS menu-bar icon is usually 18-22 pt
+  (36-44 px on Retina): start from the 2 px-cell design and check it on a real menu bar. Re-render only when
+  the text changes. See `docs/forecast-and-states.md` "Exhausted".
+
 ## Mac parity for the 2026-10-08 round (Windows: loading state, panel header, idle-account freshness)
 - **Idle account is not stale.** `src/Mac/Sources/ClaudeQuotaCore/QuotaModel.swift` and `FreshnessOracle.swift`
   need the same two changes as Windows (`docs/forecast-and-states.md`, "An idle account is not a stale

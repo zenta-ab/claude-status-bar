@@ -17,12 +17,13 @@ namespace ClaudeStatusBar.Icons;
 /// call at a time.
 ///
 /// Driven by the 1 Hz UI tick (docs/forecast-and-states.md, "Icon"): re-renders
-/// only when the quantized render inputs actually change, and at most every 15s
-/// while any window is Spent (the countdown pie would otherwise churn every tick).
+/// only when the render inputs actually change (the exhausted icon's countdown text is one of them:
+/// it changes at most once a minute), and, while any window is Spent, never more often than every 15 s.
 /// </summary>
 public sealed class IconSlot : IDisposable
 {
-    static readonly TimeSpan ExhaustedThrottle = TimeSpan.FromSeconds(15);
+    /// <summary>The least time between two renders of the exhausted icon. Its text changes at most once a minute, so this never delays a change by more than itself and exists only to cap a flapping input.</summary>
+    internal static readonly TimeSpan ExhaustedThrottle = TimeSpan.FromSeconds(15);
 
     readonly NotifyIcon _notifyIcon;
     Icon? _newest;
@@ -56,15 +57,11 @@ public sealed class IconSlot : IDisposable
             DateTimeOffset now = nowOverride ?? DateTimeOffset.UtcNow;
             // Monotonic (Codex review Low #18): a backward wall-clock jump must not leave the
             // exhausted-icon throttle stuck open/closed until wall time catches back up.
-            long nowMonoMs = Environment.TickCount64;
+            long nowMonoMs = nowOverride is { } stepped ? stepped.ToUnixTimeMilliseconds() : Environment.TickCount64; // a stepped (test) clock drives the throttle too
 
             QuotaIconParams p = QuotaIconParams.Build(view, px, taskbarDark, now);
 
-            bool sizeOrThemeChanged = _lastParams is not { } last || last.Px != p.Px || last.TaskbarDark != p.TaskbarDark;
-            bool throttledExhausted = !sizeOrThemeChanged && p.Exhausted && (nowMonoMs - _lastRenderAtMonoMs) < ExhaustedThrottle.TotalMilliseconds;
-            bool unchanged = !sizeOrThemeChanged && !p.Exhausted && _lastParams is { } same && same.Equals(p);
-
-            if (!sizeOrThemeChanged && (throttledExhausted || unchanged))
+            if (!ShouldRender(_lastParams, p, nowMonoMs, _lastRenderAtMonoMs))
             {
                 _notifyIcon.Text = tooltipOverride ?? BuildTooltip(view, accountLabel);
                 return;
@@ -108,6 +105,20 @@ public sealed class IconSlot : IDisposable
             // on any render failure rather than crashing the 1Hz eval tick that drives this.
             SafeLog.Warn($"IconSlot.Update failed, keeping last icon: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Does this tick need a new Icon? Yes for the first one and whenever the tray size or taskbar theme
+    /// changed (always); no when the params are identical to what is shown -- the exhausted icon included,
+    /// its countdown text being part of them, so it is re-rendered exactly when the text changes (once a
+    /// minute at most); and an exhausted change is held back until ExhaustedThrottle has passed since the
+    /// last render (it is then rendered on the first tick after, because the params still differ).
+    /// </summary>
+    internal static bool ShouldRender(QuotaIconParams? last, QuotaIconParams next, long nowMonoMs, long lastRenderMonoMs)
+    {
+        if (last is not { } l || l.Px != next.Px || l.TaskbarDark != next.TaskbarDark) return true;
+        if (l.Equals(next)) return false;
+        return !(next.Exhausted && nowMonoMs - lastRenderMonoMs < ExhaustedThrottle.TotalMilliseconds);
     }
 
     const int TooltipMaxLength = 63;

@@ -16,6 +16,9 @@ internal static class Program
         if (GetArgValue(args, "--capture-icon-compare") is { } compareDir)
             return IconCompareSheet.Run(compareDir);
 
+        if (GetArgValue(args, "--capture-icon-countdown") is { } countdownDir)
+            return IconCompareSheet.RunCountdown(countdownDir);
+
         if (args.Contains("--selftest"))
             return HandleCensus.RunSelfTest();
 

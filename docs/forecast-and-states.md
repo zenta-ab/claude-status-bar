@@ -397,7 +397,7 @@ countdown shows "Återställs nu…", and freshness is Stale via the `resets_at 
 
 ## How every tray glyph is drawn (2026-10-09)
 
-NOTHING in a tray icon may look pixelated. Every glyph -- the gauge, the exhausted ring and pie, the "!", the
+NOTHING in a tray icon may look pixelated. Every glyph -- the gauge, the exhausted ring, the "!", the
 padlock, the stale dot, the loading arc -- is drawn **antialiased** at 16x the output size and box-filtered
 down once (`GaugeRenderer.Downsample`: the exact area average of each 16x16 block, on premultiplied colour so
 no dark/light halo, output as straight ARGB). Straight edges (the padlock body, the "!" bar) sit on the
@@ -425,9 +425,27 @@ writes a sheet per tray size with every state, on both taskbar colours, drawn th
   `Palette.Crit` (`#E23D28`), dimmed -- not the earlier dashed grey outline, which read as a
   lifebuoy rather than "blocked", and not a lightened tint either (an earlier round used
   `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST
-  glyph of all of them, the opposite of "reads as disabled"). The inner pie becomes a
-  countdown in the same colour, also dimmed: `(BlockedUntil − now) / W` of the blocking
-  window. Only the pie moves; the ring's circumference never changes.
+  glyph of all of them, the opposite of "reads as disabled"). Inside the ring there is no pie any more:
+  the **time until the quota can be used again** is written there as up to three characters, `1d` / `9h` / `45m`.
+- **Which time:** `BlockedUntil − now` (the weekly reset when only the weekly quota is spent, the session
+  reset when only the session is spent, the later one when both are). **Format** (`CountdownText.Format`, a
+  pure function of a duration, so a DST change cannot move it): 1 day or more `Nd`, 1 hour or more `Nh`,
+  otherwise `Nm`; always rounded UP (59 s is `1m`, 1 h 1 min is `2h`, never `0m`), and a round-up that
+  reaches the next unit moves to it (59 min 30 s is `1h`, 23 h 30 min is `1d`, not `60m`/`24h`). Days cap at 99.
+  The tooltip and the panel keep giving the full time.
+- **Drawn in a pixel font, not a system font** (`CountdownGlyphs`): 0-9, d, h, m are 3 px wide (the `1` 2 px) and
+  5 px tall on the 16 px icon, every stroke a whole pixel on the grid, so the straight strokes are crisp
+  (the shapes have no curves, so nothing is antialiased). Three characters and their two gaps are 11 px,
+  which is why the ring gets thinner while text is shown (about 2 px at 16 px, `Style.RingBandFraction`; the
+  ring's outer edge does not move): the text may dip about a pixel into the ring's inner edge at the
+  corners of a 3-character token ("23h", "45m") and never comes near its outer edge. 20 and 24 px use the
+  same shapes 7 rows tall; 32 px and up use 2 px cells. Colour: white on a dark taskbar, near-black
+  (`#202020`) on a light one -- NOT the ring's red (the first try, the darkened red, ran into the red ring
+  at 16 px). The text is undimmed and opaque; it measures far above 3:1 on both taskbars
+  (`CountdownIconTests`), while the ring keeps its dimmed, quieter-than-active core (`IconContrastTests`
+  measures the ring with the text's pixels left out). `ClaudeStatusBar.exe --capture-icon-countdown <dir>`
+  renders every token width, both spent kinds, 16/20/24/32 px, both taskbars, through the real `Icon` path,
+  enlarged 6x -- LOOK at the sheets after touching the font.
 - Target is **≥ 3:1 contrast at 16 px on `#202020`**, not the ≥ 5:1 used for other states: a
   spent/exhausted state must read as visibly QUIETER than an active one (Tight/Safe), not
   merely legible, and real critical red tops out around ~3.8:1 fully opaque on a dark taskbar
@@ -439,7 +457,10 @@ writes a sheet per tray size with every state, on both taskbar colours, drawn th
   so nobody "fixes" this back to a brighter red later). The earlier grey `#9AA3AE` dashed ring
   cleared 5:1 too, but read as a lifebuoy; the even earlier `#6C7480` at 42 % measured 1.71:1
   and was invisible.
-- The icon re-renders at most every 15 s in this state (the pie changes slowly).
+- The icon is re-rendered exactly when its parameters change -- in this state that is when the text changes,
+  at most once a minute -- and never more often than every 15 s while exhausted (`IconSlot.ShouldRender`,
+  a guard against a flapping input; a held-back change is rendered on the first tick after it, never lost).
+  Same Icon/handle rules as before (`--selftest` deltas 0).
 
 ## Poll cadence
 

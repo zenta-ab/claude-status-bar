@@ -29,7 +29,8 @@ public readonly record struct QuotaIconParams(
     bool TaskbarDark,
     bool Loading = false,
     int LoadingFrame = 0,
-    bool Padlock = false)
+    bool Padlock = false,
+    string? Countdown = null)
 {
     public static QuotaIconParams Build(QuotaView view, int px, bool taskbarDark, DateTimeOffset utcNow)
     {
@@ -49,17 +50,18 @@ public readonly record struct QuotaIconParams(
 
         if (view.BlockedUntil is { } blockedUntil)
         {
-            // docs/forecast-and-states.md "Exhausted": the solid ring and the countdown pie it
-            // encloses are both the real critical colour, dimmed -- not Palette.Dead (grey),
-            // which the dashed-outline look used, and not a lightened tint (see git history):
-            // the target here is >= 3:1 contrast (not >= 5:1), specifically so this state reads
-            // as quieter/duller than the active Tight/Safe glyphs -- see IconContrastTests'
-            // relative-brightness assertion. Only the pie moves; the ring itself never changes.
+            // docs/forecast-and-states.md "Exhausted": the solid ring is the real critical colour,
+            // dimmed -- not Palette.Dead (grey), which the dashed-outline look used, and not a
+            // lightened tint (see git history): the target here is >= 3:1 contrast (not >= 5:1),
+            // specifically so this state reads as quieter/duller than the active Tight/Safe glyphs --
+            // see IconContrastTests' relative-brightness assertion. Inside it, the time until the quota
+            // can be used again as short text ("1d", "9h", "10m"); the text is the only part that moves,
+            // and only when it changes (at most once a minute), so it is part of the change fingerprint.
             Color exhaustedColour = Palette.ForTaskbar(Palette.Crit, taskbarDark, GaugeRenderer.ExhaustedDimAlpha);
-            double countdown = Quantize(CountdownFrac(view, blockedUntil, utcNow));
             return new QuotaIconParams(
-                Outline: false, Exhausted: true, RingFrac: 1.0, PieFrac: countdown, ForecastFrac: 0, SessionForecastFrac: countdown,
-                RingArgb: exhaustedColour.ToArgb(), PieArgb: exhaustedColour.ToArgb(), Stale: stale, px, taskbarDark);
+                Outline: false, Exhausted: true, RingFrac: 1.0, PieFrac: 0, ForecastFrac: 0, SessionForecastFrac: 0,
+                RingArgb: exhaustedColour.ToArgb(), PieArgb: exhaustedColour.ToArgb(), Stale: stale, px, taskbarDark,
+                Countdown: CountdownText.Format(blockedUntil - utcNow));
         }
 
         double ringFrac = Quantize((view.Weekly.UsedPct ?? 0.0) / 100.0);
@@ -84,18 +86,6 @@ public readonly record struct QuotaIconParams(
         return new QuotaIconParams(
             Outline: false, Exhausted: false, ringFrac, pieFrac, forecastFrac, sessionForecastFrac,
             ringColor.ToArgb(), pieColor.ToArgb(), stale, px, taskbarDark);
-    }
-
-    static double CountdownFrac(QuotaView view, DateTimeOffset blockedUntil, DateTimeOffset utcNow)
-    {
-        double windowMinutes = QuotaWindows.WeeklyMinutes;
-        if (view.Session.State == QuotaState.Spent && view.Session.ResetsAt == blockedUntil)
-            windowMinutes = QuotaWindows.SessionMinutes;
-        else if (view.Weekly.State == QuotaState.Spent && view.Weekly.ResetsAt == blockedUntil)
-            windowMinutes = QuotaWindows.WeeklyMinutes;
-
-        double remaining = (blockedUntil - utcNow).TotalMinutes;
-        return Math.Clamp(remaining / windowMinutes, 0.0, 1.0);
     }
 
     static double Quantize(double frac) => Math.Round(Math.Clamp(frac, 0.0, 1.0) * 360.0) / 360.0;

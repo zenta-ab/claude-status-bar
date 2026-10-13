@@ -474,58 +474,62 @@ public static class GaugeRenderer
         // undimmed Tight/Safe glyphs.
         float dimAlpha = ExhaustedDimAlpha;
         Bitmap bmp = p.Exhausted
-            ? RenderExhaustedGlyph(p.Px, p.PieFrac, Color.FromArgb(p.RingArgb), dimAlpha, p.TaskbarDark)
+            ? RenderExhaustedGlyph(p.Px, p.Countdown, Color.FromArgb(p.RingArgb), dimAlpha, p.TaskbarDark)
             : Render(p.Px, p.RingFrac, p.PieFrac, p.ForecastFrac, p.SessionForecastFrac, Color.FromArgb(p.RingArgb), Color.FromArgb(p.PieArgb), exhausted: false, p.TaskbarDark, dimAlpha);
 
         return p.Stale ? ApplyStaleOverlay(bmp, p.Px, p.TaskbarDark) : bmp;
     }
 
     /// <summary>
-    /// The exhausted glyph (solid ring + countdown pie, docs/forecast-and-states.md "Exhausted"): a FULL,
-    /// continuous ring in the critical colour (dimmed), not the earlier dashed outline -- the dashes read as
-    /// a lifebuoy rather than "blocked". Only the inner countdown pie moves.
+    /// The exhausted glyph (docs/forecast-and-states.md "Exhausted"): a FULL, continuous ring in the
+    /// critical colour (dimmed), not the earlier dashed outline -- the dashes read as a lifebuoy rather
+    /// than "blocked" -- and, inside it, the time until the quota opens again as up to three characters
+    /// ("1d", "9h", "45m": CountdownText) in the pixel font of CountdownGlyphs.
     ///
-    /// Antialiased like every other glyph: drawn at SS times the size and box-filtered down once, with the
-    /// dim applied exactly once, as a plain multiplication of the final alpha (Downsample). The stroke is
-    /// wide enough that its core reaches full coverage -- so the core's alpha is exactly the dim level and
-    /// the contrast tests measure that core (IconContrastTests), never the antialiased fringe. (An earlier
-    /// version turned antialiasing OFF to get there, which left the stair-stepped ring users saw.)
+    /// The ring is antialiased like every other glyph: drawn at SS times the size and box-filtered down
+    /// once, with the dim applied exactly once, as a plain multiplication of the final alpha (Downsample).
+    /// Its stroke is wide enough that its core reaches full coverage, so the core's alpha is exactly the dim
+    /// level and the contrast tests measure that core, never the antialiased fringe. With text the band is
+    /// thinner (CountdownGlyphs.Style) to leave the three characters room. The text is NOT dimmed and NOT
+    /// antialiased: its pixels are whole output pixels in the text colour, set on the finished ring, so
+    /// the straight strokes stay crisp and it is the one thing on the icon that reads at a glance.
     /// </summary>
-    static Bitmap RenderExhaustedGlyph(int px, double pieFrac, Color color, float dimAlpha, bool taskbarDark)
+    static Bitmap RenderExhaustedGlyph(int px, string? countdown, Color color, float dimAlpha, bool taskbarDark)
     {
+        CountdownGlyphs.Layout? text = countdown is not null && CountdownGlyphs.CanDraw(countdown) ? CountdownGlyphs.For(countdown, px) : null;
+
         int s = px * SS;
         using var hi = new Bitmap(s, s, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(hi))
         {
             ConfigureHiRes(g);
-            var (band, rOuter, ringRect) = RingGeometry(s);
+            var (band, _, ringRect) = RingGeometry(s, text?.RingBandFraction ?? 0.155f);
 
             using (var trackPen = new Pen(TrackColor(40, taskbarDark), band))
                 g.DrawArc(trackPen, ringRect, 0, 360);
 
             using (var ring = new Pen(color, Math.Max(1.6f * SS, band * 0.95f)))
                 g.DrawEllipse(ring, ringRect);
-
-            float gap = band * 0.42f;
-            float rPieOuter = rOuter - band * 0.5f - gap;
-            using (var erase = new SolidBrush(Color.Transparent))
-            {
-                g.CompositingMode = CompositingMode.SourceCopy;
-                float rk = rPieOuter + gap;
-                g.FillEllipse(erase, s * 0.5f - rk, s * 0.5f - rk, rk * 2, rk * 2);
-                g.CompositingMode = CompositingMode.SourceOver;
-            }
-
-            if (pieFrac > 0)
-            {
-                using var pb = new SolidBrush(color);
-                var pr = new RectangleF(s * 0.5f - rPieOuter, s * 0.5f - rPieOuter, rPieOuter * 2, rPieOuter * 2);
-                g.FillPie(pb, pr, -90f, (float)(Math.Min(1.0, pieFrac) * 360.0));
-            }
         }
-        return Downsample(hi, px, exhausted: true, dimAlpha);
+
+        Bitmap bmp = Downsample(hi, px, exhausted: true, dimAlpha);
+        if (text is { } t) DrawInk(bmp, t.Ink, CountdownTextColour(taskbarDark));
+        return bmp;
     }
 
+    /// <summary>White on a dark taskbar, near-black on a light one (the taskbar's own dark): never the ring's red, which at 16 px would run into the ring. Undimmed.</summary>
+    internal static Color CountdownTextColour(bool taskbarDark) =>
+        taskbarDark ? Color.FromArgb(255, 255, 255, 255) : Color.FromArgb(255, 0x20, 0x20, 0x20);
+
+    /// <summary>Sets whole pixels to `colour` (opaque): the countdown text is pixel-exact, never blended.</summary>
+    static void DrawInk(Bitmap bmp, IEnumerable<Rectangle> ink, Color colour)
+    {
+        int argb = colour.ToArgb();
+        foreach (Rectangle r in ink)
+            for (int y = Math.Max(0, r.Top); y < Math.Min(bmp.Height, r.Bottom); y++)
+                for (int x = Math.Max(0, r.Left); x < Math.Min(bmp.Width, r.Right); x++)
+                    bmp.SetPixel(x, y, Color.FromArgb(argb));
+    }
     /// <summary>
     /// Box-filters a supersampled glyph down to px x px: every output pixel is the exact area average of
     /// its SS x SS block, computed on premultiplied colour so a transparent neighbour never tints an edge
@@ -591,9 +595,9 @@ public static class GaugeRenderer
     }
 
     /// <summary>Ring stroke width and bounding rect, shared by Render() and RenderRing() so they never disagree.</summary>
-    static (float band, float rOuter, RectangleF ringRect) RingGeometry(int s)
+    static (float band, float rOuter, RectangleF ringRect) RingGeometry(int s, float bandFraction = 0.155f)
     {
-        float band = s * 0.155f; // ring stroke width
+        float band = s * bandFraction; // ring stroke width
         float rOuter = s * 0.5f - band * 0.5f - s * 0.02f;
         var ringRect = new RectangleF(s * 0.5f - rOuter, s * 0.5f - rOuter, rOuter * 2, rOuter * 2);
         return (band, rOuter, ringRect);

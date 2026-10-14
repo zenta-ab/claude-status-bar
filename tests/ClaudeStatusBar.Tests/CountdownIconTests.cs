@@ -141,7 +141,7 @@ public class CountdownIconTests
     [InlineData(32)]
     [InlineData(40)]
     [InlineData(48)]
-    public void EveryToken_IsCentredOnTheWholeIcon_InsideIt_AndAsTallAsItsSetAllows(int px)
+    public void EveryToken_IsCentredOnTheWholeIcon_InsideIt_AndSevenCellsTall(int px)
     {
         int k = Math.Max(1, px / 16);
         double centre = px / 2.0;
@@ -149,9 +149,7 @@ public class CountdownIconTests
         foreach (string token in EveryToken())
         {
             CountdownGlyphs.Layout layout = CountdownGlyphs.For(token, px);
-            int rows = token.Length >= 3 ? 7 : 9;                              // two characters: the big set; three: the narrow one
-
-            Assert.Equal(rows * k, layout.Bounds.Height);
+            Assert.Equal(7 * k, layout.Bounds.Height);                          // one small set for every token
             Assert.InRange(layout.Bounds.Width, 1, px);                           // never wider than the icon
             Assert.InRange(Math.Abs(layout.Bounds.Left + layout.Bounds.Width / 2.0 - centre), 0, 0.5 * k);   // centred (half a cell at most)
             Assert.InRange(Math.Abs(layout.Bounds.Top + layout.Bounds.Height / 2.0 - centre), 0, 0.5 * k);
@@ -161,35 +159,52 @@ public class CountdownIconTests
     }
 
     [Fact]
-    public void AtSixteenPixels_TwoCharacterTokensAreNinePixelsTall_AndThreeCharacterOnesFillTheWidth()
+    public void AtSixteenPixels_EveryTokenIsSevenPixelsTall_ThreeCharactersFillTheWidth_TwoSitInsideTheRing()
     {
-        Assert.Equal(9, CountdownGlyphs.For("3d", 16).Bounds.Height);
-        Assert.Equal(7, CountdownGlyphs.For("23h", 16).Bounds.Height);
+        Assert.All(EveryToken(), t => Assert.Equal(7, CountdownGlyphs.For(t, 16).Bounds.Height));
 
         int widest3 = EveryToken().Where(t => t.Length == 3).Max(t => CountdownGlyphs.For(t, 16).Bounds.Width);
         int widest2 = EveryToken().Where(t => t.Length == 2).Max(t => CountdownGlyphs.For(t, 16).Bounds.Width);
         Assert.Equal(15, widest3);                                                // "45m" and friends: 4 + 1 + 4 + 1 + 5, one pixel from edge to edge
-        Assert.InRange(widest2, 13, 15);
+        Assert.Equal(10, widest2);                                                // "9m": 4 + 1 + 5
     }
 
-    [Fact]
-    public void EveryGlyph_IsDistinct_InBothSets()
+    [Theory]
+    [InlineData(16)]
+    [InlineData(20)]
+    [InlineData(24)]
+    [InlineData(32)]
+    public void TwoCharacterTokens_SitInsideTheRingsClearInterior(int px)
     {
-        foreach (int length in new[] { 2, 3 })
+        // the ring's inner edge (GaugeRenderer.RingGeometry: band 15.5 % of the icon, outer edge 2 % in); the square
+        // corner of a glyph (the top of a "5", the bottom of a "2") may graze it by up to half a cell, never more
+        double innerRadius = px * (0.5 - 0.02 - 0.155);
+        double centre = px / 2.0;
+
+        foreach (string token in EveryToken().Where(t => t.Length == 2))
         {
-            var seen = new Dictionary<string, char>();
-            foreach (char c in "0123456789dhm")
-            {
-                string token = new string(c, length);                              // e.g. "333": the same glyph repeated, drawn in this length's set
-                if (!CountdownGlyphs.CanDraw(token)) continue;
-                CountdownGlyphs.Layout l = CountdownGlyphs.For(token, 16);
-                string key = string.Join(";", l.Ink.Where(r => r.X - l.Bounds.X < CountdownGlyphs.SetFor(length)[c][0].Length).Select(r => $"{r.X - l.Bounds.X},{r.Y - l.Bounds.Y}"));
-                Assert.False(seen.TryGetValue(key, out char other), $"'{c}' draws the same as '{other}' ({length} characters)");
-                seen[key] = c;
-            }
+            bool[,] ink = CountdownGlyphs.InkMask(CountdownGlyphs.For(token, px), px);
+            for (int y = 0; y < px; y++)
+                for (int x = 0; x < px; x++)
+                    if (ink[x, y])
+                    {
+                        double dist = Math.Sqrt((x + 0.5 - centre) * (x + 0.5 - centre) + (y + 0.5 - centre) * (y + 0.5 - centre));
+                        Assert.True(dist <= innerRadius + 0.6 * Math.Max(1, px / 16), $"{token} @{px}: ink pixel ({x},{y}) at {dist:F2} px is over the ring (inner edge {innerRadius:F2})");
+                    }
         }
     }
 
+    [Fact]
+    public void EveryGlyph_IsDistinct()
+    {
+        var seen = new Dictionary<string, char>();
+        foreach (char c in "0123456789dhm")
+        {
+            string key = string.Join("/", CountdownGlyphs.ShapeOf(c));
+            Assert.False(seen.TryGetValue(key, out char other), $"'{c}' draws the same as '{other}'");
+            seen[key] = c;
+        }
+    }
     // ---- what is drawn: crisp, undimmed, contrasting, over a quiet ring ----
 
     static TimeSpan Left(string token) => token switch

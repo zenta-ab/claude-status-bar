@@ -53,16 +53,17 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
 
-## Mac parity for the exhausted countdown (2026-10-13)
-- **The exhausted tray icon shows the time left** instead of the countdown pie: `CountdownText.Format` (days /
-  hours / minutes, always rounded up, a round-up that reaches the next unit moves to it, cap 99d) over
-  `BlockedUntil − now`; the red ring keeps its full diameter and normal band, dimmed to a backdrop (the same red at 45 % alpha, core at least 1.5:1 against the bar), and the
-  text lies OVER it, as large as the icon allows: a pixel font for 0-9, d, h, m in two sets (two characters:
-  9 px tall with 2 px stems; three characters: 7 px tall, 4 px digits, a 5 px "m"), centred on the whole icon,
-  set pixel-exact on the finished ring (no outline cut), white on a dark menu bar and near-black on a light
-  one, undimmed (at least 4.5:1 against what is under it), scaled by whole factors. The macOS menu-bar icon is usually
-  18-22 pt (36-44 px on Retina): start from the 2x design and check it on a real menu bar. Re-render only when
-  the text changes. See `docs/forecast-and-states.md` "Exhausted".
+## Mac parity for the exhausted countdown (2026-10-13, calm text 2026-10-14)
+- **The exhausted menu-bar icon shows the time left, small and calm** instead of a countdown pie:
+  `CountdownText.Format` (days / hours / minutes, always rounded up, a round-up that reaches the next unit moves to
+  it, cap 99d) over `BlockedUntil − now`. The red ring keeps its full diameter and normal band, dimmed to a backdrop
+  (the same red at 45 % alpha, core at least 1.5:1 against the bar). In it, ONE small pixel font for 0-9, d, h, m
+  (7 px tall, 4 px digits with 1 px stems, a 5 px "m", 1 px gaps; centred, set pixel-exact on the finished ring) in
+  muted off-white (#D0D0D0) on a dark menu bar and the mirrored dark grey (#2F2F2F) on a light one, at least 4.5:1
+  against what is under it; scaled by whole factors. (A big 9 px version was tried and rejected as "almost too
+  much"; top apps and Microsoft's guidance favour muted state.) The macOS menu-bar icon is usually 18-22 pt
+  (36-44 px on Retina): start from the 2x design and check it on a real menu bar. Re-render only when the text
+  changes. See `docs/forecast-and-states.md` "Exhausted".
 
 ## Mac parity for the 2026-10-08 round (Windows: loading state, panel header, idle-account freshness)
 - **Idle account is not stale.** `src/Mac/Sources/ClaudeQuotaCore/QuotaModel.swift` and `FreshnessOracle.swift`

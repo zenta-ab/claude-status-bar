@@ -491,10 +491,10 @@ public static class GaugeRenderer
     /// once, with the dim applied exactly once, as a plain multiplication of the final alpha (Downsample).
     /// Its stroke is wide enough that its core reaches full coverage, so the core's alpha is exactly the dim
     /// level and the contrast tests measure that core, never the antialiased fringe. The ring keeps its full
-    /// outer diameter and normal band, and the text lies OVER it, as large as the icon allows: it is NOT
-    /// dimmed and NOT antialiased (whole output pixels in the text colour, set on the finished ring, so the
-    /// strokes stay crisp where they cross the red). The text is what reads first; the ring, dimmed to
-    /// ExhaustedDimAlpha, is the quiet "spent" cue behind it.
+    /// outer diameter and normal band; the text is small and calm (7 px tall, centred, muted off-white) and
+    /// is NOT antialiased: whole output pixels in the text colour, set on the finished ring, so the strokes
+    /// stay crisp. The ring, dimmed to ExhaustedDimAlpha, is the quiet "spent" cue behind it, the text the
+    /// detail.
     /// </summary>
     static Bitmap RenderExhaustedGlyph(int px, string? countdown, Color color, float dimAlpha, bool taskbarDark)
     {
@@ -519,9 +519,9 @@ public static class GaugeRenderer
         return bmp;
     }
 
-    /// <summary>White on a dark taskbar, near-black on a light one (the taskbar's own dark): never the ring's red. Undimmed.</summary>
+    /// <summary>Muted off-white (#D0D0D0) on a dark taskbar, the mirrored dark grey (#2F2F2F) on a light one: never pure white/black and never the ring's red. Opaque.</summary>
     internal static Color CountdownTextColour(bool taskbarDark) =>
-        taskbarDark ? Color.FromArgb(255, 255, 255, 255) : Color.FromArgb(255, 0x20, 0x20, 0x20);
+        taskbarDark ? Color.FromArgb(255, 0xD0, 0xD0, 0xD0) : Color.FromArgb(255, 0x2F, 0x2F, 0x2F);
 
     /// <summary>The countdown, pixel-exact: the ink pixels are set to `colour`, opaque, over whatever the ring has there.</summary>
     static void DrawCountdown(Bitmap bmp, CountdownGlyphs.Layout layout, Color colour)

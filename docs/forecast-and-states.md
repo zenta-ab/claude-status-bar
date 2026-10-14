@@ -423,29 +423,33 @@ writes a sheet per tray size with every state, on both taskbar colours, drawn th
 - `BlockedUntil` = the latest `resets_at` among spent windows.
 - The icon is a FULL, continuous ring in the real critical colour `Palette.Crit` (`#E23D28`) -- not the earlier
   dashed grey outline, which read as a lifebuoy rather than "blocked", and not a lightened tint either (an earlier
-  round used `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST glyph of all
-  of them, the opposite of "reads as disabled") -- **dimmed to a backdrop: alpha 0.45 on both taskbars**
-  (`GaugeRenderer.ExhaustedDimAlpha`, the same red on a light taskbar, no darkening). Over the ring, as large as the
-  icon allows, is the **time until the quota can be used again**, as up to three characters: `1d` / `9h` / `45m`.
-  The text carries the state; the ring only says "spent" at a glance.
+  round used `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST
+  glyph of all of them, the opposite of "reads as disabled") -- **dimmed to a backdrop: alpha 0.45 on both taskbars**
+  (`GaugeRenderer.ExhaustedDimAlpha`, the same red on a light taskbar, no darkening). In the middle, small and
+  calm, is the **time until the quota can be used again**, as up to three characters: `1d` / `9h` / `45m`.
 - **Which time:** `BlockedUntil − now` (the weekly reset when only the weekly quota is spent, the session
   reset when only the session is spent, the later one when both are). **Format** (`CountdownText.Format`, a
   pure function of a duration, so a DST change cannot move it): 1 day or more `Nd`, 1 hour or more `Nh`,
   otherwise `Nm`; always rounded UP (59 s is `1m`, 1 h 1 min is `2h`, never `0m`), and a round-up that
   reaches the next unit moves to it (59 min 30 s is `1h`, 23 h 30 min is `1d`, not `60m`/`24h`). Days cap at 99.
   The tooltip and the panel keep giving the full time.
-- **Drawn in a pixel font, as large as the icon allows, OVER the ring** (`CountdownGlyphs`): 0-9, d, h, m are
-  purpose-drawn on a 16 px grid -- whole-pixel strokes, so the straight strokes are crisp; the round glyphs
-  get their roundness from cut corner pixels, nothing is antialiased. Two sets: **A** for two-character tokens
-  ("3d", "9h", "1m"): 9 px tall, digits 6 px wide with 2 px stems; **B** for three characters ("23h", "45m",
-  "10m"): 7 px tall, digits 4 px wide, a real 5 px "m", 14-15 px wide with 1 px gaps -- the whole width of the
-  icon. The text is centred on the WHOLE icon and lies over the ring, which keeps its full outer diameter and
-  normal band (an earlier version squeezed the ring thin to fit the text inside it, and the user found the text
-  far too small). Larger icons scale the same design by a WHOLE factor (1x up to 31 px, 2x from 32 px; a
-  fractional factor gave uneven 1-2 px strokes at 20 and 24 px). Colour: white on a dark taskbar, near-black
-  (`#202020`) on a light one, undimmed and opaque, set pixel-exact on the finished ring. (A 1 px outline cut out
-  of the ring round the digits was tried while the ring was still at 0.85; against the 0.45 ring it only broke the
-  ring up and left stray low-alpha pixels, so it is gone.)
+- **Why the text is small and muted** (decided with the user from a comparison sheet of three looks): a first
+  version wrote the time big and white across the whole icon (9 px digits over the ring) and the user found it
+  "not super pretty, almost too much" on the real 16 px tray. Top apps rarely draw the reset duration into the
+  glyph at all (CodexBar dims its glyph when blocked and puts reset times beside it or in the menu; Pomotroid
+  draws no digits), and Microsoft's tray-icon guidance favours muted tones over swaths of pure red and subtle
+  state changes. So the state is a quiet red ring and the time is a small, off-white detail in it. The two
+  alternatives that were drawn and not chosen -- a muted gauge with a small red "blocked" badge and no text, and a
+  small raised ring with a label pill under it -- were diagnostics-only code and are gone (git history).
+- **Drawn in a pixel font** (`CountdownGlyphs`): 0-9, d, h, m purpose-drawn on a 16 px grid -- whole-pixel
+  strokes, so the straight strokes are crisp; the round glyphs get their roundness from cut corner pixels, nothing
+  is antialiased. ONE set for every token: 7 px tall, digits 4 px wide with 1 px stems, `1` 3 px, `d`/`h` 4 px and
+  a real 5 px `m`, 1 px gaps -- 9-10 px for two characters (inside the ring's clear interior at 16 px; the square
+  corner of a `5` or `2` may graze its inner edge by half a pixel) and 14-15 px for three (`23h`, `45m`: a little
+  over the ring). Centred on the whole icon. Larger icons scale the same design by a WHOLE factor (1x up to
+  31 px, 2x from 32 px; a fractional factor gave uneven 1-2 px strokes at 20 and 24 px). Colour: muted
+  off-white `#D0D0D0` on a dark taskbar, the mirrored dark grey `#2F2F2F` on a light one, opaque, set
+  pixel-exact on the finished ring.
 - **Contrast.** The TEXT is held to **at least 4.5:1 against what is actually under it** (the ring or the
   taskbar, measured against the same icon rendered without its text; `CountdownIconTests`). The RING is a
   deliberate exception to the 3:1 rule of every other glyph: its core must read at **at least 1.5:1** against the

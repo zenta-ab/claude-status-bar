@@ -411,7 +411,8 @@ all-zero AND mask, so transparency comes from alpha alone (`IconFactoryTests` al
 **Contrast is measured on the glyph's core**, not its antialiased fringe: the pixels with at least 95 % of the
 glyph's own alpha ceiling (255, or the exhausted dim level). The median contrast of that core must be >= 3:1
 against the taskbar on a dark (`#202020`) AND a light (`#F3F3F3`) taskbar at 16/20/24/32 px, for every state
-with a solid stroke (`IconContrastTests`). The palette is tuned for the dark taskbar; on a light one the colours
+with a solid stroke (`IconContrastTests`; the one exception is the exhausted ring, a deliberate dim backdrop
+for its countdown text with a 1.5:1 floor, see "Exhausted"). The palette is tuned for the dark taskbar; on a light one the colours
 are darkened (hue kept) just far enough to clear 3:1 (`Palette.ForTaskbar`), the ring's empty track is
 translucent black instead of white, and the stale dot is dark. `ClaudeStatusBar.exe --capture-icon-compare <dir>`
 writes a sheet per tray size with every state, on both taskbar colours, drawn through the real
@@ -420,43 +421,44 @@ writes a sheet per tray size with every state, on both taskbar colours, drawn th
 ## Exhausted (any window Spent)
 
 - `BlockedUntil` = the latest `resets_at` among spent windows.
-- The whole icon dims (alpha 0.85 on both taskbars -- `GaugeRenderer.ExhaustedDimAlpha`; on a light taskbar
-  the red is darkened instead, `Palette.ForTaskbar`), the ring is a FULL, continuous ring in the real critical colour
-  `Palette.Crit` (`#E23D28`), dimmed -- not the earlier dashed grey outline, which read as a
-  lifebuoy rather than "blocked", and not a lightened tint either (an earlier round used
-  `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST
-  glyph of all of them, the opposite of "reads as disabled"). Inside the ring there is no pie any more:
-  the **time until the quota can be used again** is written there as up to three characters, `1d` / `9h` / `45m`.
+- The icon is a FULL, continuous ring in the real critical colour `Palette.Crit` (`#E23D28`) -- not the earlier
+  dashed grey outline, which read as a lifebuoy rather than "blocked", and not a lightened tint either (an earlier
+  round used `#FF7A63` to chase a 5:1 target; on the icon contact sheet that made Spent the BRIGHTEST glyph of all
+  of them, the opposite of "reads as disabled") -- **dimmed to a backdrop: alpha 0.45 on both taskbars**
+  (`GaugeRenderer.ExhaustedDimAlpha`, the same red on a light taskbar, no darkening). Over the ring, as large as the
+  icon allows, is the **time until the quota can be used again**, as up to three characters: `1d` / `9h` / `45m`.
+  The text carries the state; the ring only says "spent" at a glance.
 - **Which time:** `BlockedUntil − now` (the weekly reset when only the weekly quota is spent, the session
   reset when only the session is spent, the later one when both are). **Format** (`CountdownText.Format`, a
   pure function of a duration, so a DST change cannot move it): 1 day or more `Nd`, 1 hour or more `Nh`,
   otherwise `Nm`; always rounded UP (59 s is `1m`, 1 h 1 min is `2h`, never `0m`), and a round-up that
   reaches the next unit moves to it (59 min 30 s is `1h`, 23 h 30 min is `1d`, not `60m`/`24h`). Days cap at 99.
   The tooltip and the panel keep giving the full time.
-- **Drawn in a pixel font, not a system font** (`CountdownGlyphs`): 0-9, d, h, m are 3 px wide (the `1` 2 px) and
-  5 px tall on the 16 px icon, every stroke a whole pixel on the grid, so the straight strokes are crisp
-  (the shapes have no curves, so nothing is antialiased). Three characters and their two gaps are 11 px,
-  which is why the ring gets thinner while text is shown (about 2 px at 16 px, `Style.RingBandFraction`; the
-  ring's outer edge does not move): the text may dip about a pixel into the ring's inner edge at the
-  corners of a 3-character token ("23h", "45m") and never comes near its outer edge. 20 and 24 px use the
-  same shapes 7 rows tall; 32 px and up use 2 px cells. Colour: white on a dark taskbar, near-black
-  (`#202020`) on a light one -- NOT the ring's red (the first try, the darkened red, ran into the red ring
-  at 16 px). The text is undimmed and opaque; it measures far above 3:1 on both taskbars
-  (`CountdownIconTests`), while the ring keeps its dimmed, quieter-than-active core (`IconContrastTests`
-  measures the ring with the text's pixels left out). `ClaudeStatusBar.exe --capture-icon-countdown <dir>`
-  renders every token width, both spent kinds, 16/20/24/32 px, both taskbars, through the real `Icon` path,
-  enlarged 6x -- LOOK at the sheets after touching the font.
-- Target is **≥ 3:1 contrast at 16 px on `#202020`**, not the ≥ 5:1 used for other states: a
-  spent/exhausted state must read as visibly QUIETER than an active one (Tight/Safe), not
-  merely legible, and real critical red tops out around ~3.8:1 fully opaque on a dark taskbar
-  -- it can never clear 5:1 at any alpha without being lightened away from "red". 3:1 is the
-  standard minimum for non-text UI components and leaves real room to dim the colour while
-  keeping it recognisably red. Measured ~3.1:1 at the 0.85 dimAlpha above (see
-  IconContrastTests, which also asserts the ring has no gaps around its circumference, and
-  that the Spent glyph measures strictly darker/quieter than both the Tight and Safe glyphs
-  so nobody "fixes" this back to a brighter red later). The earlier grey `#9AA3AE` dashed ring
-  cleared 5:1 too, but read as a lifebuoy; the even earlier `#6C7480` at 42 % measured 1.71:1
-  and was invisible.
+- **Drawn in a pixel font, as large as the icon allows, OVER the ring** (`CountdownGlyphs`): 0-9, d, h, m are
+  purpose-drawn on a 16 px grid -- whole-pixel strokes, so the straight strokes are crisp; the round glyphs
+  get their roundness from cut corner pixels, nothing is antialiased. Two sets: **A** for two-character tokens
+  ("3d", "9h", "1m"): 9 px tall, digits 6 px wide with 2 px stems; **B** for three characters ("23h", "45m",
+  "10m"): 7 px tall, digits 4 px wide, a real 5 px "m", 14-15 px wide with 1 px gaps -- the whole width of the
+  icon. The text is centred on the WHOLE icon and lies over the ring, which keeps its full outer diameter and
+  normal band (an earlier version squeezed the ring thin to fit the text inside it, and the user found the text
+  far too small). Larger icons scale the same design by a WHOLE factor (1x up to 31 px, 2x from 32 px; a
+  fractional factor gave uneven 1-2 px strokes at 20 and 24 px). Colour: white on a dark taskbar, near-black
+  (`#202020`) on a light one, undimmed and opaque, set pixel-exact on the finished ring. (A 1 px outline cut out
+  of the ring round the digits was tried while the ring was still at 0.85; against the 0.45 ring it only broke the
+  ring up and left stray low-alpha pixels, so it is gone.)
+- **Contrast.** The TEXT is held to **at least 4.5:1 against what is actually under it** (the ring or the
+  taskbar, measured against the same icon rendered without its text; `CountdownIconTests`). The RING is a
+  deliberate exception to the 3:1 rule of every other glyph: its core must read at **at least 1.5:1** against the
+  taskbar on both themes so it still reads as a red ring (measured ~1.7:1 on `#202020`, ~1.6:1 on `#F3F3F3`), and
+  stay clearly under 3:1 so it stays a backdrop (`IconContrastTests`, `CountdownIconTests`). It is still always
+  quieter than an active Tight/Safe glyph (`ExhaustedIcon_At16px_IsQuieterThanActiveStates`) and has no gaps around
+  its circumference without the text (the same test). History: the ring was first held at 3:1 (alpha 0.85, a
+  darkened red on a light taskbar) -- the earlier grey `#9AA3AE` dashed ring cleared 5:1 but read as a lifebuoy,
+  and `#6C7480` at 42 % measured 1.71:1 and was invisible; once the text carried the state the user asked for the
+  ring to recede, and the 3:1 floor was dropped for this glyph only.
+  `ClaudeStatusBar.exe --capture-icon-countdown <dir>` renders every token width, both spent kinds, 16/20/24/32
+  px, both taskbars, through the real `Icon` path, enlarged 6x, plus a strip of countdown icons next to ordinary
+  gauges at TRUE size -- LOOK at the sheets after touching the font or the ring.
 - The icon is re-rendered exactly when its parameters change -- in this state that is when the text changes,
   at most once a minute -- and never more often than every 15 s while exhausted (`IconSlot.ShouldRender`,
   a guard against a flapping input; a held-back change is rendered on the first tick after it, never lost).

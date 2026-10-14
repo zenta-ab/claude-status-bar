@@ -50,14 +50,12 @@ public readonly record struct QuotaIconParams(
 
         if (view.BlockedUntil is { } blockedUntil)
         {
-            // docs/forecast-and-states.md "Exhausted": the solid ring is the real critical colour,
-            // dimmed -- not Palette.Dead (grey), which the dashed-outline look used, and not a
-            // lightened tint (see git history): the target here is >= 3:1 contrast (not >= 5:1),
-            // specifically so this state reads as quieter/duller than the active Tight/Safe glyphs --
-            // see IconContrastTests' relative-brightness assertion. Inside it, the time until the quota
-            // can be used again as short text ("1d", "9h", "10m"); the text is the only part that moves,
-            // and only when it changes (at most once a minute), so it is part of the change fingerprint.
-            Color exhaustedColour = Palette.ForTaskbar(Palette.Crit, taskbarDark, GaugeRenderer.ExhaustedDimAlpha);
+            // docs/forecast-and-states.md "Exhausted": the solid ring is the real critical colour, dimmed
+            // to a backdrop (GaugeRenderer.ExhaustedDimAlpha) -- not Palette.Dead (grey), which the
+            // dashed-outline look used. Over it, the time until the quota can be used again as short text
+            // ("1d", "9h", "10m"); the text is the only part that moves, and only when it changes (at most
+            // once a minute), so it is part of the change fingerprint.
+            Color exhaustedColour = Palette.Crit; // the same red on both taskbars: at the ring's alpha a darkened red would only turn brown
             return new QuotaIconParams(
                 Outline: false, Exhausted: true, RingFrac: 1.0, PieFrac: 0, ForecastFrac: 0, SessionForecastFrac: 0,
                 RingArgb: exhaustedColour.ToArgb(), PieArgb: exhaustedColour.ToArgb(), Stale: stale, px, taskbarDark,

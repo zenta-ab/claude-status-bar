@@ -67,7 +67,10 @@ public class IconContrastTests
         (double median, int count) = MedianCoreContrast(icon, background, InkOf(p));
 
         Assert.True(count > 0, $"{state} {px}px: no core pixels (coverage >= 95%) to measure");
-        Assert.True(median >= 3.0, $"{state} {px}px on {(dark ? "dark" : "light")}: core contrast {median:F2}:1 over {count} px, need >= 3:1");
+        // The exhausted ring is a deliberately dim backdrop for its countdown text (which carries the state and is
+        // held to 4.5:1 by CountdownIconTests): its floor is 1.5:1, not the 3:1 of every other glyph.
+        double floor = state.StartsWith("spent") ? 1.5 : 3.0;
+        Assert.True(median >= floor, $"{state} {px}px on {(dark ? "dark" : "light")}: core contrast {median:F2}:1 over {count} px, need >= {floor}:1");
     }
 
     /// <summary>
@@ -115,14 +118,17 @@ public class IconContrastTests
         return max;
     }
 
-    /// <summary>The pixels of the exhausted glyph's countdown text (none for any other glyph).</summary>
+    /// <summary>The pixels of the exhausted glyph's countdown text (none for any other glyph): what is not the ring.</summary>
     internal static HashSet<(int X, int Y)> InkOf(QuotaIconParams p)
     {
         var ink = new HashSet<(int, int)>();
         if (p.Exhausted && p.Countdown is { } text)
-            foreach (Rectangle r in CountdownGlyphs.For(text, p.Px).Ink)
-                for (int y = r.Top; y < r.Bottom; y++)
-                    for (int x = r.Left; x < r.Right; x++) ink.Add((x, y));
+        {
+            bool[,] inkMask = CountdownGlyphs.InkMask(CountdownGlyphs.For(text, p.Px), p.Px);
+            for (int y = 0; y < p.Px; y++)
+                for (int x = 0; x < p.Px; x++)
+                    if (inkMask[x, y]) ink.Add((x, y));
+        }
         return ink;
     }
 
@@ -208,12 +214,19 @@ public class IconContrastTests
     [Fact]
     public void ExhaustedIcon_At16px_RingHasNoGapsAroundItsCircumference()
     {
-        // The countdown text sits inside the ring (its pixels are left out below), whatever it says.
         QuotaIconParams p = QuotaIconParams.Build(SpentView(), px: 16, taskbarDark: true, UtcNow.AddMinutes(60));
         Assert.True(p.Exhausted);
 
-        using Bitmap icon = GaugeRenderer.RenderQuota(p);
-        AssertRingHasNoGaps(icon, InkOf(p));
+        // The ring itself (the same icon without its text) is continuous all the way round ...
+        using Bitmap ring = GaugeRenderer.RenderQuota(p with { Countdown = null });
+        AssertRingHasNoGaps(ring, new HashSet<(int X, int Y)>());
+
+        // ... and with the text lying over it the ring is still there all round except where the digits are
+        // opaque on top of it, and always at its top and bottom.
+        using Bitmap withText = GaugeRenderer.RenderQuota(p);
+        bool[] hit = AngleBuckets(withText, InkOf(p));
+        Assert.True(hit.Count(h => h) >= 20, "the ring is covered by the text almost completely");
+        Assert.True(hit[18] && hit[19] && hit[5] && hit[6], "the top and the bottom of the ring must stay visible");     // 270-300 deg is up, 90-120 down (y grows downwards)
     }
 
     /// <summary>
@@ -335,6 +348,17 @@ public class IconContrastTests
     /// </summary>
     static void AssertRingHasNoGaps(Bitmap icon, HashSet<(int X, int Y)> skip)
     {
+        const int buckets = 24;
+        bool[] hit = AngleBuckets(icon, skip);
+        for (int b = 0; b < buckets; b++)
+            Assert.True(hit[b],
+                $"ring has a gap at bucket {b} ({b * 360.0 / buckets:F0}-{(b + 1) * 360.0 / buckets:F0} deg) -- " +
+                "expected a continuous ring, not a dashed one");
+    }
+
+    /// <summary>Which 15-degree sectors around the centre have ring ink (pixels in `skip` left out).</summary>
+    static bool[] AngleBuckets(Bitmap icon, HashSet<(int X, int Y)> skip)
+    {
         int w = icon.Width, h = icon.Height;
         double cx = w / 2.0, cy = h / 2.0;
 
@@ -348,7 +372,7 @@ public class IconContrastTests
             {
                 if (skip.Contains((x, y))) continue;
                 Color px = icon.GetPixel(x, y);
-                if (px.A < 150) continue; // comfortably below the dimmed ring's own alpha ceiling
+                if (px.A < 60) continue; // comfortably below the dimmed ring's own alpha ceiling (about 115)
                 double dx = x + 0.5 - cx, dy = y + 0.5 - cy;
                 double dist = Math.Sqrt(dx * dx + dy * dy);
                 if (dist < w * 0.30) continue; // exclude the inside -- the ring lives in the outer annulus
@@ -361,12 +385,7 @@ public class IconContrastTests
         }
 
         Assert.True(totalRingPixels > 0, "no ring pixels found in the outer annulus");
-        for (int b = 0; b < buckets; b++)
-        {
-            Assert.True(hit[b],
-                $"ring has a gap at bucket {b} ({b * 360.0 / buckets:F0}-{(b + 1) * 360.0 / buckets:F0} deg) -- " +
-                "expected a continuous ring, not a dashed one");
-        }
+        return hit;
     }
 
     static Color Blend(Color fg, Color bg)

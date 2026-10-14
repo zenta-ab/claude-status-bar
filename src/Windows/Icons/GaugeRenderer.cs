@@ -28,10 +28,9 @@ public static class GaugeRenderer
     /// forecastFrac        weekly projected utilization at reset, 0-1; ring wedge continues past ringFrac to here
     /// sessionForecastFrac session projected utilization at reset, 0-1; inner-pie sector continues past pieFrac to here
     /// ring/pie            colours for the ring arc / inner pie (caller resolves via Palette)
-    /// exhausted           true once the weekly limit is fully consumed: ring becomes a dashed outline,
-    ///                     the whole glyph is dimmed, and pieFrac is reinterpreted as time-left
-    /// dimAlpha            brightness matrix applied in the exhausted state; measured targets are
-    ///                     0.85 on a dark taskbar and 0.42 on a light one (see Palette/taskbar theme)
+    /// exhausted           true once a window is spent: a full ring dimmed to a backdrop (ExhaustedDimAlpha),
+    ///                     with its countdown text over it (RenderExhaustedGlyph)
+    /// dimAlpha            the exhausted ring's alpha ceiling
     /// taskbarDark         picks the session forecast sector's outline colour (dark outline on a
     ///                     dark taskbar, light outline on a light taskbar) so it keeps reading as
     ///                     a distinct "projected, not consumed" edge against either background
@@ -214,8 +213,13 @@ public static class GaugeRenderer
         return Downsample(hi, px, exhausted: false, dimAlpha: 1f);
     }
 
-    /// <summary>How much the exhausted glyph is quieted: its alpha ceiling. The same on both taskbars (the light one gets a darker red instead, Palette.ForTaskbar).</summary>
-    public const float ExhaustedDimAlpha = 0.85f;
+    /// <summary>
+    /// How much the exhausted ring is quieted: its alpha ceiling, the same on both taskbars. The countdown text
+    /// carries the state, so the ring is only a backdrop that says "spent" at a glance: the real critical red
+    /// at 45 %, which measures about 1.7:1 on a dark and 1.6:1 on a light taskbar (the floor for this ring is
+    /// 1.5:1, not the 3:1 of every other glyph -- docs/forecast-and-states.md "Exhausted").
+    /// </summary>
+    public const float ExhaustedDimAlpha = 0.45f;
 
     /// <summary>The ring's empty track: translucent white on a dark taskbar, translucent black on a light one (white would vanish there).</summary>
     static Color TrackColor(int alpha, bool taskbarDark) =>
@@ -467,11 +471,8 @@ public static class GaugeRenderer
         if (p.Loading) return RenderLoading(p.Px, p.LoadingFrame, LoadingFrames.FrameCount, p.TaskbarDark);
         if (p.Outline) return RenderOutline(p.Px, p.Padlock, p.TaskbarDark);
 
-        // 0.85 on a dark taskbar, per docs/forecast-and-states.md "Exhausted": with the real
-        // critical red (not a lightened tint) and a >= 3:1 target (not >= 5:1 -- this state
-        // must read as quieter than an active one, not merely legible), 0.85 clears 3:1 with a
-        // real margin (measured ~3.1:1; see IconContrastTests) while dimming it well below the
-        // undimmed Tight/Safe glyphs.
+        // The exhausted ring is a dim backdrop for its countdown text (ExhaustedDimAlpha), not a glyph that
+        // has to carry the state by itself.
         float dimAlpha = ExhaustedDimAlpha;
         Bitmap bmp = p.Exhausted
             ? RenderExhaustedGlyph(p.Px, p.Countdown, Color.FromArgb(p.RingArgb), dimAlpha, p.TaskbarDark)
@@ -489,10 +490,11 @@ public static class GaugeRenderer
     /// The ring is antialiased like every other glyph: drawn at SS times the size and box-filtered down
     /// once, with the dim applied exactly once, as a plain multiplication of the final alpha (Downsample).
     /// Its stroke is wide enough that its core reaches full coverage, so the core's alpha is exactly the dim
-    /// level and the contrast tests measure that core, never the antialiased fringe. With text the band is
-    /// thinner (CountdownGlyphs.Style) to leave the three characters room. The text is NOT dimmed and NOT
-    /// antialiased: its pixels are whole output pixels in the text colour, set on the finished ring, so
-    /// the straight strokes stay crisp and it is the one thing on the icon that reads at a glance.
+    /// level and the contrast tests measure that core, never the antialiased fringe. The ring keeps its full
+    /// outer diameter and normal band, and the text lies OVER it, as large as the icon allows: it is NOT
+    /// dimmed and NOT antialiased (whole output pixels in the text colour, set on the finished ring, so the
+    /// strokes stay crisp where they cross the red). The text is what reads first; the ring, dimmed to
+    /// ExhaustedDimAlpha, is the quiet "spent" cue behind it.
     /// </summary>
     static Bitmap RenderExhaustedGlyph(int px, string? countdown, Color color, float dimAlpha, bool taskbarDark)
     {
@@ -503,7 +505,7 @@ public static class GaugeRenderer
         using (var g = Graphics.FromImage(hi))
         {
             ConfigureHiRes(g);
-            var (band, _, ringRect) = RingGeometry(s, text?.RingBandFraction ?? 0.155f);
+            var (band, _, ringRect) = RingGeometry(s);
 
             using (var trackPen = new Pen(TrackColor(40, taskbarDark), band))
                 g.DrawArc(trackPen, ringRect, 0, 360);
@@ -513,23 +515,23 @@ public static class GaugeRenderer
         }
 
         Bitmap bmp = Downsample(hi, px, exhausted: true, dimAlpha);
-        if (text is { } t) DrawInk(bmp, t.Ink, CountdownTextColour(taskbarDark));
+        if (text is { } t) DrawCountdown(bmp, t, CountdownTextColour(taskbarDark));
         return bmp;
     }
 
-    /// <summary>White on a dark taskbar, near-black on a light one (the taskbar's own dark): never the ring's red, which at 16 px would run into the ring. Undimmed.</summary>
+    /// <summary>White on a dark taskbar, near-black on a light one (the taskbar's own dark): never the ring's red. Undimmed.</summary>
     internal static Color CountdownTextColour(bool taskbarDark) =>
         taskbarDark ? Color.FromArgb(255, 255, 255, 255) : Color.FromArgb(255, 0x20, 0x20, 0x20);
 
-    /// <summary>Sets whole pixels to `colour` (opaque): the countdown text is pixel-exact, never blended.</summary>
-    static void DrawInk(Bitmap bmp, IEnumerable<Rectangle> ink, Color colour)
+    /// <summary>The countdown, pixel-exact: the ink pixels are set to `colour`, opaque, over whatever the ring has there.</summary>
+    static void DrawCountdown(Bitmap bmp, CountdownGlyphs.Layout layout, Color colour)
     {
-        int argb = colour.ToArgb();
-        foreach (Rectangle r in ink)
-            for (int y = Math.Max(0, r.Top); y < Math.Min(bmp.Height, r.Bottom); y++)
-                for (int x = Math.Max(0, r.Left); x < Math.Min(bmp.Width, r.Right); x++)
-                    bmp.SetPixel(x, y, Color.FromArgb(argb));
+        bool[,] ink = CountdownGlyphs.InkMask(layout, bmp.Width);
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 0; x < bmp.Width; x++)
+                if (ink[x, y]) bmp.SetPixel(x, y, colour);
     }
+
     /// <summary>
     /// Box-filters a supersampled glyph down to px x px: every output pixel is the exact area average of
     /// its SS x SS block, computed on premultiplied colour so a transparent neighbour never tints an edge
@@ -595,9 +597,9 @@ public static class GaugeRenderer
     }
 
     /// <summary>Ring stroke width and bounding rect, shared by Render() and RenderRing() so they never disagree.</summary>
-    static (float band, float rOuter, RectangleF ringRect) RingGeometry(int s, float bandFraction = 0.155f)
+    static (float band, float rOuter, RectangleF ringRect) RingGeometry(int s)
     {
-        float band = s * bandFraction; // ring stroke width
+        float band = s * 0.155f; // ring stroke width
         float rOuter = s * 0.5f - band * 0.5f - s * 0.02f;
         var ringRect = new RectangleF(s * 0.5f - rOuter, s * 0.5f - rOuter, rOuter * 2, rOuter * 2);
         return (band, rOuter, ringRect);

@@ -91,7 +91,8 @@ public static class IconCompareSheet
         {
             int cellW = px * Scale + 10;
             int cellH = 2 * px * Scale + 30;
-            using var sheet = new Bitmap(cellW * tokens.Length, cellH * kinds.Length, PixelFormat.Format32bppArgb);
+            int stripH = 2 * (px + 6) + 18;
+            using var sheet = new Bitmap(cellW * tokens.Length, cellH * kinds.Length + stripH, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(sheet))
             {
                 g.Clear(Color.FromArgb(255, 0x60, 0x60, 0x60));
@@ -111,10 +112,43 @@ public static class IconCompareSheet
                         g.DrawString($"{tokens[i].Name} {(kinds[k].Item2 ? "wk" : "se")}", font, Brushes.White, cx, cy + 2 * px * Scale + 2);
                     }
             }
+            DrawTrueSizeStrip(sheet, px, now, tokens.Select(t => (t.Name, t.Left)).ToList(), cellH * kinds.Length);
             sheet.Save(Path.Combine(dir, $"countdown-{px}px.png"), ImageFormat.Png);
         }
         Console.WriteLine($"countdown sheets written to {dir}");
         return 0;
+    }
+
+    /// <summary>
+    /// At the bottom of a countdown sheet: some countdown icons next to the ordinary gauge icons at TRUE size
+    /// (1x, no enlargement), dark taskbar above and light below, to compare their visual weight the way the
+    /// tray shows them.
+    /// </summary>
+    static void DrawTrueSizeStrip(Bitmap sheet, int px, DateTimeOffset now, List<(string Name, TimeSpan Left)> tokens, int top)
+    {
+        var icons = new List<QuotaView>();
+        foreach (string name in new[] { "2d", "9h", "23h", "45m", "10m", "1m" })
+            icons.Add(SpentView(now, tokens.First(t => t.Name == name).Left, weekly: true));
+        foreach (string key in new[] { "safe", "tight", "dry_early", "spent_session" })
+            icons.Add(DemoQuotaSource.Build(now).First(s => s.Key == key).View);
+
+        using var g = Graphics.FromImage(sheet);
+        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
+        using var font = new Font("Segoe UI", 8f);
+        for (int row = 0; row < 2; row++)
+        {
+            bool dark = row == 0;
+            int y = top + 6 + row * (px + 6);
+            using var back = new SolidBrush(dark ? Dark : Light);
+            g.FillRectangle(back, 0, y - 3, sheet.Width, px + 6);
+            for (int i = 0; i < icons.Count; i++)
+            {
+                using Bitmap bmp = ThroughIconPath(QuotaIconParams.Build(icons[i], px, dark, now), dark ? Dark : Light);
+                g.DrawImage(bmp, new Rectangle(8 + i * (px + 10), y, px, px), 0, 0, px, px, GraphicsUnit.Pixel);
+            }
+        }
+        g.DrawString("true size (1x): 2d 9h 23h 45m 10m 1m, then safe, tight, dry_early, spent_session", font, Brushes.White, 8, top + 2 * (px + 6) + 8);
     }
 
     /// <summary>A view whose weekly (or session) window is spent and opens again in `left`.</summary>

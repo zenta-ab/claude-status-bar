@@ -125,7 +125,7 @@ public class CountdownIconTests
         Assert.False(QuotaIconParams.Build(open, 16, true, Now).Exhausted);
     }
 
-    // ---- the pixel font fits the ring ----
+    // ---- the pixel font: size, fit, centring ----
 
     static IEnumerable<string> EveryToken()
     {
@@ -141,94 +141,157 @@ public class CountdownIconTests
     [InlineData(32)]
     [InlineData(40)]
     [InlineData(48)]
-    public void EveryToken_FitsInsideTheRing_AndNeverReachesItsOuterEdge(int px)
+    public void EveryToken_IsCentredOnTheWholeIcon_InsideIt_AndAsTallAsItsSetAllows(int px)
     {
-        var style = CountdownGlyphs.StyleFor(px);
+        int k = Math.Max(1, px / 16);
         double centre = px / 2.0;
-        double band = px * style.RingBandFraction;
-        double centreLine = px * 0.5 - band * 0.5 - px * 0.02;   // GaugeRenderer.RingGeometry's rOuter
-        double innerEdge = centreLine - band / 2;
-        double outerEdge = centreLine + band / 2;
 
         foreach (string token in EveryToken())
         {
             CountdownGlyphs.Layout layout = CountdownGlyphs.For(token, px);
-            Assert.InRange(Math.Abs(layout.Bounds.Left + layout.Bounds.Width / 2.0 - centre), 0, 0.5);   // centred (half a pixel at most)
-            Assert.InRange(Math.Abs(layout.Bounds.Top + layout.Bounds.Height / 2.0 - centre), 0, 0.5);
+            int rows = token.Length >= 3 ? 7 : 9;                              // two characters: the big set; three: the narrow one
 
+            Assert.Equal(rows * k, layout.Bounds.Height);
+            Assert.InRange(layout.Bounds.Width, 1, px);                           // never wider than the icon
+            Assert.InRange(Math.Abs(layout.Bounds.Left + layout.Bounds.Width / 2.0 - centre), 0, 0.5 * k);   // centred (half a cell at most)
+            Assert.InRange(Math.Abs(layout.Bounds.Top + layout.Bounds.Height / 2.0 - centre), 0, 0.5 * k);
             foreach (Rectangle r in layout.Ink)
-            {
                 Assert.True(r.Left >= 0 && r.Top >= 0 && r.Right <= px && r.Bottom <= px, $"{token} @{px}: ink outside the icon");
-                foreach (var (x, y) in new[] { (r.Left, r.Top), (r.Right, r.Top), (r.Left, r.Bottom), (r.Right, r.Bottom) })
-                {
-                    double dist = Math.Sqrt((x - centre) * (x - centre) + (y - centre) * (y - centre));
-                    // the farthest corner of the corner pixels may dip into the ring's inner edge, a pixel at most, and stays clear of its outer edge
-                    Assert.True(dist <= outerEdge - 0.75, $"{token} @{px}: ink reaches {dist:F2} px, too close to the ring's outer edge {outerEdge:F2}");
-                    Assert.True(dist <= innerEdge + 1.1, $"{token} @{px}: ink overlaps the ring's inner edge ({innerEdge:F2}) by more than a pixel ({dist:F2})");
-                }
+        }
+    }
+
+    [Fact]
+    public void AtSixteenPixels_TwoCharacterTokensAreNinePixelsTall_AndThreeCharacterOnesFillTheWidth()
+    {
+        Assert.Equal(9, CountdownGlyphs.For("3d", 16).Bounds.Height);
+        Assert.Equal(7, CountdownGlyphs.For("23h", 16).Bounds.Height);
+
+        int widest3 = EveryToken().Where(t => t.Length == 3).Max(t => CountdownGlyphs.For(t, 16).Bounds.Width);
+        int widest2 = EveryToken().Where(t => t.Length == 2).Max(t => CountdownGlyphs.For(t, 16).Bounds.Width);
+        Assert.Equal(15, widest3);                                                // "45m" and friends: 4 + 1 + 4 + 1 + 5, one pixel from edge to edge
+        Assert.InRange(widest2, 13, 15);
+    }
+
+    [Fact]
+    public void EveryGlyph_IsDistinct_InBothSets()
+    {
+        foreach (int length in new[] { 2, 3 })
+        {
+            var seen = new Dictionary<string, char>();
+            foreach (char c in "0123456789dhm")
+            {
+                string token = new string(c, length);                              // e.g. "333": the same glyph repeated, drawn in this length's set
+                if (!CountdownGlyphs.CanDraw(token)) continue;
+                CountdownGlyphs.Layout l = CountdownGlyphs.For(token, 16);
+                string key = string.Join(";", l.Ink.Where(r => r.X - l.Bounds.X < CountdownGlyphs.SetFor(length)[c][0].Length).Select(r => $"{r.X - l.Bounds.X},{r.Y - l.Bounds.Y}"));
+                Assert.False(seen.TryGetValue(key, out char other), $"'{c}' draws the same as '{other}' ({length} characters)");
+                seen[key] = c;
             }
         }
     }
 
-    [Fact]
-    public void TheSixteenPixelGlyphs_AreWholePixels_ThreeWide_FiveTall()
-    {
-        foreach (char c in "0123456789dhm")
-        {
-            CountdownGlyphs.Layout layout = CountdownGlyphs.For(c.ToString(), 16);
-            Assert.Equal(5, layout.Bounds.Height);
-            Assert.InRange(layout.Bounds.Width, 2, 3);
-            Assert.All(layout.Ink, r => Assert.Equal(new Size(1, 1), r.Size));
-        }
-        Assert.Equal(11, CountdownGlyphs.For("23h", 16).Bounds.Width);   // the widest token: three characters and two gaps
-    }
+    // ---- what is drawn: crisp, undimmed, contrasting, over a quiet ring ----
 
-    [Fact]
-    public void EveryGlyph_IsDistinct()
+    static TimeSpan Left(string token) => token switch
     {
-        var seen = new Dictionary<string, char>();
-        foreach (char c in "0123456789dhm")
-        {
-            string key = string.Join(";", CountdownGlyphs.For(c.ToString(), 16).Ink.Select(r => $"{r.X - CountdownGlyphs.For(c.ToString(), 16).Bounds.X},{r.Y}"));
-            Assert.False(seen.TryGetValue(key, out char other), $"'{c}' draws the same as '{other}'");
-            seen[key] = c;
-        }
-    }
+        "23h" => TimeSpan.FromHours(22.5),
+        "45m" => TimeSpan.FromMinutes(44.5),
+        "1d" => TimeSpan.FromDays(1),
+        "3d" => TimeSpan.FromDays(2.5),
+        "10m" => TimeSpan.FromMinutes(9.5),
+        "1m" => TimeSpan.FromSeconds(30),
+        "9h" => TimeSpan.FromHours(8.5),
+        _ => TimeSpan.FromMinutes(58.5),
+    };
 
-    // ---- what is drawn: crisp, undimmed, contrasting ----
+    public static IEnumerable<object[]> TextCases()
+    {
+        foreach (string token in new[] { "3d", "9h", "1m", "1d", "23h", "45m", "10m", "59m" })
+            foreach (int px in new[] { 16, 20, 24, 32 })
+                foreach (bool dark in new[] { true, false })
+                    yield return new object[] { token, px, dark };
+    }
 
     [Theory]
-    [InlineData("23h", 16, true)]
-    [InlineData("45m", 16, true)]
-    [InlineData("23h", 16, false)]
-    [InlineData("45m", 16, false)]
-    [InlineData("1d", 20, true)]
-    [InlineData("10m", 24, false)]
-    [InlineData("59m", 32, true)]
-    [InlineData("59m", 32, false)]
-    public void TheText_IsOpaque_PixelExact_AndMeetsThreeToOneOnItsTaskbar(string token, int px, bool dark)
+    [MemberData(nameof(TextCases))]
+    public void TheText_IsOpaque_PixelExact_AndMeetsFourPointFiveToOne_AgainstWhatIsUnderIt(string token, int px, bool dark)
     {
-        QuotaView view = View(Now.AddHours(2), false, Now + (token switch { "23h" => TimeSpan.FromHours(22.5), "45m" => TimeSpan.FromMinutes(44.5), "1d" => TimeSpan.FromDays(1), "10m" => TimeSpan.FromMinutes(9.5), _ => TimeSpan.FromMinutes(58.5) }), true);
+        QuotaView view = View(Now.AddHours(2), false, Now + Left(token), true);
         QuotaIconParams p = QuotaIconParams.Build(view, px, dark, Now);
         Assert.Equal(token, p.Countdown);
 
         using Bitmap icon = GaugeRenderer.RenderQuota(p);
+        using Bitmap ringOnly = GaugeRenderer.RenderQuota(p with { Countdown = null });   // what the text lies over
         Color background = dark ? DarkTaskbar : Palette.LightTaskbar;
         Color expected = GaugeRenderer.CountdownTextColour(dark);
+        CountdownGlyphs.Layout layout = CountdownGlyphs.For(token, px);
+        bool[,] ink = CountdownGlyphs.InkMask(layout, px);
 
-        var contrasts = new List<double>();
-        foreach (Rectangle r in CountdownGlyphs.For(token, px).Ink)
-            for (int y = r.Top; y < r.Bottom; y++)
-                for (int x = r.Left; x < r.Right; x++)
+        int inkPixels = 0, overRing = 0;
+        double worst = double.MaxValue;
+        for (int y = 0; y < px; y++)
+            for (int x = 0; x < px; x++)
+            {
+                if (ink[x, y])
                 {
-                    Color c = icon.GetPixel(x, y);
-                    Assert.Equal(expected, c);                      // opaque, the exact text colour: not dimmed, not blended
-                    contrasts.Add(Palette.Contrast(c, 1.0, background));
+                    inkPixels++;
+                    Assert.Equal(expected, icon.GetPixel(x, y));                        // opaque, the exact text colour: not dimmed, not blended
+                    Color under = ringOnly.GetPixel(x, y);
+                    if (under.A > 0) overRing++;
+                    worst = Math.Min(worst, Contrast(expected, under, background));
                 }
+            }
+
+        Assert.True(inkPixels > 20);
+        Assert.True(worst >= 4.5, $"{token} @{px} {(dark ? "dark" : "light")}: text contrast {worst:F2}:1 against what is under it, need >= 4.5:1");
+        if (px == 16) Assert.True(overRing > 0, "at 16 px the text lies over the ring (that is the point)");
+    }
+
+    /// <summary>WCAG contrast of an opaque text colour against `under` (a possibly translucent icon pixel) composited on the taskbar.</summary>
+    static double Contrast(Color text, Color under, Color taskbar) =>
+        Palette.Contrast(text, 1.0, under.A == 0 ? taskbar : Blend(under, taskbar));
+
+    static Color Blend(Color fg, Color bg)
+    {
+        double a = fg.A / 255.0;
+        return Color.FromArgb((int)Math.Round(fg.R * a + bg.R * (1 - a)), (int)Math.Round(fg.G * a + bg.G * (1 - a)), (int)Math.Round(fg.B * a + bg.B * (1 - a)));
+    }
+
+    public static IEnumerable<object[]> RingCases()
+    {
+        foreach (int px in new[] { 16, 20, 24, 32 })
+            foreach (bool dark in new[] { true, false })
+                yield return new object[] { px, dark };
+    }
+
+    [Theory]
+    [MemberData(nameof(RingCases))]
+    public void TheRing_IsADimBackdrop_ButStillReadsAsARedRing(int px, bool dark)
+    {
+        QuotaIconParams p = QuotaIconParams.Build(View(Now.AddHours(2), false, Now.AddHours(22.5), true), px, dark, Now);
+        using Bitmap icon = GaugeRenderer.RenderQuota(p);
+        Color background = dark ? DarkTaskbar : Palette.LightTaskbar;
+        bool[,] ink = CountdownGlyphs.InkMask(CountdownGlyphs.For(p.Countdown!, px), px);
+
+        // core = the pixels at the ring's full (dimmed) alpha, text left out
+        int ceiling = 0;
+        for (int y = 0; y < px; y++) for (int x = 0; x < px; x++) if (!ink[x, y]) ceiling = Math.Max(ceiling, icon.GetPixel(x, y).A);
+        var contrasts = new List<double>();
+        for (int y = 0; y < px; y++)
+            for (int x = 0; x < px; x++)
+            {
+                Color c = icon.GetPixel(x, y);
+                if (ink[x, y] || c.A < 0.95 * ceiling) continue;
+                Assert.True(c.R > c.G && c.R > c.B, "the ring is red");                       // hue kept on both taskbars
+                contrasts.Add(Palette.Contrast(c, c.A / 255.0, background));
+            }
         contrasts.Sort();
-        Assert.True(contrasts.Count > 8);
-        Assert.True(contrasts[contrasts.Count / 2] >= 3.0, $"{token} @{px} {(dark ? "dark" : "light")}: text contrast {contrasts[contrasts.Count / 2]:F2}:1, need >= 3:1");
-        Assert.True(contrasts[0] >= 3.0);
+        Assert.True(contrasts.Count > 4);
+        double median = contrasts[contrasts.Count / 2];
+
+        Assert.Equal((int)Math.Round(255 * GaugeRenderer.ExhaustedDimAlpha), ceiling);        // dimmed to the backdrop level
+        Assert.True(median >= 1.5, $"ring core {median:F2}:1 on {(dark ? "dark" : "light")} @{px}: too faint to read as a ring (floor 1.5:1)");
+        Assert.True(median < 3.0, $"ring core {median:F2}:1: no longer a backdrop");
     }
 
     [Fact]
@@ -239,9 +302,26 @@ public class CountdownIconTests
 
         Rectangle ink = CountdownGlyphs.For(p.Countdown!, 16).Ink[0];
         Color text = icon.GetPixel(ink.X, ink.Y);
-        Color ring = icon.GetPixel(0 + 8, 1);   // top of the ring
+        Color ring = icon.GetPixel(8, 1);   // top of the ring
 
         Assert.True(Palette.Contrast(text, 1.0, DarkTaskbar) > Palette.Contrast(Color.FromArgb(255, ring), ring.A / 255.0, DarkTaskbar));
+    }
+
+    [Fact]
+    public void TheRing_KeepsItsFullOuterDiameter_AndIsStillThere_BehindTheText()
+    {
+        QuotaIconParams withText = QuotaIconParams.Build(View(Now.AddHours(2), false, Now.AddHours(22.5), true), 16, true, Now);
+        using Bitmap a = GaugeRenderer.RenderQuota(withText);
+        using Bitmap b = GaugeRenderer.RenderQuota(withText with { Countdown = null });
+
+        // the ring's topmost and bottommost rows are untouched by the text, and the ring is the normal band
+        for (int x = 4; x < 12; x++)
+        {
+            Assert.Equal(b.GetPixel(x, 0), a.GetPixel(x, 0));
+            Assert.Equal(b.GetPixel(x, 15), a.GetPixel(x, 15));
+        }
+        Assert.True(b.GetPixel(8, 0).A > 0 && b.GetPixel(8, 2).A > 0, "the ring's band is the normal two to three pixels");
+        Assert.Equal(0, withText.PieFrac);
     }
 
     [Fact]

@@ -86,7 +86,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     readonly record struct DisplayAccount(string Slot, string? Label, QuotaView View, bool IsDuplicate = false, OtherAccountRow? DuplicateRow = null, string? DuplicateSuffix = null, string? Title = null, string? Subtitle = null);
 
     /// <summary>One step of the --demo / --capture-states cycle: either a legacy single-account state (Accounts.Count == 1, Label null) or a MultiAccountDemoSource frame.</summary>
-    readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex, PanelDisplayMode Panel = PanelDisplayMode.Single, bool DetailOfCombined = false, int HoverIndex = -1);
+    readonly record struct DemoFrame(string Key, AccountDisplayMode Mode, IReadOnlyList<DisplayAccount> Accounts, int FocusIndex, PanelDisplayMode Panel = PanelDisplayMode.Single, bool DetailOfCombined = false, int HoverIndex = -1,
+        TimelineHorizon Horizon = TimelineHorizon.Hours24, (int Account, int Segment, float Along)? StripHover = null);
 
     readonly bool _demoMode;
     readonly PanelForm _panel;
@@ -144,6 +145,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         _panel.RefreshRequested += OnRefreshRequested;
         _panel.ReloginRequested += slot => { if ((slot ?? _shownSlot) is { } s) StartLoginFlow(s); };
         _panel.AdviceClicked += () => OpenStatisticsWindow();
+        _panel.TimelineHorizonChanged += OnTimelineHorizonChanged;
 
         _evalTimer = new System.Windows.Forms.Timer { Interval = (int)EvalTickInterval.TotalMilliseconds };
         _evalTimer.Tick += (_, _) => SafeTick();
@@ -169,6 +171,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             _displayMode = _accountsConfig.DisplayMode;
             _maxIcons = Math.Max(1, _accountsConfig.MaxIcons);
             _panelMode = _accountsConfig.EffectivePanelMode;
+            _panel.SetTimelineHorizon(_accountsConfig.EffectiveTimelineHorizon);
             UpdateToggleModeItemText();
             UpdatePanelModeItem();
 
@@ -275,6 +278,21 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     {
         if (_demoMode) return;
         AccountsConfig.Save(config);
+    }
+
+    /// <summary>A horizon chip of the availability timeline was clicked: remember the choice in accounts.json ("timelineHorizon"; never in demo mode).</summary>
+    void OnTimelineHorizonChanged(TimelineHorizon horizon)
+    {
+        if (_demoMode) return;
+        try
+        {
+            _accountsConfig.TimelineHorizonChoice = horizon;
+            AccountsConfig.Save(_accountsConfig);
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Warn($"failed to persist accounts.json timeline horizon: {ex.Message}");
+        }
     }
 
     /// <summary>One AccountRuntime per enabled entry, in config order. A slot the path guard refuses is skipped with a warning, never started.</summary>
@@ -864,6 +882,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     {
         _panelMode = frame.Panel;
         _combinedOpen = frame.Panel != PanelDisplayMode.Single && !frame.DetailOfCombined;
+        _panel.SetTimelineHorizon(frame.Horizon);
         _markedSlot = frame.Accounts[frame.FocusIndex < frame.Accounts.Count ? frame.FocusIndex : 0].Slot;
     }
 
@@ -1034,14 +1053,17 @@ public sealed class StatusBarApplicationContext : ApplicationContext
     void RenderCombined(IReadOnlyList<DisplayAccount> current, DateTimeOffset now)
     {
         var cards = new List<AccountCard>();
+        var timeline = new List<TimelineAccount>();
         foreach (DisplayAccount a in OrderedForMultiPanel(current))
         {
             int position = current.ToList().FindIndex(x => x.Slot == a.Slot);
-            cards.Add(AccountCards.Compose(new CardInput(a.Slot, a.Title ?? a.Label ?? $"Konto {position + 1}", a.Subtitle, a.View), now, TimeZoneInfo.Local));
+            string title = a.Title ?? a.Label ?? $"Konto {position + 1}";
+            cards.Add(AccountCards.Compose(new CardInput(a.Slot, title, a.Subtitle, a.View), now, TimeZoneInfo.Local));
+            timeline.Add(new TimelineAccount(title, a.View));
         }
 
         _shownSlot = null; // no single account is "the shown one": the reload button / per-account actions do not apply here
-        _panel.UpdateCombined(cards, _markedSlot, _demoMode);
+        _panel.UpdateCombined(cards, _markedSlot, _demoMode, timeline);
         _panel.SetAnchorIcon(_markedSlot is { } m && _iconsBySlot.TryGetValue(m, out TrayIconHandle? h) ? h.NotifyIcon : _iconsBySlot.Values.Select(x => x.NotifyIcon).FirstOrDefault());
         UpdateLoadingTimer(current);
     }
@@ -1205,6 +1227,27 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         }
         frames.Add(new DemoFrame("full_8_wide", AccountDisplayMode.PerAccount, wide, FocusIndex: 6, Panel: PanelDisplayMode.Full));
 
+        // The availability timeline (docs/multi-account.md "Availability timeline"): a gap, coverage without a gap,
+        // everything spent, an unknown account, the 3 d horizon; the cards view with a gap; a hovered segment.
+        foreach (MultiAccountDemoSource.TimelineScenario s in MultiAccountDemoSource.BuildTimelineScenarios(utcNow))
+        {
+            IReadOnlyList<DisplayAccount> scenarioAccounts = s.Accounts.Select((a, i) => new DisplayAccount($"demo-{i}", a.Label, a.View, Title: a.Label, Subtitle: a.Subtitle)).ToList();
+            frames.Add(new DemoFrame(s.Key, AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Full, Horizon: s.Horizon));
+            if (s.Key == "timeline_labels")
+                frames.Add(new DemoFrame("timeline_labels_cards", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Cards, Horizon: s.Horizon));
+            if (s.Key == "timeline_gap")
+            {
+                frames.Add(new DemoFrame("timeline_gap_cards", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Cards, Horizon: s.Horizon));
+                frames.Add(new DemoFrame("timeline_gap_hover", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Full, Horizon: s.Horizon, StripHover: (Account: 1, Segment: 1, Along: 0.5f)));
+                // the popover over the coverage row (its gap), over the first row at the left edge, over the last row at the right edge, and in the cards view
+                frames.Add(new DemoFrame("timeline_hover_coverage", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Full, Horizon: s.Horizon, StripHover: (Account: -1, Segment: 1, Along: 0.5f)));
+                frames.Add(new DemoFrame("timeline_hover_first_left", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Full, Horizon: s.Horizon, StripHover: (Account: 0, Segment: 0, Along: 0.02f)));
+                frames.Add(new DemoFrame("timeline_hover_last_right", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Full, Horizon: s.Horizon, StripHover: (Account: 2, Segment: 0, Along: 0.98f)));
+                frames.Add(new DemoFrame("timeline_hover_cards", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Cards, Horizon: s.Horizon, StripHover: (Account: 1, Segment: 1, Along: 0.5f)));
+                frames.Add(new DemoFrame("timeline_hover_cards_coverage", AccountDisplayMode.PerAccount, scenarioAccounts, s.FocusIndex, Panel: PanelDisplayMode.Cards, Horizon: s.Horizon, StripHover: (Account: -1, Segment: 1, Along: 0.95f)));
+            }
+        }
+
         return frames;
     }
 
@@ -1261,6 +1304,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             ApplyFramePanelMode(frames[i]);
             RenderAccounts(frames[i].Accounts, frames[i].Mode, DemoMaxIcons);
             _panel.SetHoverPanelForDemo(frames[i].HoverIndex >= 0 ? frames[i].Accounts[frames[i].HoverIndex].Slot : null);
+            _panel.SetStripHoverForDemo(frames[i].StripHover);
             _panel.ShowPanel();
             waitingToCapture = true;
             stepTimer.Interval = 500; // let layout/paint settle before the screenshot

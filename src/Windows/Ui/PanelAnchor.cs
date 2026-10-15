@@ -46,6 +46,14 @@ public static class PanelAnchor
         return (location, physicalSize, scale);
     }
 
+    /// <summary>The widest the panel can be, in LOGICAL px, on the monitor it would open on (the work area less its margins): a row wider than this scrolls, and its timeline strip stays at this width.</summary>
+    public static float MaxLogicalWidth(NotifyIcon? notifyIcon)
+    {
+        Rectangle? iconRect = TryGetIconRect(notifyIcon, out Rectangle r) ? r : null;
+        Screen screen = iconRect is { } ir ? Screen.FromRectangle(ir) : Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        return Math.Max(1, screen.WorkingArea.Width - 2 * ScreenMargin) / GetDpiScale(screen);
+    }
+
     /// <summary>
     /// Per-monitor DPI via Shcore, the same source Windows itself uses for
     /// per-monitor-v2 scaling. Falls back to 100% (scale 1) if the monitor

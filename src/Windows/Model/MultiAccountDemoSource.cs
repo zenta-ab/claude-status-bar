@@ -40,6 +40,94 @@ public static class MultiAccountDemoSource
         };
     }
 
+    // ---- availability timeline scenarios (docs/multi-account.md "Availability timeline") ----
+
+    /// <summary>A named set of accounts to show the timeline strip on, with the horizon it is shown at.</summary>
+    public readonly record struct TimelineScenario(string Key, IReadOnlyList<DemoAccount> Accounts, TimelineHorizon Horizon, int FocusIndex = 1);
+
+    /// <summary>
+    /// Five scenarios for the strip, built (like everything here) with the real forecast and classifier:
+    ///   timeline_gap       -- a gap: the third account is spent until tomorrow, the other two run out and are blocked together for a while;
+    ///   timeline_coverage  -- no gap: one account runs out, one is spent, an idle one (no open session) covers the whole time;
+    ///   timeline_all_spent -- every account is spent: no one is available now, the first reopens in 2 h;
+    ///   timeline_unknown   -- one account is not logged in: unknown, and the answer says so;
+    ///   timeline_3d        -- the 3 d horizon, with a gap across the night.
+    /// </summary>
+    public static IReadOnlyList<TimelineScenario> BuildTimelineScenarios(DateTimeOffset now)
+    {
+        const double Week = QuotaWindows.WeeklyMinutes, Session = QuotaWindows.SessionMinutes;
+        WindowView SessionOk() => VerdictWindow(WindowKind.Session, Session, usedPct: 18.0, ratePctPerMin: 0.1, minutesToReset: 200, now);
+        WindowView WeekOk() => VerdictWindow(WindowKind.Weekly, Week, usedPct: 12.0, ratePctPerMin: 0.004, minutesToReset: 8000, now);
+
+        QuotaView personalRunsOut = Live(SessionOk(), RunsOut(Week, WindowKind.Weekly, depletesInMin: 4 * 60, resetInMin: 3 * 24 * 60, now), now);
+        QuotaView teamRunsOut = Live(SessionOk(), RunsOut(Week, WindowKind.Weekly, depletesInMin: 6 * 60, resetInMin: 10 * 60, now), now);
+        QuotaView enterpriseSpentWeek = Live(SessionOk(), SpentWindow(Week, WindowKind.Weekly, resetInMin: 30 * 60, now), now);
+
+        QuotaView personalRunsOutEarly = Live(SessionOk(), RunsOut(Week, WindowKind.Weekly, depletesInMin: 4 * 60, resetInMin: 20 * 60, now), now);
+        QuotaView enterpriseSpentTomorrow = Live(SessionOk(), SpentWindow(Week, WindowKind.Weekly, resetInMin: 14 * 60, now), now);
+        QuotaView teamIdle = Idle(now);
+
+        QuotaView personalSpent = Live(SessionOk(), SpentWindow(Week, WindowKind.Weekly, resetInMin: 20 * 60, now), now);
+        QuotaView teamSessionSpent = Live(SpentWindow(Session, WindowKind.Session, resetInMin: 120, now), WeekOk(), now);
+
+        QuotaView personalSpent3d = Live(SessionOk(), SpentWindow(Week, WindowKind.Weekly, resetInMin: 55 * 60, now), now);
+        QuotaView teamRunsOut3d = Live(SessionOk(), RunsOut(Week, WindowKind.Weekly, depletesInMin: 30 * 60, resetInMin: 60 * 60, now), now);
+        QuotaView enterpriseSpent3d = Live(SessionOk(), SpentWindow(Week, WindowKind.Weekly, resetInMin: 40 * 60, now), now);
+
+        DemoAccount Personal(QuotaView v) => new("Personligt", v, "Max · personlig organisation");
+        DemoAccount Team(QuotaView v) => new("Team", v, "Acme AB");
+        DemoAccount Enterprise(QuotaView v) => new("Enterprise", v, "Globex AB");
+
+        return new List<TimelineScenario>
+        {
+            new("timeline_gap", new[] { Personal(personalRunsOut), Team(teamRunsOut), Enterprise(enterpriseSpentWeek) }, TimelineHorizon.Hours24),
+            new("timeline_coverage", new[] { Personal(personalRunsOutEarly), Team(teamIdle), Enterprise(enterpriseSpentTomorrow) }, TimelineHorizon.Hours24),
+            new("timeline_all_spent", new[] { Personal(personalSpent), Team(teamSessionSpent), Enterprise(enterpriseSpentWeek) }, TimelineHorizon.Hours24),
+            new("timeline_unknown", new[] { Personal(personalRunsOutEarly), Team(SafeView(now)), new DemoAccount("Konto utan inloggning", NeedsLoginView(now), "Acme AB") }, TimelineHorizon.Hours24),
+            new("timeline_3d", new[] { Personal(personalSpent3d), Team(teamRunsOut3d), Enterprise(enterpriseSpent3d) }, TimelineHorizon.Days3),
+            // long labels that share a long prefix (placeholders, never real addresses): the row labels must stay tellable apart
+            new("timeline_labels", new[]
+            {
+                new DemoAccount("Max 20x (alex@example.com)", personalRunsOut, "Max · personlig organisation"),
+                new DemoAccount("Max 20x (alex@example.org)", teamRunsOut, "Max · personlig organisation"),
+                new DemoAccount("Team (sam@example.net)", enterpriseSpentWeek, "Acme AB"),
+            }, TimelineHorizon.Hours24),
+        };
+    }
+
+    /// <summary>A Live view of two windows, with BlockedUntil as the real model sets it (the latest reset among the spent windows).</summary>
+    static QuotaView Live(WindowView session, WindowView weekly, DateTimeOffset now)
+    {
+        DateTimeOffset? blocked = null;
+        if (session.State == QuotaState.Spent && session.ResetsAt is { } sr) blocked = sr;
+        if (weekly.State == QuotaState.Spent && weekly.ResetsAt is { } wr) blocked = blocked is null || wr > blocked ? wr : blocked;
+        return new QuotaView(session, weekly, Freshness.Live,
+            LastChangedAt: now.AddSeconds(-20), LastSuccessAt: now.AddSeconds(-2), PollInterval: TimeSpan.FromSeconds(150),
+            Error: null, IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State), BlockedUntil: blocked);
+    }
+
+    /// <summary>A window forecast to run out in `depletesInMin`, before its reset `resetInMin` away.</summary>
+    static WindowView RunsOut(double windowMinutes, WindowKind kind, double depletesInMin, double resetInMin, DateTimeOffset now) =>
+        VerdictWindow(kind, windowMinutes, usedPct: 60.0, ratePctPerMin: 40.0 / depletesInMin, minutesToReset: resetInMin, now);
+
+    /// <summary>A window that is spent (100 %) until its reset.</summary>
+    static WindowView SpentWindow(double windowMinutes, WindowKind kind, double resetInMin, DateTimeOffset now) =>
+        VerdictWindow(kind, windowMinutes, usedPct: 100.0, ratePctPerMin: 0.2, minutesToReset: resetInMin, now);
+
+    /// <summary>
+    /// An idle account: polls succeed, but nothing is used, so the session window is closed (no deadline, no
+    /// percentage) and nothing has changed for hours -- the case the panel must not show as an error.
+    /// </summary>
+    static QuotaView Idle(DateTimeOffset now)
+    {
+        var closedSession = new WindowView(WindowKind.Session, QuotaWindows.SessionMinutes, UsedPct: null, ResetsAt: null, QuotaState.Measuring,
+            RatePctPerMin: null, PaceMultiple: null, ProjectedPctAtReset: null, DepletesAt: null, Shortfall: TimeSpan.Zero, MeasuringReason: "Inget förbrukat ännu");
+        WindowView weekly = VerdictWindow(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, usedPct: 4.0, ratePctPerMin: 0.002, minutesToReset: 6200, now);
+        return new QuotaView(closedSession, weekly, Freshness.Live,
+            LastChangedAt: now.AddHours(-10).AddMinutes(-39), LastSuccessAt: now.AddSeconds(-2), PollInterval: TimeSpan.FromMinutes(10),
+            Error: null, IconSeverity: weekly.State, BlockedUntil: null);
+    }
+
     /// <summary>docs/multi-account.md "Loading": the account has not answered yet.</summary>
     static QuotaView LoadingView(DateTimeOffset utcNow) => new(
         WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),

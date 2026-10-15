@@ -83,7 +83,8 @@ the user's profile and may legitimately be redirected.
 ```
 
 An empty `accounts` list is valid (it is the state of a fresh install: see "Zero accounts"), and
-`"accounts": null` means the same. Unknown fields round-trip. The slots are the source of truth; this
+`"accounts": null` means the same. Optional fields: `"panelMode"` ("Panels") and `"timelineHorizon"` ("Availability
+timeline"), both absent until chosen. Unknown fields round-trip. The slots are the source of truth; this
 file only orders them, names them and switches them on and off.
 
 **Migration from version 1** (no `version` field, `configDir` paths): an entry whose `configDir` --
@@ -279,8 +280,14 @@ The title is the account's label — the name the user gave it (Byt namn…) or 
 with " · " — "Max · personlig organisation", "Team · Acme AB". Anthropic's auto-generated "<email>'s
 Organization" is shown as "personlig organisation", never by name and never with an address. Unknown parts
 are left out, and so is any part that just repeats the title (an account whose automatic label is already
-"Max" shows no second "Max"); with nothing left there is no subtitle line. The DEMO badge and the freshness
-line are unchanged.
+"Max" shows no second "Max"); with nothing left there is no subtitle line. The DEMO badge is unchanged.
+
+The freshness line under it is the age of the data ("Uppdaterad för 35 s sedan") -- EXCEPT for an idle account
+(polls succeed, but no session is open, so nothing is used and nothing changes): there it reads "Ingen aktivitet
+sedan igår kl 23:20" (`PanelText.ComposeIdleHeader`; the time the data last changed, day-aware), because a data
+age of ten hours looks like an error. An account with an open session, a Stale one and every failure keep their
+own lines. Likewise a session window that has closed reads "Ingen aktiv session" / "startar när kontot används",
+with no reset time and no full time bar, and an empty bar on its card ("ingen aktiv session").
 
 ## Panels
 
@@ -330,6 +337,70 @@ order; if any icon's rectangle cannot be read the icon group falls back to confi
 the clicked icon has an accent edge, the card under the mouse is highlighted, and clicking a card opens that
 account's detailed panel, which has a "← Alla konton" link back. The panel stays non-activating and never taller
 than the work area (`PanelAnchor` caps it; the cards scroll with the mouse wheel when they do not fit).
+
+### Availability timeline
+
+The full side-by-side container and the cards panel start with a **Gantt-style timeline of when each account can
+be used**, so you can see at a glance whether there is a gap between one account running out and another
+reopening. (Not in the single-account panel.) It answers the question first, in one line, and draws the rest
+under it.
+
+**The model** (`Model/AvailabilityTimeline`, pure, in UTC instants so a daylight-saving change cannot move or
+split anything). For every account a list of contiguous segments from now to the horizon:
+
+- **blocked** from now (a spent window) or from a forecast run-out, until the binding reset — the weekly reset
+  when the week is spent or forecast to run out, otherwise the session reset; both windows' blocks are merged and
+  the later reset binds. The reset time is certain, a run-out is an estimate (`IsForecast`);
+- **available** before that (up to a forecast run-out: an estimate) and **after a reset** — marked "no forecast",
+  because future sessions are not modelled;
+- **unknown**: one neutral segment for an account that is not logged in, still loading or unreadable.
+
+The existing forecast rules are respected, never second-guessed: a window that is `Measuring` (including the
+weekly window's first 24 h) has no forecast and so no forecast run-out; a Tight or DryEarly window blocks exactly
+when `WindowView.ForecastRunOutAt` says it runs out before its reset -- the same test the status box, the
+other-accounts row and the tooltip use ("Tight with a shortfall" in `docs/forecast-and-states.md`), so the strip
+can never show a run-out the panel denies, or the reverse. A spent window whose reset has passed blocks nothing; one with no
+reset blocks to the end of the horizon. Segments are clipped to the horizon (`FullEnd` keeps the real reset of a
+clipped blocked segment for the hover label).
+
+Across accounts the horizon is cut at every segment boundary into **coverage intervals**: the accounts available in
+each, neighbours with the same set merged. An interval with nobody is a **gap**; an interval with exactly one is
+"that account covers". Touching intervals (one account runs out the instant another reopens) leave no gap;
+overlaps list both. Unknown accounts never cover, and an all-unknown timeline has no gaps (nothing is known).
+
+**The strip** (`Ui/TimelineStrip`, words in `Ui/TimelineText`):
+
+- the **answer** on top: "Ingen lucka de närmaste 24 h" / "Lucka fre 23:22–06:59 (7 h 37 min) – inget konto
+  tillgängligt" / "Ingen lucka – <konto> täcker 23:22–06:59" (and "Lucka nu–…", "Lucka från … (minst …)", "(+1 till)",
+  "· 1 konto är okänt", "Tillgängligheten är okänd"). Times are day-aware like everywhere else (`TimeText`); an
+  overnight end drops its day;
+- **horizon chips** "24 h · 3 d · 7 d" (default 24 h), clickable in the non-activating panel; the choice is saved in
+  accounts.json as the optional `"timelineHorizon": "24h" | "3d" | "7d"` (absent until a chip is clicked; any other
+  value quarantines the file like any invalid one; never written in demo mode);
+- an **hour axis** with "nu" at the left edge and ticks on LOCAL times: every third hour up to 36 h (the hour, and
+  the day at midnight: "i morgon"), otherwise one per local midnight ("tor", "fre", then dates);
+- **one row per account**, in the order of the columns, label on the left: available in a muted green, blocked in a
+  muted red, unknown in grey; the estimated edge of a forecast segment has a diagonal hatch; "no forecast after a
+  reset" is a softer green. A **coverage row** at the bottom: covered stretches green, **gaps in red**;
+- **row labels**: the label column is as wide as the widest label, up to ~30 % of the strip. A label that still does
+  not fit is shortened in the MIDDLE ("Max 20x (…gmail.com)", `TimelineText.FitLabels`): the distinguishing part of
+  an account label is its end, and an end-truncated "Max 20x (alex@exam…" is the same for two accounts. Two different
+  labels never come out the same -- the tail each keeps grows (the head shrinks, down to a bare "…tail") until they
+  differ; the hover popover always has the full label;
+- **hover** a segment: a popover with from–to and why ("veckokvoten slut (prognos) · öppnar fre 06:59", "ingen
+  prognos efter reset", "kvot kvar"). It is a proper popover: fully opaque, a little lighter than the panel, 1 px
+  border, small shadow, and painted LAST (after the columns / the cards and the fixed header), so the columns' own
+  text never shows through it. It is placed (`TimelineStrip.PlacePopover`, pure and tested over every row and both
+  edges) below the hovered segment -- above when there is no room -- never on it, following the mouse sideways, flipping
+  to the left of it near the right edge, and clamped inside the visible container;
+- it is exactly as wide as the container; with many accounts it grows in **height**, never width. In a full row
+  wider than the screen (which scrolls sideways) the strip stays as wide as the window and does not scroll, so
+  its answer, labels and chips stay in view. In the cards panel it sits under the fixed header and scrolls with
+  the cards.
+
+The idle account's two fixes shown in the same screenshot are in "Panel header" and `docs/forecast-and-states.md`
+("An idle account is not a stale one"): a closed session reads "Ingen aktiv session" and the header "Ingen
+aktivitet sedan <tid>".
 
 ## Times always carry their day
 

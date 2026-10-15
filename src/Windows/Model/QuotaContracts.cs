@@ -41,6 +41,25 @@ public sealed record WindowView(
     TimeSpan Shortfall,
     string? MeasuringReason)
 {
+    /// <summary>
+    /// A forecast run-out shorter than this before the reset is not one (the no-shortfall clamp's own threshold,
+    /// docs/forecast-and-states.md "No-shortfall clamp"): the window reaches its reset.
+    /// </summary>
+    public static readonly TimeSpan MinimumRunOut = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// THE source of truth for "this window is forecast to run out before its reset": the forecast depletion instant,
+    /// when the window is Tight or DryEarly, has a forecast (Measuring carries none) and the depletion falls at least a
+    /// minute BEFORE the reset -- otherwise null. The status box, the other-accounts row, the tray tooltip and the
+    /// availability timeline all read this, so they cannot disagree: a Tight window can be strained with a small shortfall
+    /// (docs/forecast-and-states.md, state table row 4: `shortfall &gt; 0` below S_lo) and then it DOES run out, so
+    /// "räcker precis" is only ever said when this is null.
+    /// </summary>
+    public DateTimeOffset? ForecastRunOutAt =>
+        State is QuotaState.Tight or QuotaState.DryEarly && DepletesAt is { } depletes && ResetsAt is { } resets && resets - depletes >= MinimumRunOut
+            ? depletes
+            : null;
+
     public static WindowView Empty(WindowKind kind, double windowMinutes) => new(
         kind, windowMinutes, UsedPct: null, ResetsAt: null, QuotaState.Measuring,
         RatePctPerMin: null, PaceMultiple: null, ProjectedPctAtReset: null,

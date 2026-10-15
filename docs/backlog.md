@@ -53,6 +53,24 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
 
+## Mac parity for the availability timeline and the idle-account display (2026-10-15)
+- **The availability model** (`Model/AvailabilityTimeline.cs`, pure): per account contiguous segments from now to a
+  horizon (24 h / 3 d / 7 d) -- blocked from now (spent) or from a forecast run-out until the binding reset (weekly if
+  the week is spent / forecast to run out, otherwise the session's; the reset is certain, the run-out an estimate),
+  available before (up to a forecast run-out) and after a reset ("no forecast": future sessions are not modelled),
+  unknown for NeedsLogin/Loading/Unreadable. A Measuring window (incl. the weekly first 24 h) has no forecast, so no
+  run-out. Coverage across accounts: cut at every boundary, merge equal neighbours; empty set = gap, one account =
+  "covers". All UTC instants: a DST change moves nothing. Tests: `AvailabilityTimelineTests`, `TimelineTextTests`.
+- **The strip** above the Mac equivalent of the full/cards panel: answer line first ("Ingen lucka de närmaste 24 h" /
+  "Lucka fre 23:22–06:59 (7 h 37 min) – inget konto tillgängligt" / "Ingen lucka – X täcker …"), horizon chips (saved as
+  an optional `"timelineHorizon": "24h" | "3d" | "7d"`), an hour axis on local times with "nu", one row per account in
+  column order, a coverage row with gaps in red, a hover label with from-to and why. Muted green / muted red / grey,
+  a hatch on a forecast edge. See `docs/multi-account.md` "Availability timeline".
+- **Idle account:** the model reports a validly closed session as a window with no deadline and no percentage; the
+  panel says "Ingen aktiv session" / "startar när kontot används" (no reset time, no full time bar) and the header
+  "Ingen aktivitet sedan <tid>" instead of the data age (`PanelText.ComposeIdleHeader`; an open session keeps the
+  data age). Same in `QuotaModel.swift` / the Mac panel text.
+
 ## Mac parity for the exhausted countdown (2026-10-13, calm text 2026-10-14)
 - **The exhausted menu-bar icon shows the time left, small and calm** instead of a countdown pie:
   `CountdownText.Format` (days / hours / minutes, always rounded up, a round-up that reaches the next unit moves to

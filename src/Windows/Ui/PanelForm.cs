@@ -128,6 +128,14 @@ public sealed class PanelForm : Form
     const float MarkStripHeight = 3f;      // the accent strip along the top of the clicked account's column
     float _lastHeight = -1f;
 
+    // ---- the availability timeline strip (docs/multi-account.md "Availability timeline"): top of the full and the cards panel ----
+    IReadOnlyList<TimelineAccount> _timelineAccounts = Array.Empty<TimelineAccount>();
+    TimelineHorizon _horizon = TimelineHorizon.Hours24;
+    TimelineHit? _stripHover;
+    PointF _stripMouse;
+    readonly TimelineFonts _stripFonts;
+    float _maxLogicalWidth = float.MaxValue;   // the widest the window can be (set when it is placed); a wider full row scrolls, the strip stays this wide
+
     // ---- combined mode (docs/multi-account.md "All accounts in one panel") ----
     bool _combined;
     IReadOnlyList<AccountCard> _cards = Array.Empty<AccountCard>();
@@ -150,6 +158,9 @@ public sealed class PanelForm : Form
 
     /// <summary>The "<- Alla konton" link of a detailed panel was clicked.</summary>
     public event Action? BackToAllRequested;
+
+    /// <summary>A horizon chip ("24 h" / "3 d" / "7 d") of the timeline strip was clicked; the caller persists the choice.</summary>
+    public event Action<TimelineHorizon>? TimelineHorizonChanged;
     /// <summary>The header's first line when no account label is given (the single-account demo frames).</summary>
     const string DefaultTitle = "Claude Code";
 
@@ -205,6 +216,7 @@ public sealed class PanelForm : Form
         _fontBarLabel = new Font(TextFamily, 10.5f, FontStyle.Regular, GraphicsUnit.Pixel);
         _fontFooter = new Font(TextFamily, 10f, FontStyle.Regular, GraphicsUnit.Pixel);
         _fontDemoBadge = new Font(TextFamily, 9f, FontStyle.Bold, GraphicsUnit.Pixel);
+        _stripFonts = new TimelineFonts(_fontSectionTitle, _fontBarLabel, _fontFooter, _fontBarCaption);
 
         _tickTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         _tickTimer.Tick += (_, _) =>
@@ -300,12 +312,13 @@ public sealed class PanelForm : Form
     /// The combined panel: one compact card per account, in the order given. `markedSlot` is the card
     /// of the icon that was clicked (accent edge). Same 1 Hz cadence and exception boundary as UpdateView.
     /// </summary>
-    public void UpdateCombined(IReadOnlyList<AccountCard> cards, string? markedSlot, bool demo)
+    public void UpdateCombined(IReadOnlyList<AccountCard> cards, string? markedSlot, bool demo, IReadOnlyList<TimelineAccount>? timeline = null)
     {
         try
         {
             _combined = true;
             _full = false;
+            _timelineAccounts = timeline ?? Array.Empty<TimelineAccount>();
             TransparencyKey = Color.Empty;
             _demo = demo;
             _cards = cards;
@@ -338,6 +351,7 @@ public sealed class PanelForm : Form
             TransparencyKey = Color.Empty;
             _demo = demo;
             _models = models.Select(m => m with { OtherAccounts = Array.Empty<OtherAccountRow>(), BackLink = false }).ToList();
+            _timelineAccounts = _models.Select(m => new TimelineAccount(m.Label ?? "Konto", m.View)).ToList();
             _markedSlot = markedSlot;
             if (_hoverPanel >= _models.Count) _hoverPanel = -1;
             if (_models.Count > 0) _m = _models[0];
@@ -389,7 +403,7 @@ public sealed class PanelForm : Form
     }
 
     /// <summary>The columns of the full container: x offsets, one aligned layout each (all the same height), the total width.</summary>
-    readonly record struct FullLayout(IReadOnlyList<float> Xs, IReadOnlyList<PanelLayout> Layouts, float TotalWidth, float Height);
+    readonly record struct FullLayout(IReadOnlyList<float> Xs, IReadOnlyList<PanelLayout> Layouts, float TotalWidth, float Height, float StripHeight, StripState? Strip);
 
     /// <summary>
     /// Two passes over the columns, both through the ordinary single-panel BuildLayout: the first measures
@@ -423,7 +437,10 @@ public sealed class PanelForm : Form
             xs.Add(x);
             x += LogicalWidth;
         }
-        return new FullLayout(xs, layouts, Math.Max(LogicalWidth, x), height);
+        float totalWidth = Math.Max(LogicalWidth, x);
+        StripState? strip = BuildStrip(Math.Min(totalWidth, _maxLogicalWidth), now);   // the availability timeline above the columns: as wide as the container, or as the screen when the row scrolls
+        float stripHeight = strip?.Layout.Height ?? 0f;
+        return new FullLayout(xs, layouts, totalWidth, stripHeight + height, stripHeight, strip);
     }
 
     /// <summary>The visible height in logical px (the window's, once it has one); the container sits on its bottom edge.</summary>
@@ -509,6 +526,7 @@ public sealed class PanelForm : Form
                 CombinedLayout combinedLayout = BuildCombinedLayout();
                 var contentPoint = new PointF(logicalPoint.X, logicalPoint.Y + _scrollY);
                 if (logicalPoint.Y < CombinedHeaderHeight) return; // the fixed header: nothing to click
+                if (combinedLayout.Strip is { } clickedStrip && StripClick(clickedStrip, new PointF(contentPoint.X, contentPoint.Y - CombinedHeaderHeight))) return;
                 for (int i = 0; i < combinedLayout.CardRects.Count; i++)
                 {
                     if (!combinedLayout.CardRects[i].Contains(contentPoint)) continue;
@@ -525,10 +543,11 @@ public sealed class PanelForm : Form
                 // Find the panel under the click, then run the ordinary single-panel hit test on it
                 // with the point translated into that panel's own coordinates.
                 FullLayout full = BuildFullLayout();
+                float top = FullViewHeight(full) - full.Height;
+                if (full.Strip is { } clickedStrip && StripClick(clickedStrip, new PointF(logicalPoint.X, logicalPoint.Y - top))) return;
                 int i = FullIndexAt(full, logicalPoint.X);
                 if (i < 0) return;
-                float top = FullViewHeight(full) - full.Height;
-                logicalPoint = new PointF(logicalPoint.X + _scrollX - full.Xs[i], logicalPoint.Y - top);
+                logicalPoint = new PointF(logicalPoint.X + _scrollX - full.Xs[i], logicalPoint.Y - top - full.StripHeight);
                 _m = _models[i];
                 layout = full.Layouts[i];
             }
@@ -588,7 +607,11 @@ public sealed class PanelForm : Form
         base.OnMouseMove(e);
         if (_full && _scale > 0f)
         {
-            int hoverPanel = FullIndexAt(BuildFullLayout(), e.X / _scale);
+            FullLayout moved = BuildFullLayout();
+            var inWindow = new PointF(e.X / _scale, e.Y / _scale - (FullViewHeight(moved) - moved.Height));
+            bool inStrip = moved.Strip is not null && inWindow.Y < moved.StripHeight;
+            StripHover(inStrip ? moved.Strip : null, inWindow);
+            int hoverPanel = inStrip ? -1 : FullIndexAt(moved, e.X / _scale);
             if (hoverPanel != _hoverPanel) { _hoverPanel = hoverPanel; Invalidate(); }
             return;
         }
@@ -597,7 +620,9 @@ public sealed class PanelForm : Form
         {
             CombinedLayout layout = BuildCombinedLayout();
             var p = new PointF(e.X / _scale, e.Y / _scale + _scrollY);
-            int hover = e.Y / _scale < CombinedHeaderHeight ? -1 : layout.CardRects.ToList().FindIndex(r => r.Contains(p));
+            bool inStrip = layout.Strip is not null && e.Y / _scale >= CombinedHeaderHeight && p.Y < CombinedHeaderHeight + layout.StripHeight;
+            StripHover(inStrip ? layout.Strip : null, new PointF(p.X, p.Y - CombinedHeaderHeight));
+            int hover = e.Y / _scale < CombinedHeaderHeight || inStrip ? -1 : layout.CardRects.ToList().FindIndex(r => r.Contains(p));
             if (hover != _hoverCard) { _hoverCard = hover; Invalidate(); }
         }
         catch (Exception ex) { SafeLog.Warn($"PanelForm.OnMouseMove threw: {ex.Message}"); }
@@ -606,7 +631,7 @@ public sealed class PanelForm : Form
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hoverCard != -1 || _hoverPanel != -1) { _hoverCard = -1; _hoverPanel = -1; Invalidate(); }
+        if (_hoverCard != -1 || _hoverPanel != -1 || _stripHover is not null) { _hoverCard = -1; _hoverPanel = -1; _stripHover = null; Invalidate(); }
     }
 
     /// <summary>Scrolls the combined panel when its cards do not fit the work area.</summary>
@@ -635,6 +660,7 @@ public sealed class PanelForm : Form
     {
         if (Visible) return;
 
+        _maxLogicalWidth = _full ? PanelAnchor.MaxLogicalWidth(_trayIcon) : float.MaxValue;
         (_lastWidth, _lastHeight) = MeasureContent(DateTimeOffset.UtcNow);
         var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size((int)Math.Ceiling(_lastWidth), (int)Math.Ceiling(_lastHeight)), _full ? LogicalWidth : 0);
         _scale = scale;
@@ -666,6 +692,7 @@ public sealed class PanelForm : Form
     /// <summary>Bottom edge stays 12px above the taskbar even as content height changes (wrapped status-box lines, secondary line, Stale note appearing/disappearing).</summary>
     void Reanchor()
     {
+        _maxLogicalWidth = _full ? PanelAnchor.MaxLogicalWidth(_trayIcon) : float.MaxValue;
         (_lastWidth, _lastHeight) = MeasureContent(DateTimeOffset.UtcNow);
         var (location, size, scale) = PanelAnchor.Resolve(_trayIcon, new Size((int)Math.Ceiling(_lastWidth), (int)Math.Ceiling(_lastHeight)), _full ? LogicalWidth : 0);
         _scale = scale;
@@ -895,12 +922,24 @@ public sealed class PanelForm : Form
 
         var clipState = g.Save();
         g.SetClip(new RectangleF(1, 1, Width / _scale - 2, Height / _scale - 2));
-        g.TranslateTransform(-_scrollX, top);
+        g.TranslateTransform(0, top);
+
+        // The strip does not scroll with the columns: it is as wide as the window, so its answer, labels and chips stay in view.
+        if (full.Strip is { } strip)
+        {
+            DrawStrip(g, strip);
+            SmoothingMode ruleSmoothing = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None;
+            using (var rule = new Pen(BorderColor)) g.DrawLine(rule, 0, full.StripHeight, strip.Layout.Width, full.StripHeight);
+            g.SmoothingMode = ruleSmoothing;
+        }
+
+        g.TranslateTransform(-_scrollX, 0);
 
         for (int i = 0; i < _models.Count; i++)
         {
             var colState = g.Save();
-            g.TranslateTransform(full.Xs[i], 0);
+            g.TranslateTransform(full.Xs[i], full.StripHeight);
             PanelModel model = _models[i];
 
             if (i == _hoverPanel)
@@ -908,7 +947,7 @@ public sealed class PanelForm : Form
                 SmoothingMode smoothing = g.SmoothingMode;
                 g.SmoothingMode = SmoothingMode.None;
                 using var lift = new SolidBrush(Color.FromArgb(14, 255, 255, 255));
-                g.FillRectangle(lift, 0, 0, LogicalWidth, full.Height);
+                g.FillRectangle(lift, 0, 0, LogicalWidth, full.Height - full.StripHeight);
                 g.SmoothingMode = smoothing;
             }
 
@@ -929,15 +968,140 @@ public sealed class PanelForm : Form
         g.SmoothingMode = SmoothingMode.None;
         using (var divider = new Pen(BorderColor, 1f))
             foreach (float x in full.Xs.Skip(1))
-                g.DrawLine(divider, x, DividerInset, x, full.Height - DividerInset);
+                g.DrawLine(divider, x, full.StripHeight + DividerInset, x, full.Height - DividerInset);
         g.SmoothingMode = sm;
         g.Restore(clipState);
+
+        // The hover popover is painted LAST: over the columns' own text, never under it.
+        if (_stripHover is { } hover && full.Strip is { } hoveredStrip)
+        {
+            var popoverState = g.Save();
+            g.SetClip(new RectangleF(1, 1, Width / _scale - 2, Height / _scale - 2));
+            g.TranslateTransform(0, top);
+            RectangleF box = TimelineStrip.DrawPopover(g, hoveredStrip.Layout, hoveredStrip.Timeline, hover, _stripMouse,
+                new RectangleF(1, 1 - top, Width / _scale - 2, Height / _scale - 2), TimeZoneInfo.Local, _stripFonts);
+            _lastPopoverBox = new RectangleF(box.X, box.Y + top, box.Width, box.Height);
+            g.Restore(popoverState);
+        }
     }
 
 
+    // ---- the availability timeline strip (Ui/TimelineStrip, Model/AvailabilityTimeline) ----
+
+    /// <summary>A strip laid out for one moment: its layout, the model behind it and the answer line.</summary>
+    sealed record StripState(TimelineStrip.Layout Layout, AvailabilityTimeline Timeline, string Answer);
+
+    float StripFit(Graphics g, string text, Font font, Color color, float x, float y, float width, bool draw) =>
+        DrawFitText(g, text, font, color, x, y, width, draw);
+
+    /// <summary>The strip for `width` logical px, or null when there is nothing to show (no accounts).</summary>
+    StripState? BuildStrip(float width, DateTimeOffset now)
+    {
+        if (_timelineAccounts.Count == 0) return null;
+        AvailabilityTimeline timeline = AvailabilityTimeline.Build(_timelineAccounts.Select(a => (a.Label, a.View)).ToList(), now, _horizon);
+        string answer = TimelineText.Answer(timeline, _horizon, TimeZoneInfo.Local);
+        TimelineStrip.Layout layout = TimelineStrip.Measure(_measureG, width, _timelineAccounts.Select(a => a.Label).ToList(), answer, _stripFonts, StripFit);
+        return new StripState(layout, timeline, answer);
+    }
+
+    void DrawStrip(Graphics g, StripState strip) =>
+        TimelineStrip.Draw(g, strip.Layout, strip.Timeline, _horizon, strip.Answer, _stripHover, _stripMouse, TimeZoneInfo.Local, _stripFonts, StripFit);
+
+    /// <summary>A click at a point in the strip's own coordinates: a horizon chip changes the horizon. True when the point is inside the strip (the click is the strip's, whatever it hit).</summary>
+    bool StripClick(StripState strip, PointF p)
+    {
+        if (p.Y < 0f || p.Y >= strip.Layout.Height) return false;
+        if (TimelineStrip.ChipAt(strip.Layout, p) is { } horizon) SetHorizon(horizon);
+        return true;
+    }
+
+    /// <summary>Hover at a point in the strip's own coordinates (null strip or a point outside it clears it).</summary>
+    void StripHover(StripState? strip, PointF p)
+    {
+        TimelineHit? hit = strip is not null && p.Y >= 0f && p.Y < strip.Layout.Height ? TimelineStrip.SegmentAt(strip.Layout, strip.Timeline, p) : null;
+        bool changed = hit != _stripHover || (hit is not null && p != _stripMouse);
+        _stripHover = hit;
+        _stripMouse = p;
+        if (changed) Invalidate();
+    }
+
+    void SetHorizon(TimelineHorizon horizon)
+    {
+        if (horizon == _horizon) return;
+        _horizon = horizon;
+        _stripHover = null;
+        TimelineHorizonChanged?.Invoke(horizon);
+        RefitIfVisible();   // the answer may wrap differently: the strip's height can change
+    }
+
+    /// <summary>Sets the horizon without raising the event (the caller restoring the saved choice).</summary>
+    public void SetTimelineHorizon(TimelineHorizon horizon)
+    {
+        if (horizon == _horizon) return;
+        _horizon = horizon;
+        _stripHover = null;
+        RefitIfVisible();
+    }
+
+    public TimelineHorizon Horizon => _horizon;
+
+    /// <summary>The strip's height in the current mode (tests); 0 when there is none.</summary>
+    internal float StripHeightForTest => _full ? BuildFullLayout().StripHeight : _combined ? BuildCombinedLayout().StripHeight : 0f;
+
+    /// <summary>The strip's width in the current mode (tests): the container's, never wider; 0 when there is none.</summary>
+    internal float StripWidthForTest => (_full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null)?.Layout.Width ?? 0f;
+
+    /// <summary>The strip's answer line in the current mode (tests); null when there is no strip.</summary>
+    internal string? StripAnswerForTest => (_full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null)?.Answer;
+
+    /// <summary>The strip's model in the current mode (tests).</summary>
+    internal AvailabilityTimeline? StripTimelineForTest => (_full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null)?.Timeline;
+
+    /// <summary>Demo captures: show the label of this segment (account row, segment index) as if the mouse were over it; null clears it.</summary>
+    internal void SetStripHoverForDemo((int Account, int Segment, float Along)? hover)
+    {
+        _stripHover = null;
+        if (hover is not { } h) return;
+        StripState? strip = _full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null;
+        if (strip is null) return;
+        bool inRange = h.Account >= 0
+            ? h.Account < strip.Layout.Rows.Count && h.Segment >= 0 && h.Segment < strip.Timeline.Accounts[h.Account].Segments.Count
+            : h.Account == -1 && h.Segment >= 0 && h.Segment < strip.Timeline.Coverage.Count;   // -1 is the coverage row
+        if (!inRange) return;
+        var hit = new TimelineHit(h.Account, h.Segment);
+        RectangleF rect = TimelineStrip.RectOf(strip.Layout, strip.Timeline, hit);
+        _stripHover = hit;
+        _stripMouse = new PointF(rect.X + rect.Width * h.Along, rect.Y + rect.Height / 2f);   // Along: 0 = its left edge, 1 = its right
+    }
+
+    /// <summary>The strip's layout in the current mode (tests).</summary>
+    internal TimelineStrip.Layout? StripLayoutForTest => (_full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null)?.Layout;
+
+    /// <summary>Where the hover popover was last painted, in window (logical) coordinates (tests).</summary>
+    internal RectangleF? LastPopoverBoxForTest => _lastPopoverBox;
+    RectangleF? _lastPopoverBox;
+
+    /// <summary>Paints the panel into a bitmap, as WM_PAINT would (tests: what is on top of what).</summary>
+    internal Bitmap PaintForTest(Size size)
+    {
+        Size = size;
+        var bmp = new Bitmap(size.Width, size.Height);
+        DrawToBitmap(bmp, new Rectangle(Point.Empty, size));
+        return bmp;
+    }
+
+    /// <summary>Clicks the chip of this horizon, as the mouse would (tests).</summary>
+    internal void ClickHorizonChipForTest(TimelineHorizon horizon)
+    {
+        StripState? strip = _full ? BuildFullLayout().Strip : _combined ? BuildCombinedLayout().Strip : null;
+        if (strip is null) return;
+        foreach ((RectangleF rect, TimelineHorizon h) in strip.Layout.Chips)
+            if (h == horizon) StripClick(strip, new PointF(rect.X + rect.Width / 2f, rect.Y + rect.Height / 2f));
+    }
+
     // ---- the combined panel ----
 
-    readonly record struct CombinedLayout(IReadOnlyList<RectangleF> CardRects, IReadOnlyList<RectangleF> ReloginRects, IReadOnlyList<float> CardHeights, float TotalHeight);
+    readonly record struct CombinedLayout(IReadOnlyList<RectangleF> CardRects, IReadOnlyList<RectangleF> ReloginRects, IReadOnlyList<float> CardHeights, float TotalHeight, float StripHeight, StripState? Strip);
 
     const float CardPad = 10f;
     const float CardBarCaptionWidth = 46f;
@@ -951,7 +1115,9 @@ public sealed class PanelForm : Form
         var rects = new List<RectangleF>();
         var relogin = new List<RectangleF>();
         var heights = new List<float>();
-        float y = CombinedHeaderHeight;
+        StripState? strip = BuildStrip(LogicalWidth, DateTimeOffset.UtcNow);   // the availability timeline between the header and the cards
+        float stripHeight = strip?.Layout.Height ?? 0f;
+        float y = CombinedHeaderHeight + stripHeight + (strip is null ? 0f : CardGap);
         foreach (AccountCard card in _cards)
         {
             float h = CardPad + CardRowHeight + (card.Subtitle is null ? 0f : 14f) + 4f + CardRowHeight + 4f + 2 * CardRowHeight
@@ -964,7 +1130,7 @@ public sealed class PanelForm : Form
             heights.Add(h);
             y += h + CardGap;
         }
-        return new CombinedLayout(rects, relogin, heights, y + 4f);
+        return new CombinedLayout(rects, relogin, heights, y + 4f, stripHeight, strip);
     }
 
     void DrawCombined(Graphics g)
@@ -973,6 +1139,13 @@ public sealed class PanelForm : Form
 
         var state = g.Save();
         g.TranslateTransform(0, -_scrollY);
+        if (layout.Strip is { } strip)
+        {
+            var stripState = g.Save();
+            g.TranslateTransform(0, CombinedHeaderHeight);
+            DrawStrip(g, strip);
+            g.Restore(stripState);
+        }
         for (int i = 0; i < _cards.Count; i++) DrawCard(g, _cards[i], layout.CardRects[i], layout.ReloginRects[i], hover: i == _hoverCard, marked: _cards[i].Slot == _markedSlot);
         g.Restore(state);
 
@@ -988,6 +1161,17 @@ public sealed class PanelForm : Form
             using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             using var textBrush = new SolidBrush(Color.Black);
             g.DrawString("DEMO", _fontDemoBadge, textBrush, badgeRect, fmt);
+        }
+
+        // The hover popover is painted LAST, over the cards and the fixed header alike.
+        if (_stripHover is { } hover && layout.Strip is { } hoveredStrip)
+        {
+            var popoverState = g.Save();
+            g.TranslateTransform(0, CombinedHeaderHeight - _scrollY);
+            RectangleF box = TimelineStrip.DrawPopover(g, hoveredStrip.Layout, hoveredStrip.Timeline, hover, _stripMouse,
+                new RectangleF(1, _scrollY, Width / _scale - 2, Height / _scale - CombinedHeaderHeight - 1), TimeZoneInfo.Local, _stripFonts);
+            _lastPopoverBox = new RectangleF(box.X, box.Y + CombinedHeaderHeight - _scrollY, box.Width, box.Height);
+            g.Restore(popoverState);
         }
     }
 
@@ -1398,6 +1582,7 @@ public sealed class PanelForm : Form
         if (view.Loading) return ("Hämtar…", TextSecondary);
         if (view.NeedsLogin) return ("Inte inloggad", Palette.Crit);
         if (view.Freshness == Freshness.Unknown) return ("Kan inte läsa kvoten", Palette.Crit);
+        if (PanelText.ComposeIdleHeader(view, DateTimeOffset.UtcNow, TimeZoneInfo.Local) is { } idle) return (idle, TextSecondary);
         if (view.LastChangedAt is { } changed)
         {
             TimeSpan age = DateTimeOffset.Now - changed;

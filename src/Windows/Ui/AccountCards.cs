@@ -57,6 +57,7 @@ public static class AccountCards
 
         bool awaiting = w.State == QuotaState.Measuring && w.MeasuringReason == AwaitingResetText;
         if (awaiting) return new CardBar(caption, 0.0, "väntar på nytt fönster", role);
+        if (PanelText.IsClosed(w)) return new CardBar(caption, 0.0, caption == "Vecka" ? "ingen aktiv vecka" : "ingen aktiv session", role);
         if (w.UsedPct is not { } pct) return new CardBar(caption, 0.0, "–", role);
 
         double fraction = Math.Clamp(pct / 100.0, 0.0, 1.0);

@@ -380,6 +380,9 @@ public sealed class QuotaModel : IQuotaModel
             : _weeklyInactiveLastPoll ? MeasuringReasonCode.WindowInactive : MeasuringReasonCode.DataMissing;
 
         WindowView sessionView = BuildView(WindowKind.Session, QuotaWindows.SessionMinutes, sessionSnap, sessionFinal, utcNow, sessionForcedReason);
+        // A session the latest poll validly reported CLOSED has nothing to show: its old deadline is history (the tracker
+        // still holds it), not an overdue reset, and nothing was used in it -- "Ingen aktiv session", not "återställs nu".
+        if (_sessionInactiveLastPoll && !clockJump) sessionView = ClosedWindowView(WindowKind.Session, QuotaWindows.SessionMinutes);
         WindowView weeklyView = BuildView(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, weeklySnap, weeklyFinal, utcNow, weeklyForcedReason);
 
         QuotaState severity = (QuotaState)Math.Max((int)sessionFinal, (int)weeklyFinal);
@@ -477,6 +480,12 @@ public sealed class QuotaModel : IQuotaModel
             RatePctPerMin: f.RatePctPerMin, PaceMultiple: f.Pace, ProjectedPctAtReset: f.ProjectedPctAtReset,
             DepletesAt: depletesAt, Shortfall: TimeSpan.FromMinutes(f.ShortfallMinutes), MeasuringReason: null);
     }
+
+    /// <summary>A window that is closed right now: no deadline, no percentage (there is no window to measure), Measuring with the "Inget förbrukat ännu" reason (which the panel reads as "Ingen aktiv session").</summary>
+    static WindowView ClosedWindowView(WindowKind kind, double windowMinutes) => new(
+        kind, windowMinutes, UsedPct: null, ResetsAt: null, QuotaState.Measuring,
+        RatePctPerMin: null, PaceMultiple: null, ProjectedPctAtReset: null,
+        DepletesAt: null, Shortfall: TimeSpan.Zero, MeasuringReason: ReasonText(MeasuringReasonCode.WindowInactive));
 
     static string ReasonText(MeasuringReasonCode reason) => reason switch
     {

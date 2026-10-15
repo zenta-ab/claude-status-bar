@@ -22,6 +22,7 @@ bold, in the state colour. Line 2 always states **when**.
 |---|---|---|
 | Safe | ✓ Kvoten räcker till reset | Sessionen landar på ~57 % · återställs kl 13:20 (om 1 h 1 min) |
 | Tight | Tajt — kvoten räcker precis | Sessionen landar på ~95 % · återställs kl 13:20 (om 1 h 1 min) |
+| Tight, with a shortfall | Tajt — kvoten tar slut kl 12:36 (om …) | 5 min före reset kl 13:20, om du fortsätter i samma takt |
 | DryEarly | ⚠ Kvoten tar slut kl 12:36 | 44 min före reset kl 13:20, om du fortsätter i samma takt |
 | Spent | Kvoten är slut | Öppnar igen kl 13:20 (om 1 h 41 min) |
 | Measuring | Mäter takt… | 3 % använt · återställs kl 13:20 (om 4 h 52 min) |

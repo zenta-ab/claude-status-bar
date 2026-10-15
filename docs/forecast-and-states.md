@@ -204,6 +204,19 @@ learning is tracked separately as a backlog item, not attempted here.
 | 4 | `shortfall > 0` or `slack ≤ S_hi` or `rem ≤ 10` | **Tight** |
 | 5 | otherwise | **Safe** |
 
+**A Tight window can still run out (2026-10-15).** Row 4 includes `shortfall > 0` below `S_lo`: a weekly window
+60 % used, 0.11 %/min, 10 h from its reset is forecast to deplete 4 h before it, projects ~127 %, and is **Tight**
+(not DryEarly) because 240 min < 504 min; the real `QuotaModel` produces it too (`ForecastAgreementTests`), and
+hysteresis can hold Tight while the live forecast is already worse. "Räcker precis" is therefore only true of a Tight
+window whose depletion is at or after its reset. The one test for "runs out before its reset" is
+`WindowView.ForecastRunOutAt` -- Tight or DryEarly, a forecast exists (Measuring carries none), and the depletion
+falls at least a minute (`MinimumRunOut`, the no-shortfall clamp's own threshold) before the reset. Everything reads
+it: the status box ("Tajt — veckokvoten tar slut kl 16:38 (om 6 h)", in Tight's amber, with the shortfall line;
+without a run-out still "Tajt — … räcker precis"), the other-accounts row ("tajt — veckan tar slut 16:38"), the
+secondary line ("Dessutom tajt: … tar slut …"), the tray tooltip ("Tajt · slut 16:38 — 4 h före reset") and the
+availability timeline (a forecast block from that instant to the reset). A test runs every demo view through all of
+them and asserts they agree, and that a box which says the quota lasts never prints "landar på ~N %" with N > 100.
+
 Spent requires *confirmed* exhaustion (`P ≥ 100`), not "almost" (the old 99.5 threshold claimed
 blocking without evidence of blocking). 97–99.9 % still reaches DryEarly on its own via the
 `rem ≤ 3` clause above, so nothing in the 97–100 % range goes unflagged.
@@ -372,6 +385,14 @@ Stale although every poll succeeded:
 2. The data-age rule (`FreshnessInputs.SessionClosed`) is suspended while the session window is
    validly closed — the transport deadlines, the clock-discontinuity rule and failures all still
    apply. An OPEN session window whose snapshot stops changing still goes Stale after 20 min.
+
+**What the panel shows for it (2026-10-13).** The model reports a validly closed session as a window with NO deadline and
+no percentage (`QuotaModel.ClosedWindowView`: Measuring, "Inget förbrukat ännu") -- the tracker still holds the old
+`resets_at`, and the panel used to print it as "återställs nu · igår kl 23:20" with "100 % av 5 h har gått". The panel
+now says "Ingen aktiv session" / "startar när kontot används" (no time bar), the card "ingen aktiv session", and the
+header "Ingen aktivitet sedan <tid>" instead of the data age "Uppdaterad för 10 h 39 min sedan" (which looks like an
+error when nothing is used); an account with an open session keeps the data-age header. The availability timeline
+counts a closed session as available (no deadline, no run-out).
 
 Evidence: on a real installation one account answered every poll successfully for a day, yet 933 of
 970 state lines said Stale. Its session window was closed and its weekly window Spent (so the snapshot

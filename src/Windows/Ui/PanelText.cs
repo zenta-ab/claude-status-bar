@@ -82,6 +82,8 @@ public static class PanelText
         (string line, PanelColorRole role) = driver.State switch
         {
             QuotaState.Measuring => ("mäter takt", PanelColorRole.Measuring),
+            // A Tight window with a shortfall DOES run out before its reset (WindowView.ForecastRunOutAt): never "räcker precis" then.
+            QuotaState.Tight when driver.ForecastRunOutAt is { } tightDep => ($"tajt — {which} tar slut {TimeText.ClockWithDay(tightDep, now, tz)}", PanelColorRole.Tight),
             QuotaState.Tight => ("tajt — räcker precis", PanelColorRole.Tight),
             QuotaState.DryEarly when driver.DepletesAt is { } dep => ($"{which} tar slut {TimeText.ClockWithDay(dep, now, tz)}", PanelColorRole.Crit),
             QuotaState.DryEarly => ("nästan slut", PanelColorRole.Crit),
@@ -197,6 +199,10 @@ public static class PanelText
         StatusBoxText verdict = driver.State switch
         {
             QuotaState.DryEarly => ComposeDryEarly(driver, kvotWordCap, driverIsWeekly, now, tz),
+            // Tight is "strained", and its table row includes a small shortfall (docs/forecast-and-states.md): then the
+            // forecast says the quota runs out before the reset, and the box says so (in Tight's colour) instead of
+            // "räcker precis" over a projection past 100 %. Without a run-out nothing changes.
+            QuotaState.Tight when driver.ForecastRunOutAt is not null => ComposeDryEarly(driver, kvotWordCap, driverIsWeekly, now, tz, tightWord: kvotWordLower),
             QuotaState.Tight => ComposeSafeOrTight($"Tajt — {kvotWordLower} räcker precis", subject, driver, driverIsWeekly, PanelColorRole.Tight, now, tz),
             _ => ComposeSafeOrTight($"✓ {kvotWordCap} räcker till reset", subject, driver, driverIsWeekly, PanelColorRole.Safe, now, tz),
         };
@@ -213,20 +219,21 @@ public static class PanelText
         return new StatusBoxText(line1, line2, null, null, role);
     }
 
-    static StatusBoxText ComposeDryEarly(WindowView driver, string kvotWordCap, bool driverIsWeekly, DateTimeOffset now, TimeZoneInfo tz)
+    /// <param name="tightWord">Set for a Tight window that runs out ("veckokvoten"): "Tajt — veckokvoten tar slut ..." in Tight's colour instead of "⚠ Veckokvoten tar slut ..." in DryEarly's.</param>
+    static StatusBoxText ComposeDryEarly(WindowView driver, string kvotWordCap, bool driverIsWeekly, DateTimeOffset now, TimeZoneInfo tz, string? tightWord = null)
     {
         // "Running out always states both when and how long until" -- today AND any
         // later day (docs/panel-v2.md, "Time text"): TimeText.Depletion carries the
         // "(om ...)" duration regardless of which.
         string depletionText = driver.DepletesAt is { } dep ? TimeText.Depletion(dep, now, tz) : "snart";
-        string line1 = $"⚠ {kvotWordCap} tar slut {depletionText}";
+        string line1 = tightWord is null ? $"⚠ {kvotWordCap} tar slut {depletionText}" : $"Tajt — {tightWord} tar slut {depletionText}";
 
         string resetClock = driver.ResetsAt is { } r
             ? (driverIsWeekly ? $"{TimeText.WeekdayOrDate(r, now, tz)} kl {TimeText.ClockOnly(r, tz)}" : TimeText.PointInTime(r, now, tz))
             : "okänt";
         string line2 = $"{TimeText.Duration(driver.Shortfall)} före reset {resetClock}, om du fortsätter i samma takt";
 
-        return new StatusBoxText(line1, line2, null, null, PanelColorRole.Crit);
+        return new StatusBoxText(line1, line2, null, null, tightWord is null ? PanelColorRole.Crit : PanelColorRole.Tight);
     }
 
     /// <summary>
@@ -271,6 +278,8 @@ public static class PanelText
 
         return other.State switch
         {
+            QuotaState.Tight when other.ForecastRunOutAt is { } tightDep =>
+                $"Dessutom tajt: {subject} tar slut {TimeText.Depletion(tightDep, now, tz)}",
             QuotaState.Tight when other.ResetsAt is { } r =>
                 $"Dessutom tajt: {subject} räcker precis · återställs {TimeText.Reset(r, now, tz, otherIsWeekly)}",
             QuotaState.DryEarly when other.DepletesAt is { } dep =>
@@ -291,7 +300,14 @@ public static class PanelText
         string resetHeader;
         string tidLabel;
 
-        if (awaitingReset)
+        if (IsClosed(w))
+        {
+            // A window that is not open (an idle account's session): no reset time and no time bar -- there is nothing
+            // to count down to or measure elapsed time against.
+            resetHeader = isWeekly ? "Ingen aktiv vecka" : "Ingen aktiv session";
+            tidLabel = "startar när kontot används";
+        }
+        else if (awaitingReset)
         {
             // The window's own reset has already passed and no new one has been
             // confirmed yet -- there is nothing sane to count down to or measure
@@ -316,6 +332,21 @@ public static class PanelText
 
         return new WindowSectionText(title, resetHeader, tidLabel, BuildKvotLabel(w, now, tz));
     }
+
+    /// <summary>A window the account is not using right now: Measuring for "Inget förbrukat ännu", with no deadline (QuotaModel.ClosedWindowView).</summary>
+    public static bool IsClosed(WindowView w) =>
+        w.State == QuotaState.Measuring && w.MeasuringReason == WindowInactiveText && w.ResetsAt is null;
+
+    /// <summary>
+    /// The header line of an IDLE account -- polls succeed, but nothing is used, so nothing changes: "Ingen aktivitet
+    /// sedan igår kl 23:20" instead of a data age ("Uppdaterad för 10 h 39 min sedan") that looks like an error. Null
+    /// unless the session is closed AND the account is Live; an account with an open session keeps the data-age header,
+    /// and a Stale one does too (there the age is the point).
+    /// </summary>
+    public static string? ComposeIdleHeader(QuotaView view, DateTimeOffset now, TimeZoneInfo tz) =>
+        view.Freshness == Freshness.Live && !view.Loading && !view.NeedsLogin && IsClosed(view.Session) && view.LastChangedAt is { } changed
+            ? $"Ingen aktivitet sedan {TimeText.PointInTime(changed, now, tz)}"
+            : null;
 
     static string BuildKvotLabel(WindowView w, DateTimeOffset now, TimeZoneInfo tz)
     {

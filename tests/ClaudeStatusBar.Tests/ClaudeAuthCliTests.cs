@@ -18,6 +18,14 @@ public sealed class ClaudeAuthCliTests : IDisposable
 {
     static string ExePath => Path.Combine(AppContext.BaseDirectory, "FakeClaudeChild.exe");
 
+    /// <summary>
+    /// How long a test waits for a real child process to answer. The child answers in well under a second; the bound
+    /// only has to be longer than a loaded machine (the whole suite in parallel, a virus scanner on the first start of
+    /// a fresh exe) can make a process start take -- a 20 s bound failed once on a busy run, and the tests that exercise
+    /// the timeout itself use their own short ones.
+    /// </summary>
+    static readonly TimeSpan ChildTimeout = TimeSpan.FromSeconds(90);
+
     // The long spelling of the temp path (GetTempPath may return 8.3 names), so a child's own report of its working directory can be compared as a full path.
     readonly string _temp = MakeLongTempDir();
     readonly SlotStore _store;
@@ -135,7 +143,7 @@ public sealed class ClaudeAuthCliTests : IDisposable
         SetEnv("CLAUDE_CONFIG_DIR", @"C:\Users\someone\.claude");
         SetEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR", @"C:\Users\someone\.claude");
 
-        AuthStatus? status = await _cli.GetStatusAsync(slot, TimeSpan.FromSeconds(20), CancellationToken.None);
+        AuthStatus? status = await _cli.GetStatusAsync(slot, ChildTimeout, CancellationToken.None);
 
         Assert.True(status is { IsClaudeAiLogin: true });
         string dump = File.ReadAllText(_dump);
@@ -157,7 +165,7 @@ public sealed class ClaudeAuthCliTests : IDisposable
         string slot = _store.CreatePending();
         SetEnv("FAKE_AUTH_BEHAVIOUR", behaviour);
 
-        AuthStatus? status = await _cli.GetStatusAsync(slot, TimeSpan.FromSeconds(20), CancellationToken.None);
+        AuthStatus? status = await _cli.GetStatusAsync(slot, ChildTimeout, CancellationToken.None);
 
         Assert.NotNull(status);
         Assert.Equal(loggedIn, status!.LoggedIn);
@@ -171,7 +179,7 @@ public sealed class ClaudeAuthCliTests : IDisposable
         string slot = _store.CreatePending();
         SetEnv("FAKE_AUTH_BEHAVIOUR", "garbage");
 
-        Assert.Null(await _cli.GetStatusAsync(slot, TimeSpan.FromSeconds(20), CancellationToken.None));
+        Assert.Null(await _cli.GetStatusAsync(slot, ChildTimeout, CancellationToken.None));
     }
 
     [Fact]

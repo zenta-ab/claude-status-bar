@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ClaudeStatusBar.Diagnostics;
+using ClaudeStatusBar.Model;
 
 namespace ClaudeStatusBar.Config;
 
@@ -79,6 +80,30 @@ public sealed class PanelDisplayModeConverter : JsonConverter<PanelDisplayMode>
         });
 }
 
+/// <summary>Reads and writes the availability timeline's horizon as "24h" | "3d" | "7d"; anything else is an error, so the file is quarantined like any other invalid one.</summary>
+public sealed class TimelineHorizonConverter : JsonConverter<TimelineHorizon>
+{
+    public override TimelineHorizon Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        string? text = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+        return text?.ToLowerInvariant() switch
+        {
+            "24h" => TimelineHorizon.Hours24,
+            "3d" => TimelineHorizon.Days3,
+            "7d" => TimelineHorizon.Days7,
+            _ => throw new JsonException("unknown timelineHorizon"),
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, TimelineHorizon value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value switch
+        {
+            TimelineHorizon.Days3 => "3d",
+            TimelineHorizon.Days7 => "7d",
+            _ => "24h",
+        });
+}
+
 public enum AccountsConfigStatus
 {
     /// <summary>Read and valid.</summary>
@@ -118,6 +143,18 @@ public sealed class AccountsConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PanelDisplayMode? PanelMode { get; set; }
 
+    /// <summary>
+    /// "timelineHorizon": "24h" | "3d" | "7d" -- how far ahead the availability timeline of the full and card panels
+    /// looks. Optional and absent by default (= 24h): the file is only changed once the user clicks a horizon chip.
+    /// </summary>
+    [JsonPropertyName("timelineHorizon")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TimelineHorizon? TimelineHorizonChoice { get; set; }
+
+    /// <summary>The effective horizon: 24 h unless "timelineHorizon" says otherwise.</summary>
+    [JsonIgnore]
+    public TimelineHorizon EffectiveTimelineHorizon => TimelineHorizonChoice ?? TimelineHorizon.Hours24;
+
     /// <summary>The effective mode: single unless "panelMode" says otherwise.</summary>
     [JsonIgnore]
     public PanelDisplayMode EffectivePanelMode => PanelMode ?? PanelDisplayMode.Single;
@@ -140,7 +177,7 @@ public sealed class AccountsConfig
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Converters = { new PanelDisplayModeConverter(), new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+        Converters = { new PanelDisplayModeConverter(), new TimelineHorizonConverter(), new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
     /// <summary>A new, empty, current-version config.</summary>

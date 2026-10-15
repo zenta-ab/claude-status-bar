@@ -178,6 +178,9 @@ public sealed class IconSlot : IDisposable
             QuotaState.DryEarly when driver.DepletesAt is { } dep =>
                 $"Slut {TimeText.ClockWithDay(dep, now, tz)} — {TimeText.Duration(driver.Shortfall)} före reset",
             QuotaState.DryEarly => "Kvoten nästan slut",
+            // A Tight window with a shortfall runs out before its reset: say when, like DryEarly does (WindowView.ForecastRunOutAt).
+            QuotaState.Tight when driver.ForecastRunOutAt is { } tightDep =>
+                $"Tajt · slut {TimeText.ClockWithDay(tightDep, now, tz)} — {TimeText.Duration(driver.Shortfall)} före reset",
             QuotaState.Tight when driver.ResetsAt is { } r =>
                 $"Tajt · ~{driver.ProjectedPctAtReset ?? driver.UsedPct ?? 0.0:F0}% vid reset {TimeText.ClockWithDay(r, now, tz)}",
             QuotaState.Measuring when driver.ResetsAt is { } r => $"Mäter takt · reset {TimeText.ClockWithDay(r, now, tz)}",

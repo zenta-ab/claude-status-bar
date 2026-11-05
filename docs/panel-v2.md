@@ -29,6 +29,9 @@ bold, in the state colour. Line 2 always states **when**.
 | Stale | (verdict as above) + line 3: "Datan kan vara inaktuell — senast ändrad för 23 min sedan" |
 | Unknown | Kan inte läsa kvoten | Senast avläst kl 12:10 · försöker igen |
 
+- An account with **no 5 h limit** (`QuotaView.NoSessionLimit`, see docs/forecast-and-states.md) has only the
+  weekly window, so the weekly window always drives the box: "✓ Veckokvoten räcker till reset", "Veckokvoten är slut"
+  / "Öppnar igen …", and a Measuring box quotes the week ("12 % använt · återställs …").
 - When the weekly window drives it, say "Veckokvoten" and use weekday times: "⚠ Veckokvoten tar slut
   tis 14:00", "2 d 17 h före reset fre 07:00, om du fortsätter i samma takt".
 - If the window that is NOT driving the box is Tight/DryEarly/Spent, add one short line for it.
@@ -59,6 +62,12 @@ Kvot  █████████████▒▒▒▒░░░░░░░�
   - Awaiting reset: "Nytt fönster väntas"
 - Weekly times use a weekday: "återställs om 6 d 18 h · fre 07:00".
 - All labels stay inside the panel bounds. Never clip.
+- **No session section without a 5 h limit.** For an account whose session does not exist (`NoSessionLimit`) the ring,
+  "AKTUELL SESSION" and the Tid/Kvot bars are replaced by ONE muted line, "Ingen 5-timmarsgräns – bara veckokvoten
+  gäller" (`PanelTextResult.NoSessionLimitLine`, ~16 px row; `PanelForm.BuildLayout`/`DrawPanelContents`). In the full
+  side-by-side mode the rows still line up across columns: the column with the line is padded to the tallest
+  session block, as any shorter block is. The old "Ingen aktiv session / startar när kontot används" wording is
+  never shown for such an account (it is for an account that merely has a closed session).
 
 ### 4. Footer
 "Senast avläst kl 12:17:47 · uppdateras var 30 s".
@@ -82,7 +91,7 @@ Never show raw minutes above an hour ("6975 min" is unreadable).
 - The session and weekly timelines: replaced by the Tid bar.
 
 ## Tray tooltip (≤ 63 characters)
-It carries the same verdict and time as the status box, e.g. "Räcker · ~57 % vid reset 13:20",
+It carries the same verdict and time as the status box (for an account with no 5 h limit, the weekly window's), e.g. "Räcker · ~57 % vid reset 13:20",
 "Slut kl 12:36 — 44 min före reset", "Kvoten slut · öppnar 13:20", "Mäter takt · reset 13:20".
 Tight uses the same shape as Safe: "Tajt · ~95 % vid reset 13:20".
 
@@ -95,7 +104,9 @@ every case:
 - **Which window drives when severity ties.** The status box picks the more severe
   window (session vs weekly); on an exact tie it picks the session window. Same
   rule for which Measuring window's reason is shown when neither carries one of the
-  two "special" reasons (AwaitingReset / TooEarlyInWeek).
+  two "special" reasons (AwaitingReset / TooEarlyInWeek). **Except** for an account with
+  no 5 h limit, where the weekly window drives on a tie too (`QuotaView.Driver`, used by the
+  status box, the tooltip, the other-accounts row and the display plan's depletion tie-break).
 - **The weekly-drives word substitution** ("say Veckokvoten") is applied
   consistently across all five status-box rows (Safe/Tight/DryEarly/Spent/Measuring),
   not just DryEarly where the doc's only example lives: "Kvoten"/"kvoten" ->

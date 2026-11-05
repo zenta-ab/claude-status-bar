@@ -765,7 +765,11 @@ public sealed class PanelForm : Form
         if (align is { } block) y = Math.Max(y, statusBoxY + block.StatusBoxHeight + block.StatusExtra);
 
         float sessionY = y;
-        float sessionHeight = Math.Max(MeasureSection(text.Session, _view.Session), align?.SessionHeight ?? 0f);
+        // An account without a 5 h limit has no session section: one muted line takes its place.
+        float sessionNatural = text.NoSessionLimitLine is { } noLimit
+            ? DrawFitText(_measureG, noLimit, _fontResetHeader, TextTertiary, 0, 0, ContentWidth, draw: false)
+            : MeasureSection(text.Session, _view.Session);
+        float sessionHeight = Math.Max(sessionNatural, align?.SessionHeight ?? 0f);
         y += sessionHeight + 16f;
 
         float weeklyY = y;
@@ -893,7 +897,10 @@ public sealed class PanelForm : Form
         DrawHeader(g, layout);
         DrawStatusBox(g, layout);
         DrawLoginButton(g, layout);
-        DrawSection(g, layout.SessionY, layout.Text.Session, _view.Session, now);
+        if (layout.Text.NoSessionLimitLine is { } noSessionLimit)
+            DrawFitText(g, noSessionLimit, _fontResetHeader, TextTertiary, SidePadding, layout.SessionY, ContentWidth);
+        else
+            DrawSection(g, layout.SessionY, layout.Text.Session, _view.Session, now);
         DrawSection(g, layout.WeeklyY, layout.Text.Weekly, _view.Weekly, now);
 
         using (var rulePen = new Pen(RuleColor))
@@ -1230,6 +1237,13 @@ public sealed class PanelForm : Form
     {
         using (var capBrush = new SolidBrush(TextTertiary))
             g.DrawString(bar.Caption, _fontBarCaption, capBrush, x, y + 2f);
+
+        if (bar.NoBar)
+        {
+            // The window does not exist on this account: muted text where the bar would be.
+            DrawFitText(g, bar.Text, _fontBarLabel, TextTertiary, x + CardBarCaptionWidth, y, w - CardBarCaptionWidth);
+            return;
+        }
 
         var track = new RectangleF(x + CardBarCaptionWidth, y + 5f, CardBarWidth, 5f);
         FillBarTrack(g, track);

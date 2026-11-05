@@ -25,6 +25,12 @@ and never touches a folder it does not own. The design decisions and what was re
   identity is at `<slot>\config\.claude.json`. (The app no longer reads the default location at
   all: it has no default-login account.)
 - **`get_usage` → `subscription_type`** (`max`, `team`, …) for the account that child is logged into.
+- **`oauthAccount.planDisplayName`** ("Ultra", "Max", …) is the plan as Claude Code names it. It is used for the
+  **label** only (see "Labels" and "Panel header") and is never a signal for what the quota looks like: an "Ultra"
+  account may or may not have a 5 h window.
+- **An account without a 5 h limit** (some "Ultra" plans since 2026-10-31) answers `get_usage` with
+  `"five_hour": null` and only `weekly_*` entries in `limits[]`, at any weekly percentage. The app detects that per
+  poll from this shape (docs/forecast-and-states.md) and shows it as "Ingen 5-timmarsgräns" (below).
 - **`get_usage` with no usable login** answers, successfully and well-formed, with
   `{"subscription_type": null, "rate_limits_available": false, "rate_limits": null}` — see
   "NeedsLogin".
@@ -277,7 +283,8 @@ GDI/USER handle counts stay flat over thousands of frames.
 The title is the account's label — the name the user gave it (Byt namn…) or the automatic one (see
 "Labels"). The line under it is the plan and organisation from Anthropic's own data
 (`PanelText.ComposeAccountSubtitle`): `subscription_type` title-cased and the organisation name, joined
-with " · " — "Max · personlig organisation", "Team · Acme AB". Anthropic's auto-generated "<email>'s
+with " · " — "Max · personlig organisation", "Team · Acme AB" ("Ultra · personlig organisation" when Claude Code names the plan
+`planDisplayName`, which then wins over the title-cased `subscription_type`). Anthropic's auto-generated "<email>'s
 Organization" is shown as "personlig organisation", never by name and never with an address. Unknown parts
 are left out, and so is any part that just repeats the title (an account whose automatic label is already
 "Max" shows no second "Max"); with nothing left there is no subtitle line. The DEMO badge is unchanged.
@@ -288,6 +295,11 @@ sedan igår kl 23:20" (`PanelText.ComposeIdleHeader`; the time the data last cha
 age of ten hours looks like an error. An account with an open session, a Stale one and every failure keep their
 own lines. Likewise a session window that has closed reads "Ingen aktiv session" / "startar när kontot används",
 with no reset time and no full time bar, and an empty bar on its card ("ingen aktiv session").
+
+An account with **no 5 h limit** is different from an idle one: it has no session at all. Its panel replaces the
+whole session section (ring, "AKTUELL SESSION", the bars) with one muted line, "Ingen 5-timmarsgräns – bara
+veckokvoten gäller"; the weekly window drives the status box, tooltip and other-accounts rows; and the header is
+"Ingen aktivitet sedan <tid>" taken from the weekly usage's last observed rise (when Live; until a rise has been seen, and when Stale, the data age stands).
 
 ## Panels
 
@@ -329,7 +341,8 @@ panel's own layout and paint code (`PanelForm.DrawPanelContents`) — no second 
 The **cards** panel is one panel with a compact card per enabled account — accounts without an icon too (beyond
 `maxIcons`, or hidden by "Visa bara den som är närmast taket"). A card has the label, the "plan ·
 organisation" line, the short verdict in its colour (the status box's own first line, so the wording is the
-same), two thin bars (session, week) with the percent and the day-aware reset time, and a one-line note only
+same), two thin bars (session, week) with the percent and the day-aware reset time (an account with no 5 h limit has
+the muted text "Ingen 5-timmarsgräns" in the session row instead of a bar), and a one-line note only
 when the account is not Live ("Hämtar…", "Inaktuell — …", "Senast avläst …", "Inte inloggad" with a "Logga in
 igen" button). Order (`AccountCards.Order`): the accounts that have an icon, in the order their icons appear
 on screen left to right (the icon rectangles `PanelAnchor` reads), then the accounts without an icon in config
@@ -400,7 +413,9 @@ overlaps list both. Unknown accounts never cover, and an all-unknown timeline ha
 
 The idle account's two fixes shown in the same screenshot are in "Panel header" and `docs/forecast-and-states.md`
 ("An idle account is not a stale one"): a closed session reads "Ingen aktiv session" and the header "Ingen
-aktivitet sedan <tid>".
+aktivitet sedan <tid>". An account with no 5 h limit counts as available for the weekly window alone: the timeline
+already blocks only on the window that is spent or forecast to run out, and its closed session never does
+(`AvailabilityTimelineTests.Timeline_NoSessionLimit_BlocksOnlyOnTheWeek`).
 
 ## Times always carry their day
 
@@ -453,7 +468,8 @@ are.
    a personal organisation, `<emailAddress>'s Organization` (observed on this machine's real
    personal Max login: `alex@example.com's Organization`). That name is a poor tray label, so
    it is skipped and falls through to step 3 instead.
-3. The plan from `subscription_type`, title-cased ("Max", "Team", "Enterprise").
+3. The plan: `oauthAccount.planDisplayName` when present ("Ultra"), else `subscription_type` title-cased ("Max",
+   "Team", "Enterprise"). (`AccountLabel.PlanName`; also what the duplicate-label pass appends.)
 4. The local part of `emailAddress`.
 5. "Konto N".
 

@@ -42,6 +42,11 @@ namespace ClaudeStatusBar.Model;
 /// resets_at rules still apply. QuotaModel also stops passing the closed window's old
 /// resets_at deadline here, which is what had been turning a perfectly healthy idle account Stale
 /// five hours after its last session began.
+///
+/// An account with NO 5 h limit at all (`five_hour: null`, UsageSnapshot.NoSessionLimit) is fed in as
+/// SessionClosed on every poll: a reply that omits the session is still a valid answer (proof of liveness),
+/// so it must not read as a missing window, and with no session there is nothing that could be consumed
+/// in one, so an unchanged snapshot is expected. The weekly window's own deadline stays in play.
 /// </summary>
 public readonly record struct FreshnessInputs(
     bool HasEverSucceeded,

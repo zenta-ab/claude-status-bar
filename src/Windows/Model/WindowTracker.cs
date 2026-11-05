@@ -16,6 +16,8 @@ public enum MeasuringReasonCode
     /// which is an answer, not an absence (docs/forecast-and-states.md, "A closed window is an
     /// answer, not an absence").
     WindowInactive,
+    /// The account has no 5 h limit at all (UsageSnapshot.NoSessionLimit). Only ever the session view's reason.
+    NoSessionLimit,
     ClockJump,     // utcNow is inconsistent with the monotonic anchor (decision 6)
 }
 
@@ -89,6 +91,14 @@ public sealed class WindowTracker
     public long? RolloverMono { get; private set; }
 
     public DateTimeOffset? LastRiseAt { get; private set; }
+
+    /// <summary>
+    /// UTC time of the last rise (dP&gt;0) seen under continuous observation. Unlike LastRiseAt it ignores the first
+    /// sample of a window and the first one after a gap (a re-baselining jump: WHEN it happened is unknown), so it
+    /// answers "when did usage last actually move" without mistaking "the app just started" for activity. Null until
+    /// such a rise has been seen in this window.
+    /// </summary>
+    public DateTimeOffset? LastObservedRiseAt { get; private set; }
 
     /// <summary>Decision 2/7 (round 2): monotonic time of the last accepted LIVE rise (dP&gt;0). Never set by replay -- see the class doc's atomic-accept note on why replay stays UTC-only.</summary>
     public long? LastRiseMono { get; private set; }
@@ -263,6 +273,7 @@ public sealed class WindowTracker
         if (dP > 0)
         {
             LastRiseAt = utcNow;
+            if (!rebaseline) LastObservedRiseAt = utcNow;
             if (!isReplay) LastRiseMono = monoMs;
         }
         if (!isReplay)
@@ -475,6 +486,7 @@ public sealed class WindowTracker
         LastAcceptedUtc = null;
         _lastAcceptedMono = null;
         LastRiseAt = null;
+        LastObservedRiseAt = null;
         LastRiseMono = null;
         ConfirmedIdleMinutes = 0.0;
         // RolloverAt/RolloverMono/WindowKey are set by the caller right after this.

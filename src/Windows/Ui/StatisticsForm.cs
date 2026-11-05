@@ -30,7 +30,8 @@ public sealed class StatisticsForm : Form
     const float HeatCell = 13f;
     const float HeatGap = 3f;
 
-    public readonly record struct AccountRef(string Label, string LogDir, string AccountKey);
+    /// <param name="HasNoSessionLimit">Asked on every Reload: does this account currently have no 5 h limit (QuotaView.NoSessionLimit)? Null = no.</param>
+    public readonly record struct AccountRef(string Label, string LogDir, string AccountKey, Func<bool>? HasNoSessionLimit = null);
 
     static readonly Color PanelBackground = Color.FromArgb(255, 0x20, 0x20, 0x20);
     static readonly Color CardBackground = Color.FromArgb(255, 0x27, 0x27, 0x27);
@@ -257,7 +258,7 @@ public sealed class StatisticsForm : Form
         DateTimeOffset now = NowProvider();
         StatisticsDataLoader.LoadedData data = StatisticsDataLoader.Load(account.LogDir, account.AccountKey, _period, _tz, now);
         _data = data;
-        _text = StatisticsText.Compose(data, _period, _tz, now);
+        _text = StatisticsText.Compose(data, _period, _tz, now, account.HasNoSessionLimit?.Invoke() ?? false);
         _layout = BuildLayout(_text);
         _content.AutoScrollMinSize = new Size(0, (int)Math.Ceiling(_layout.Value.TotalHeight));
         _content.Invalidate();
@@ -274,7 +275,7 @@ public sealed class StatisticsForm : Form
         RectangleF? CeilingRecRect, RectangleF? WeeklyRecRect,
         float RecentHeaderY, IReadOnlyList<RecentRow> RecentRows,
         float HeatmapHeaderY, IReadOnlyList<HeatCellRect> HeatCells,
-        float TotalHeight);
+        float TotalHeight, float NoteY = 0f);
 
     float ContentWidth => LogicalWidth - 2 * SidePadding;
 
@@ -283,6 +284,11 @@ public sealed class StatisticsForm : Form
         if (text is null) return new ContentLayout(Array.Empty<TileRect>(), null, null, 0, Array.Empty<RecentRow>(), 0, Array.Empty<HeatCellRect>(), 20f);
 
         float y = 16f;
+
+        // An account without a 5 h limit: one muted line above the (weekly-only) tiles.
+        float noteY = y;
+        if (text.NoSessionLimitNote is { } note)
+            y += DrawFitText(_measureG, note, _fontSmall, TextTertiary, 0, 0, ContentWidth, draw: false) + 10f;
 
         // Tiles: 2-column grid.
         var tiles = new List<TileRect>();
@@ -364,7 +370,7 @@ public sealed class StatisticsForm : Form
         }
 
         y += 20f;
-        return new ContentLayout(tiles, ceilingRect, weeklyRect, recentHeaderY, recentRows, heatmapHeaderY, heatCells, y);
+        return new ContentLayout(tiles, ceilingRect, weeklyRect, recentHeaderY, recentRows, heatmapHeaderY, heatCells, y, noteY);
     }
 
     // ---- paint ----
@@ -377,6 +383,8 @@ public sealed class StatisticsForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
+        if (text.NoSessionLimitNote is { } note)
+            DrawFitText(g, note, _fontSmall, TextTertiary, SidePadding, layout.NoteY, ContentWidth);
         foreach (TileRect t in layout.Tiles) DrawTile(g, t);
         if (layout.CeilingRecRect is { } cr && text.CeilingRecommendation is { } ceilingText) DrawRecommendation(g, cr, ceilingText);
         if (layout.WeeklyRecRect is { } wr && text.WeeklyBudgetRecommendation is { } weeklyText) DrawRecommendation(g, wr, weeklyText);
@@ -391,7 +399,7 @@ public sealed class StatisticsForm : Form
         DrawFitText(g, "AKTIVITET", _fontSectionTitle, TextTertiary, SidePadding, layout.HeatmapHeaderY, ContentWidth);
         if (layout.HeatCells.Count == 0)
         {
-            DrawFitText(g, "Ingen data för perioden.", _fontSmall, TextSecondary, SidePadding, layout.HeatmapHeaderY + 24f, ContentWidth);
+            DrawFitText(g, text.NoSessionLimitNote ?? "Ingen data för perioden.", _fontSmall, text.NoSessionLimitNote is null ? TextSecondary : TextTertiary, SidePadding, layout.HeatmapHeaderY + 24f, ContentWidth);
         }
         foreach (HeatCellRect cell in layout.HeatCells) DrawHeatCell(g, cell);
     }

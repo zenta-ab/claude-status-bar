@@ -21,6 +21,11 @@ namespace ClaudeStatusBar.Data;
 /// response. Default true so every existing positional call site (which never
 /// mentions this field, and always supplies a resets_at when it means "open")
 /// keeps compiling and keeps its old meaning.
+///
+/// NoSessionLimit: the account has no 5 h limit at all (`five_hour: null`, no `session` entry in
+/// limits[]; some "Ultra" plans). The session fields then carry the closed-window values
+/// (0 / null / inactive) so freshness keeps counting the reply as live; this flag is the only
+/// thing that tells "no limit" apart from "limit, nothing used yet".
 /// </summary>
 public sealed record UsageSnapshot(
     double SessionUtilization,
@@ -30,4 +35,5 @@ public sealed record UsageSnapshot(
     DateTimeOffset ReceivedAt,
     string? SubscriptionType = null,
     bool SessionIsActive = true,
-    bool WeeklyIsActive = true);
+    bool WeeklyIsActive = true,
+    bool NoSessionLimit = false);

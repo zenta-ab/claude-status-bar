@@ -68,6 +68,9 @@ public static class DemoQuotaSource
             new("dry_early_weekly", View(safeSession, dryEarlyWeekly, Freshness.Live, utcNow, TimeSpan.FromSeconds(30), utcNow.AddSeconds(-10))),
             new("spent_session", SpentView(spentSessionWin, safeWeekly, utcNow)),
             new("spent_weekly", SpentView(safeSession, spentWeeklyWin, utcNow)),
+            // An account with no 5 h limit ("Ultra" plans without a session window): the session is absent, the weekly drives.
+            new("no_session_limit", NoSessionLimitView(safeWeekly, utcNow)),
+            new("no_session_limit_spent", NoSessionLimitView(spentWeeklyWin, utcNow, spent: true)),
             // Reuses the Safe windows: the point of this state is to demo the Stale
             // freshness banner/header in isolation, not to also trip a Tight/DryEarly
             // verdict, which would outrank it in the banner's priority order and hide it.
@@ -103,6 +106,18 @@ public static class DemoQuotaSource
             IconSeverity: (QuotaState)Math.Max((int)session.State, (int)weekly.State),
             BlockedUntil: blockedUntil);
     }
+
+    /// <summary>An account without a 5 h limit: the closed session view QuotaModel produces for it, the given weekly window, NoSessionLimit set (QuotaView.Driver then picks the weekly window).</summary>
+    internal static QuotaView NoSessionLimitView(WindowView weekly, DateTimeOffset utcNow, bool spent = false) =>
+        new(QuotaModel.ClosedWindowView(WindowKind.Session, QuotaWindows.SessionMinutes, MeasuringReasonCode.NoSessionLimit),
+            weekly, Freshness.Live,
+            LastChangedAt: utcNow.AddMinutes(-3),
+            LastSuccessAt: utcNow.AddSeconds(-2),
+            PollInterval: TimeSpan.FromSeconds(spent ? 300 : 150),
+            Error: null,
+            IconSeverity: weekly.State,
+            BlockedUntil: spent && weekly.State == QuotaState.Spent ? weekly.ResetsAt : null,
+            NoSessionLimit: true);
 
     /// <summary>docs/multi-account.md "Loading": no result yet -- grey ring without the "!", a travelling arc, "Hämtar kvoten…".</summary>
     static QuotaView LoadingView(DateTimeOffset utcNow) =>

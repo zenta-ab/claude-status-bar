@@ -80,6 +80,11 @@ public sealed record WindowView(
 /// It is not part of the model's own verdict -- AccountRuntime overlays it, together with
 /// Freshness.Unknown (the grey ring with "!"), once a fresh child has confirmed the "not logged in"
 /// answer. It is distinct from a plain Unknown, which means "could not read, will retry".
+///
+/// NoSessionLimit: the account's latest reading says it has no 5 h limit (UsageSnapshot.NoSessionLimit).
+/// Session then holds the closed-window view; the UI shows one muted line instead of the session
+/// section and the weekly window drives every "which window matters" choice. LastActivityAt (only then) is when the
+/// weekly usage last OBSERVABLY rose; null until one has been seen, and the header then falls back to the data age.
 /// </summary>
 public sealed record QuotaView(
     WindowView Session,
@@ -92,8 +97,17 @@ public sealed record QuotaView(
     QuotaState IconSeverity,
     DateTimeOffset? BlockedUntil,
     bool NeedsLogin = false,
-    bool Loading = false)
+    bool Loading = false,
+    bool NoSessionLimit = false,
+    DateTimeOffset? LastActivityAt = null)
 {
+    /// <summary>
+    /// The window whose numbers a one-line summary quotes: the more severe one, session winning an exact
+    /// tie -- except on an account without a 5 h limit, where the weekly window is the only one there is.
+    /// </summary>
+    public WindowView Driver =>
+        !NoSessionLimit && (int)Session.State >= (int)Weekly.State ? Session : Weekly;
+
     public static QuotaView Initial { get; } = new(
         WindowView.Empty(WindowKind.Session, QuotaWindows.SessionMinutes),
         WindowView.Empty(WindowKind.Weekly, QuotaWindows.WeeklyMinutes),

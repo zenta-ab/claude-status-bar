@@ -125,11 +125,12 @@ public static class UsageParser
 
     readonly record struct Reading(
         double SessionPct, string? SessionResetsAt, bool SessionIsActive,
-        double? WeeklyPct, string? WeeklyResetsAt, bool WeeklyIsActive)
+        double? WeeklyPct, string? WeeklyResetsAt, bool WeeklyIsActive,
+        bool SessionAbsent = false)
     {
         public UsageSnapshot ToSnapshot(string? subscriptionType) => new(
             SessionPct, SessionResetsAt, WeeklyPct, WeeklyResetsAt, DateTimeOffset.UtcNow,
-            subscriptionType, SessionIsActive, WeeklyIsActive);
+            subscriptionType, SessionIsActive, WeeklyIsActive, NoSessionLimit: SessionAbsent);
     }
 
     /// <summary>Fills gaps in <paramref name="reading"/> from <paramref name="other"/> (the same
@@ -206,9 +207,9 @@ public static class UsageParser
 
         if (session is null)
         {
-            // A spent week: the server drops the session entry and sends `five_hour: null`.
+            // An account without a 5 h limit: the server drops the session entry and sends `five_hour: null`.
             return SessionExplicitlyAbsent(response) && weeklyPct is not null
-                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyActive)
+                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyActive, SessionAbsent: true)
                 : null;
         }
         if (ValidPercentage(session.Value, "percent") is not { } sessionPct)
@@ -222,10 +223,13 @@ public static class UsageParser
 
     /// <summary>
     /// True when the response says outright that no 5 h window exists: `five_hour` is present and
-    /// null. Observed 2026-11-05 on two accounts whose weekly quota was spent (`seven_day` at
-    /// 100 %, `limits[]` holding only `weekly_all`). Like `{utilization: 0, resets_at: null}`, that
-    /// is a closed window -- an answer, not an absence (docs/forecast-and-states.md) -- so it is
-    /// read as one, but only next to a usable weekly reading; a missing key still refuses.
+    /// null. Observed from 2026-10-31 on accounts that simply have no 5 h limit (some "Ultra"
+    /// plans), at any weekly percentage (0 %, 3-36 % and 100 % seen), with `limits[]` holding only
+    /// `weekly_all`/`weekly_scoped`. It is read as a closed session (0 / no deadline / inactive) so
+    /// freshness keeps counting the reply as proof of liveness (docs/forecast-and-states.md), and is
+    /// additionally flagged `SessionAbsent` -> `UsageSnapshot.NoSessionLimit` so the UI can say
+    /// "no 5 h limit" instead of "nothing used yet". Only next to a usable weekly reading; a
+    /// missing key still refuses.
     /// </summary>
     static bool SessionExplicitlyAbsent(JsonElement response) =>
         TryFindExactKey(response, "five_hour", out var fiveHour) && fiveHour.ValueKind == JsonValueKind.Null;
@@ -245,10 +249,10 @@ public static class UsageParser
             weeklyResets = ResetString(sevenDay, "resets_at");
         }
 
-        // `five_hour: null` is a closed session window (see SessionExplicitlyAbsent).
+        // `five_hour: null` is an account without a 5 h limit (see SessionExplicitlyAbsent).
         if (fiveHour.ValueKind == JsonValueKind.Null)
             return weeklyPct is not null
-                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyResets is not null)
+                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyResets is not null, SessionAbsent: true)
                 : null;
         if (fiveHour.ValueKind != JsonValueKind.Object) return null;
         if (ValidPercentage(fiveHour, "utilization") is not { } sessionPct) return null;

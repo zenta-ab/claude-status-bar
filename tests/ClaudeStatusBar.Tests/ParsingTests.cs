@@ -313,12 +313,12 @@ public class ParsingTests
         Assert.Equal(17.0, snapshot.WeeklyUtilization);
     }
 
-    // ---- A spent week: `five_hour: null` and no session entry in limits[] (observed 2026-11-05) ----
+    // ---- An account without a 5 h limit: `five_hour: null` and no session entry in limits[] (observed from 2026-10-31, at any weekly percentage) ----
 
     [Fact]
-    public void UsageParser_SpentWeek_NullFiveHour_ReadsAsClosedSessionWithWeekly()
+    public void UsageParser_NoSessionLimit_NullFiveHour_ReadsAsClosedSessionWithWeekly_AndFlagsIt()
     {
-        // The real shape, trimmed: the week is spent, so the server drops the 5 h window.
+        // The real shape, trimmed (here with the week at 100 %, but the shape does not depend on it).
         string json = """
         {
           "response": {
@@ -344,13 +344,67 @@ public class ParsingTests
         Assert.Equal(0.0, snapshot!.SessionUtilization);
         Assert.Null(snapshot.SessionResetsAt);
         Assert.False(snapshot.SessionIsActive);
+        Assert.True(snapshot.NoSessionLimit);
         Assert.Equal(100.0, snapshot.WeeklyUtilization);
         Assert.Equal("2026-11-06T05:00:00.051971+00:00", snapshot.WeeklyResetsAt);
         Assert.True(snapshot.WeeklyIsActive);
     }
 
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(3.0)]
+    [InlineData(36.0)]
+    public void UsageParser_NoSessionLimit_WithWeeklyBelowHundred_IsFlagged(double weeklyPct)
+    {
+        // Observed at weekly 0 %, 3-36 % and 100 %: the missing session is not a sign of a spent week.
+        string json = $$"""
+        {
+          "response": {
+            "subscription_type": "max",
+            "rate_limits": {
+              "five_hour": null,
+              "seven_day": { "utilization": {{weeklyPct}}, "resets_at": "2026-11-10T13:00:00.469372+00:00" },
+              "limits": [
+                { "kind": "weekly_all", "group": "weekly", "percent": {{weeklyPct}}, "resets_at": "2026-11-10T13:00:00.469372+00:00", "is_active": true },
+                { "kind": "weekly_scoped", "group": "weekly", "percent": 4, "resets_at": "2026-11-10T13:00:00.469576+00:00", "is_active": false }
+              ]
+            }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out string? error);
+
+        Assert.NotNull(snapshot);
+        Assert.Null(error);
+        Assert.True(snapshot!.NoSessionLimit);
+        Assert.False(snapshot.SessionIsActive);
+        Assert.Null(snapshot.SessionResetsAt);
+        Assert.Equal(weeklyPct, snapshot.WeeklyUtilization);
+    }
+
     [Fact]
-    public void UsageParser_SpentWeek_NullFiveHour_ViaExactKeysAlone()
+    public void UsageParser_SessionPresent_IsNotFlaggedAsNoSessionLimit()
+    {
+        string json = """
+        {
+          "response": {
+            "five_hour": { "utilization": 0, "resets_at": null },
+            "seven_day": { "utilization": 20, "resets_at": "2026-11-10T13:00:00.469372+00:00" }
+          }
+        }
+        """;
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        UsageSnapshot? snapshot = UsageParser.TryParse(doc.RootElement, out _);
+
+        Assert.NotNull(snapshot);
+        Assert.False(snapshot!.NoSessionLimit); // an object with resets_at null is a closed 5 h window, not the absence of one
+    }
+
+    [Fact]
+    public void UsageParser_NoSessionLimit_ViaExactKeysAlone()
     {
         string json = """
         {
@@ -366,6 +420,7 @@ public class ParsingTests
 
         Assert.NotNull(snapshot);
         Assert.False(snapshot!.SessionIsActive);
+        Assert.True(snapshot.NoSessionLimit);
         Assert.Equal(100.0, snapshot.WeeklyUtilization);
         Assert.True(snapshot.WeeklyIsActive);
     }

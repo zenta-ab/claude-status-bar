@@ -216,7 +216,8 @@ public sealed class DiskLogSink : IAsyncDisposable
             {
                 entry.At.ToString("O", CultureInfo.InvariantCulture),
                 Environment.TickCount64.ToString(CultureInfo.InvariantCulture),
-                entry.Snapshot.SessionUtilization.ToString(CultureInfo.InvariantCulture),
+                // An account without a 5 h limit has no session to log: blank, not a misleading 0 (readers skip blank pcts).
+                entry.Snapshot.NoSessionLimit ? "" : entry.Snapshot.SessionUtilization.ToString(CultureInfo.InvariantCulture),
                 CsvField(entry.Snapshot.SessionResetsAt),
                 entry.Snapshot.WeeklyUtilization?.ToString(CultureInfo.InvariantCulture) ?? "",
                 CsvField(entry.Snapshot.WeeklyResetsAt),

@@ -171,7 +171,7 @@ public sealed class IconSlot : IDisposable
                 ? $"Veckokvoten slut · öppnar {TimeText.ClockWithDay(view.Weekly.ResetsAt ?? blockedUntil, now, tz)}"
                 : $"Kvoten slut · öppnar {TimeText.ClockWithDay(view.Session.ResetsAt ?? blockedUntil, now, tz)}";
 
-        WindowView driver = (int)view.Session.State >= (int)view.Weekly.State ? view.Session : view.Weekly;
+        WindowView driver = view.Driver;
 
         return driver.State switch
         {

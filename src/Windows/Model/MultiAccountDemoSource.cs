@@ -37,6 +37,8 @@ public static class MultiAccountDemoSource
             new("multi_binding", AccountDisplayMode.Binding, accounts, FocusIndex: 2),
             new("multi_needs_login", AccountDisplayMode.PerAccount, new List<DemoAccount> { personal, new("Team", NeedsLoginView(utcNow), "Acme AB") }, FocusIndex: 1),
             new("multi_loading", AccountDisplayMode.PerAccount, new List<DemoAccount> { personal, new("Team", LoadingView(utcNow), "Acme AB") }, FocusIndex: 1),
+            // "Ultra": no 5 h limit, so the session section is one line and the weekly window drives.
+            new("multi_no_limit", AccountDisplayMode.PerAccount, new List<DemoAccount> { personal, new("Ultra", NoSessionLimitView(utcNow), "Ultra · personlig organisation"), enterprise }, FocusIndex: 1),
         };
     }
 
@@ -127,6 +129,11 @@ public static class MultiAccountDemoSource
             LastChangedAt: now.AddHours(-10).AddMinutes(-39), LastSuccessAt: now.AddSeconds(-2), PollInterval: TimeSpan.FromMinutes(10),
             Error: null, IconSeverity: weekly.State, BlockedUntil: null);
     }
+
+    /// <summary>An account with no 5 h limit (a few days into its week, nothing alarming): QuotaView.NoSessionLimit, the weekly window drives.</summary>
+    static QuotaView NoSessionLimitView(DateTimeOffset utcNow) =>
+        DemoQuotaSource.NoSessionLimitView(
+            VerdictWindow(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, usedPct: 36.0, ratePctPerMin: 0.01, minutesToReset: 6000, utcNow), utcNow);
 
     /// <summary>docs/multi-account.md "Loading": the account has not answered yet.</summary>
     static QuotaView LoadingView(DateTimeOffset utcNow) => new(

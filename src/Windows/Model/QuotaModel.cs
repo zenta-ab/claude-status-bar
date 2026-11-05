@@ -55,6 +55,12 @@ public sealed class QuotaModel : IQuotaModel
     bool _sessionInactiveLastPoll;
     bool _weeklyInactiveLastPoll;
 
+    // The account has no 5 h limit at all (UsageSnapshot.NoSessionLimit), as of the latest successful
+    // poll. It rides on top of _sessionInactiveLastPoll (the session still reads as a closed window so
+    // freshness keeps treating each reply as proof of liveness) and only changes what we SAY and which
+    // window drives: per poll, so it flips back by itself when a session entry reappears.
+    bool _noSessionLimit;
+
     // Decision 3+5 (round 1) / decision 2 (round 2) / 2026-09-22 transport/data-age split
     // (docs/forecast-and-states.md, freshness ladder): freshness deadlines frozen -- in
     // MONOTONIC milliseconds, not UTC -- using the POLICY interval only (no reset cap, no
@@ -168,6 +174,7 @@ public sealed class QuotaModel : IQuotaModel
         // already false in this case (no resets_at), so the two are mutually exclusive.
         _sessionInactiveLastPoll = !sessionValid && !snapshot.SessionIsActive
             && QuotaTimeUtil.IsValidPct(snapshot.SessionUtilization);
+        _noSessionLimit = snapshot.NoSessionLimit && _sessionInactiveLastPoll;
         _weeklyInactiveLastPoll = !weeklyValid && !snapshot.WeeklyIsActive
             && snapshot.WeeklyUtilization is { } wUtil && QuotaTimeUtil.IsValidPct(wUtil);
 
@@ -180,7 +187,8 @@ public sealed class QuotaModel : IQuotaModel
         if (anyAccepted) _liveDataIngested = true; // decision 6 (round 2): a wholly-unusable poll must not consume WarmStart eligibility
 
         // "Usable" = something was accepted, OR a window is validly reporting that it is not
-        // currently open. Both are current readings; only a cached duplicate is not.
+        // currently open (an account with no 5 h limit reports its session that way on every poll).
+        // Both are current readings; only a cached duplicate is not.
         bool usable = anyAccepted || _sessionInactiveLastPoll || _weeklyInactiveLastPoll;
 
         _everSucceeded = true;
@@ -374,7 +382,8 @@ public sealed class QuotaModel : IQuotaModel
 
         MeasuringReasonCode? sessionForcedReason = clockJump ? MeasuringReasonCode.ClockJump
             : _sessionValidLastPoll ? null
-            : _sessionInactiveLastPoll ? MeasuringReasonCode.WindowInactive : MeasuringReasonCode.DataMissing;
+            : _sessionInactiveLastPoll ? (_noSessionLimit ? MeasuringReasonCode.NoSessionLimit : MeasuringReasonCode.WindowInactive)
+            : MeasuringReasonCode.DataMissing;
         MeasuringReasonCode? weeklyForcedReason = clockJump ? MeasuringReasonCode.ClockJump
             : _weeklyValidLastPoll ? null
             : _weeklyInactiveLastPoll ? MeasuringReasonCode.WindowInactive : MeasuringReasonCode.DataMissing;
@@ -382,7 +391,9 @@ public sealed class QuotaModel : IQuotaModel
         WindowView sessionView = BuildView(WindowKind.Session, QuotaWindows.SessionMinutes, sessionSnap, sessionFinal, utcNow, sessionForcedReason);
         // A session the latest poll validly reported CLOSED has nothing to show: its old deadline is history (the tracker
         // still holds it), not an overdue reset, and nothing was used in it -- "Ingen aktiv session", not "återställs nu".
-        if (_sessionInactiveLastPoll && !clockJump) sessionView = ClosedWindowView(WindowKind.Session, QuotaWindows.SessionMinutes);
+        if (_sessionInactiveLastPoll && !clockJump)
+            sessionView = ClosedWindowView(WindowKind.Session, QuotaWindows.SessionMinutes,
+                _noSessionLimit ? MeasuringReasonCode.NoSessionLimit : MeasuringReasonCode.WindowInactive);
         WindowView weeklyView = BuildView(WindowKind.Weekly, QuotaWindows.WeeklyMinutes, weeklySnap, weeklyFinal, utcNow, weeklyForcedReason);
 
         QuotaState severity = (QuotaState)Math.Max((int)sessionFinal, (int)weeklyFinal);
@@ -410,12 +421,17 @@ public sealed class QuotaModel : IQuotaModel
 
         return new QuotaView(
             sessionView, weeklyView, freshness,
-            LastChangedAt: _session.LastAcceptedUtc,
+            // No 5 h limit: the session tracker never accepts anything, so the weekly one is the only data age there is.
+            LastChangedAt: _noSessionLimit ? _weekly.LastAcceptedUtc : _session.LastAcceptedUtc,
             LastSuccessAt: _lastSuccessAt,
             PollInterval: pollInterval,
             Error: _lastError,
             IconSeverity: severity,
-            BlockedUntil: blockedUntil);
+            BlockedUntil: blockedUntil,
+            NoSessionLimit: _noSessionLimit,
+            // "Ingen aktivitet sedan" must mean usage, not "the last poll": the weekly tracker accepts nearly every
+            // reply (the server's resets_at carries novel microseconds), so only an OBSERVED rise counts.
+            LastActivityAt: _noSessionLimit ? _weekly.LastObservedRiseAt : null);
     }
 
     /// <summary>See the class doc comment and HysteresisHold.CommitFromMeasuring. A no-op unless the hold is currently Measuring AND the snapshot is no longer refused.</summary>
@@ -481,11 +497,14 @@ public sealed class QuotaModel : IQuotaModel
             DepletesAt: depletesAt, Shortfall: TimeSpan.FromMinutes(f.ShortfallMinutes), MeasuringReason: null);
     }
 
-    /// <summary>A window that is closed right now: no deadline, no percentage (there is no window to measure), Measuring with the "Inget förbrukat ännu" reason (which the panel reads as "Ingen aktiv session").</summary>
-    static WindowView ClosedWindowView(WindowKind kind, double windowMinutes) => new(
+    /// <summary>A window that is closed right now: no deadline, no percentage (there is no window to measure), Measuring with the given reason -- "Inget förbrukat ännu" (the panel reads it as "Ingen aktiv session") or, for an account without a 5 h limit, "Ingen 5-timmarsgräns".</summary>
+    internal static WindowView ClosedWindowView(WindowKind kind, double windowMinutes, MeasuringReasonCode reason) => new(
         kind, windowMinutes, UsedPct: null, ResetsAt: null, QuotaState.Measuring,
         RatePctPerMin: null, PaceMultiple: null, ProjectedPctAtReset: null,
-        DepletesAt: null, Shortfall: TimeSpan.Zero, MeasuringReason: ReasonText(MeasuringReasonCode.WindowInactive));
+        DepletesAt: null, Shortfall: TimeSpan.Zero, MeasuringReason: ReasonText(reason));
+
+    /// <summary>The session view's MeasuringReason for an account without a 5 h limit; PanelText/AccountCards recognise it by this literal (the typed flag is QuotaView.NoSessionLimit -- prefer that).</summary>
+    public const string NoSessionLimitText = "Ingen 5-timmarsgräns";
 
     static string ReasonText(MeasuringReasonCode reason) => reason switch
     {
@@ -497,6 +516,7 @@ public sealed class QuotaModel : IQuotaModel
         MeasuringReasonCode.AwaitingReset => "Nytt fönster väntas",
         MeasuringReasonCode.DataMissing => "Data saknas",
         MeasuringReasonCode.WindowInactive => "Inget förbrukat ännu",
+        MeasuringReasonCode.NoSessionLimit => NoSessionLimitText,
         MeasuringReasonCode.ClockJump => "Klockan ändrades, mäter om…",
         _ => "Mäter takt…",
     };
@@ -541,14 +561,22 @@ public sealed class QuotaModel : IQuotaModel
     {
         if (IsAwaitingReset(utcNow)) return AwaitingResetInterval;
 
-        if (_sessionHold.Committed == QuotaState.Spent || _weeklyHold.Committed == QuotaState.Spent)
+        // A no-limit account's session hold is history (an in-process Spent session -> no-limit transition leaves it
+        // Spent: the hold only steps on accepted samples and a no-limit account has none); only the weekly one counts.
+        if ((!_noSessionLimit && _sessionHold.Committed == QuotaState.Spent) || _weeklyHold.Committed == QuotaState.Spent)
             return SpentInterval;
 
         return IsBurning() ? BurningInterval : IdleInterval;
     }
 
+    // An account with no 5 h limit has no session deadline to wait for; the tracker may still hold the old one from
+    // before an in-process transition, and honouring it would poll every 30 s forever (the deadline never "arrives")
+    // or cap the interval to a long-gone reset. An ORDINARY closed session keeps its deadline exactly as before
+    // (decision 8: an expired window recovers at the fast cadence until a new one is observed).
+    DateTimeOffset? SessionDeadline => _noSessionLimit ? null : _session.ResetsAt;
+
     bool IsAwaitingReset(DateTimeOffset utcNow) =>
-        (_session.ResetsAt is { } sr && QuotaTimeUtil.SafeAdd(sr, ResetPollGrace) is { } srg && utcNow >= srg) ||
+        (SessionDeadline is { } sr && QuotaTimeUtil.SafeAdd(sr, ResetPollGrace) is { } srg && utcNow >= srg) ||
         (_weekly.ResetsAt is { } wr && QuotaTimeUtil.SafeAdd(wr, ResetPollGrace) is { } wrg && utcNow >= wrg);
 
     /// <summary>Decision 2 (round 2): monotonic, using the latest monoMs the model has received via Ingest/Evaluate -- never a UTC duration against LastRiseAt.</summary>
@@ -556,7 +584,7 @@ public sealed class QuotaModel : IQuotaModel
     {
         if (_lastKnownMono is not { } m) return false;
         long windowMs = (long)BurningWindow.TotalMilliseconds;
-        return (_session.LastRiseMono is { } sr && (m - sr) <= windowMs)
+        return (!_noSessionLimit && _session.LastRiseMono is { } sr && (m - sr) <= windowMs)
             || (_weekly.LastRiseMono is { } wr && (m - wr) <= windowMs);
     }
 
@@ -570,7 +598,7 @@ public sealed class QuotaModel : IQuotaModel
     TimeSpan CapToSoonestReset(TimeSpan interval, DateTimeOffset utcNow)
     {
         DateTimeOffset? soonest = null;
-        if (_session.ResetsAt is { } sr && QuotaTimeUtil.SafeAdd(sr, ResetPollGrace) is { } srg
+        if (SessionDeadline is { } sr && QuotaTimeUtil.SafeAdd(sr, ResetPollGrace) is { } srg
             && srg > utcNow && (soonest is null || srg < soonest)) soonest = srg;
         if (_weekly.ResetsAt is { } wr && QuotaTimeUtil.SafeAdd(wr, ResetPollGrace) is { } wrg
             && wrg > utcNow && (soonest is null || wrg < soonest)) soonest = wrg;

@@ -13,7 +13,9 @@ through Claude Code logins of its own, one per account you add from the tray men
 ## What you see
 
 **Tray icon** (next to the clock)
-- Outer ring: weekly usage ("All models"). Inner pie: current 5-hour session.
+- Outer ring: weekly usage ("All models"). Inner pie: current 5-hour session. An account without a 5-hour limit
+  (some plans have none) shows the ring only, and its panel says "Ingen 5-timmarsgräns – bara veckokvoten gäller"
+  in place of the session section.
 - Colour is the verdict, driven by the forecast rather than the raw percentage:
   green = lasts until reset, amber = tight, red = runs out before reset, dashed grey = spent
   (the pie then counts down to the reset).

@@ -96,14 +96,14 @@ public static class AccountDisplayPlan
 
     /// <summary>
     /// Same "driver" rule PanelText/IconSlot use for which window's numbers to quote (the more
-    /// severe window, session wins an exact tie). Spent counts as zero (already happened);
+    /// severe window, session wins an exact tie; weekly alone for an account without a 5 h limit). Spent counts as zero (already happened);
     /// windows with no real depletion moment (Safe/Tight/Measuring, or DryEarly with no
     /// DepletesAt yet) rank last via TimeSpan.MaxValue -- they never win a depletion tie-break,
     /// only fall through to config order.
     /// </summary>
     static TimeSpan TimeToDepletion(QuotaView view, DateTimeOffset now)
     {
-        WindowView driver = (int)view.Session.State >= (int)view.Weekly.State ? view.Session : view.Weekly;
+        WindowView driver = view.Driver;
         return driver.State switch
         {
             QuotaState.Spent => TimeSpan.Zero,

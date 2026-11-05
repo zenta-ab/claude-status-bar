@@ -170,6 +170,87 @@ public class IdleAccountFreshnessTests
         Assert.Equal(Freshness.Live, model.Evaluate(now, 31 * 60_000L).Freshness);
     }
 
+    // ---- an ORDINARY account (it has a 5 h window): a closed session must not change its cadence ----
+
+    /// <summary>Eight 100 % samples (novel resets_at each time) commit a Spent session hold; returns the model and the instant of the last sample.</summary>
+    static (QuotaModel Model, DateTimeOffset Reset, DateTimeOffset Last) SpentSession()
+    {
+        var model = new QuotaModel();
+        DateTimeOffset reset = T0.AddHours(1);
+        DateTimeOffset last = T0;
+        for (int i = 0; i < 8; i++)
+        {
+            last = T0.AddMinutes(5 * i);
+            model.Ingest(OpenSession(last, reset.AddTicks(i * 17), pct: 100.0), last, 300_000L * i);
+        }
+        Assert.Equal(TimeSpan.FromSeconds(300), model.NextPollDelay(last)); // the premise: a genuinely Spent session
+        return (model, reset, last);
+    }
+
+    [Fact]
+    public void SpentSession_ThenItClosesAfterItsReset_RecoversAtThe30SecondCadence_NotPinnedAtSpent()
+    {
+        // Decision 8 (docs/forecast-and-states.md): an expired Spent window must recover at 30 s. The session hold only
+        // steps on ACCEPTED samples, so after the session closes it still reads Spent -- awaiting-reset must win.
+        (QuotaModel model, DateTimeOffset reset, _) = SpentSession();
+
+        DateTimeOffset now = reset.AddSeconds(5);
+        long mono = (long)(now - T0).TotalMilliseconds;
+        model.Ingest(ClosedSession(now, weeklyPct: 30.0), now, mono);
+
+        Assert.Equal(TimeSpan.FromSeconds(30), model.NextPollDelay(now));
+        Assert.Equal(TimeSpan.FromSeconds(30), model.Evaluate(now, mono).PollInterval);
+        Assert.False(model.Evaluate(now, mono).NoSessionLimit);
+    }
+
+    [Fact]
+    public void SpentSession_ThenItCloses_FreshnessDeadlinesAreThose_OfThe30SecondCadence()
+    {
+        // The deadlines are frozen at the poll from the policy interval: 3 x 30 s = 90 s to Stale, 10 x 30 s = 300 s to Unknown.
+        (QuotaModel model, DateTimeOffset reset, _) = SpentSession();
+        DateTimeOffset now = reset.AddSeconds(5);
+        long mono = (long)(now - T0).TotalMilliseconds;
+        model.Ingest(ClosedSession(now, weeklyPct: 30.0), now, mono);
+
+        Assert.Equal(Freshness.Live, model.Evaluate(now.AddSeconds(85), mono + 85_000).Freshness);
+        Assert.Equal(Freshness.Stale, model.Evaluate(now.AddSeconds(95), mono + 95_000).Freshness);
+        Assert.Equal(Freshness.Stale, model.Evaluate(now.AddSeconds(290), mono + 290_000).Freshness);
+        Assert.Equal(Freshness.Unknown, model.Evaluate(now.AddSeconds(310), mono + 310_000).Freshness);
+    }
+
+    [Fact]
+    public void OrdinaryIdleAccount_AfterItsSessionDeadlinePasses_PollsAsBefore_30sUntilANewSessionAppears()
+    {
+        // A normal, unspent session ends and the account goes idle: the expired deadline keeps counting as "awaiting
+        // reset" (30 s) -- exactly the cadence this account had before no-limit support existed.
+        var model = new QuotaModel();
+        DateTimeOffset reset = T0.AddHours(1);
+        for (int i = 0; i < 4; i++)
+        {
+            DateTimeOffset t = T0.AddMinutes(5 * i);
+            model.Ingest(OpenSession(t, reset.AddTicks(i * 17), pct: 20.0 + i), t, 300_000L * i);
+        }
+
+        foreach (TimeSpan after in new[] { TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(3) })
+        {
+            DateTimeOffset now = reset + after;
+            long mono = (long)(now - T0).TotalMilliseconds;
+            model.Ingest(ClosedSession(now, weeklyPct: 30.0), now, mono);
+
+            Assert.Equal(TimeSpan.FromSeconds(30), model.NextPollDelay(now));
+        }
+
+        // ... and a new session ends it: back to the idle cadence once the account is not burning.
+        DateTimeOffset reopened = reset.AddHours(3).AddMinutes(40);
+        long reopenedMono = (long)(reopened - T0).TotalMilliseconds;
+        model.Ingest(OpenSession(reopened, reopened.AddHours(5), pct: 1.0), reopened, reopenedMono);
+        DateTimeOffset later = reopened.AddMinutes(20);
+        long laterMono = reopenedMono + 20 * 60_000L;
+        model.Ingest(OpenSession(later, reopened.AddHours(5).AddTicks(17), pct: 1.0), later, laterMono);
+
+        Assert.Equal(TimeSpan.FromSeconds(150), model.NextPollDelay(later));
+    }
+
     // ---- the oracle itself ----
 
     [Fact]

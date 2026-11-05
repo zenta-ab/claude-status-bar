@@ -616,7 +616,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
                 .Where(x => !x.Account.IsDuplicate)
                 .Select(x => new StatisticsForm.AccountRef(
                     StatisticsDataLoader.ResolveAccountLabel(x.Account.Label, new AccountLabelInput(x.Account.OverrideLabel, x.Account.Identity, x.Account.SubscriptionType), x.Account.CurrentLogDir, x.Index),
-                    x.Account.CurrentLogDir, x.Account.IdentityKey ?? "_pending"))
+                    x.Account.CurrentLogDir, x.Account.IdentityKey ?? "_pending",
+                    HasNoSessionLimit: () => x.Account.LastView.NoSessionLimit))
                 .ToList();
         return new StatisticsForm(refs, TimeZoneInfo.Local);
     }
@@ -643,6 +644,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         {
             new StatisticsForm.AccountRef("Nyinstallerad (2 veckor)", freshDir, StatisticsDemoData.AccountKey),
             new StatisticsForm.AccountRef("Ett år av data", yearDir, StatisticsDemoData.AccountKey),
+            // The same year of data on an account that currently has no 5 h limit: the session-only tiles and the heatmap give way to a note.
+            new StatisticsForm.AccountRef("Utan 5-timmarsgräns", yearDir, StatisticsDemoData.AccountKey, HasNoSessionLimit: () => true),
         };
     }
 
@@ -846,7 +849,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
             string? suffix = a.IsDuplicate ? null : BuildDuplicateSuffix(i);
             result.Add(new DisplayAccount(a.Slot, multi ? a.Label : null, a.LastView, a.IsDuplicate, dupRow, suffix,
                 Title: a.Label,
-                Subtitle: PanelText.ComposeAccountSubtitle(a.Label, a.SubscriptionType, a.Identity?.OrganizationName)));
+                Subtitle: PanelText.ComposeAccountSubtitle(a.Label, a.SubscriptionType, a.Identity?.OrganizationName, a.Identity?.PlanDisplayName)));
         }
         return result;
     }
@@ -1215,6 +1218,12 @@ public sealed class StatusBarApplicationContext : ApplicationContext
         frames.Add(new DemoFrame("combined_detail", AccountDisplayMode.PerAccount, threeAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Cards, DetailOfCombined: true));
         frames.Add(new DemoFrame("combined_5_binding", AccountDisplayMode.Binding, mixed, FocusIndex: 2, Panel: PanelDisplayMode.Cards));
 
+        // An account without a 5 h limit among normal ones: cards (session row is text) and full panels (session section is one line).
+        MultiAccountDemoSource.MultiState noLimit = MultiAccountDemoSource.Build(utcNow).First(s => s.Key == "multi_no_limit");
+        IReadOnlyList<DisplayAccount> noLimitAccounts = noLimit.Accounts.Select((a, i) => new DisplayAccount($"demo-{i}", a.Label, a.View, Title: a.Label, Subtitle: a.Subtitle)).ToList();
+        frames.Add(new DemoFrame("combined_no_limit", AccountDisplayMode.PerAccount, noLimitAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Cards));
+        frames.Add(new DemoFrame("full_no_limit", AccountDisplayMode.PerAccount, noLimitAccounts, FocusIndex: 1, Panel: PanelDisplayMode.Full));
+
         // Full panels side by side (docs/multi-account.md "Panels"): two and three accounts (one marked, one
         // hovered), and a row that does not fit the work area width.
         frames.Add(new DemoFrame("full_2", AccountDisplayMode.PerAccount, threeAccounts.Take(2).ToList(), FocusIndex: 0, Panel: PanelDisplayMode.Full, HoverIndex: 1));
@@ -1359,6 +1368,8 @@ public sealed class StatusBarApplicationContext : ApplicationContext
                 form.SelectAccount(1); // a full year of data -- "År" is the period that actually shows everything unlocked
                 form.SelectPeriod(StatisticsPeriod.Year);
                 SaveStatisticsCapture(form, Path.Combine(dir, "unlocked.png"));
+                form.SelectAccount(2); // the same year, on an account without a 5 h limit
+                SaveStatisticsCapture(form, Path.Combine(dir, "no-session-limit.png"));
             }
             else
             {

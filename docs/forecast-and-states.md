@@ -74,6 +74,18 @@ Both implementations now select the session/weekly node in this order (matching 
 `limits[]`'s `session`/`weekly_all` entries; the exact-key and substring strategies, which have no
 such field, infer it from whether a `resets_at` was present.
 
+**An account with no 5 h limit (Windows, 2026-11-05).** Since 2026-10-31 some accounts (certain "Ultra"
+plans) answer `"five_hour": null` with no `kind: "session"` entry in `limits[]` (only `weekly_all`, and a
+`weekly_scoped`), at *any* weekly percentage (seen at 0 %, 3-36 % and 100 %; `subscription_type` is still
+`max`). It is not a sign of a spent week. Both the `limits[]` and the exact-key strategy read it, next to a
+usable weekly reading, as the closed-session values (0 / no deadline / inactive) **plus a flag**
+(`UsageSnapshot.NoSessionLimit` <- `Reading.SessionAbsent`); a missing `five_hour` key, or a null one without
+a weekly reading, still refuses. The flag is derived **per poll** from this shape and nothing else -- not from the plan name
+(`oauthAccount.planDisplayName: "Ultra"` is only a label; an Ultra account may still have a 5 h window) --
+so the account flips back by itself when a session entry reappears. The closed-session values are kept on
+purpose: freshness treats a closed session as proof of liveness (below); reading it as "absent" would make
+every such account Stale/Unknown. The flag only changes what is *said* and which window drives.
+
 ## Ingest (per window; session W = 300 min, weekly W = 10 080 min)
 
 1. **Window key** = the tracked deadline, jitter-tolerant. A deadline within **±120 s** of the
@@ -274,6 +286,22 @@ baseline from a sample the tracker actually took.
 `_sessionInactiveLastPoll` / `_weeklyInactiveLastPoll`, `MeasuringReasonCode.WindowInactive`),
 matching the Swift side's behaviour, including the deliberately-not-widened clock-guard anchor.
 
+**No 5 h limit rides on the same mechanism (Windows, 2026-11-05).** The session of such an account is a validly
+closed window on every poll, so `_sessionInactiveLastPoll` is true and everything above (usable reading,
+freshness renewal, Live) applies unchanged; `_noSessionLimit` is stored beside it and changes only: the
+session view's reason (`MeasuringReasonCode.NoSessionLimit`, "Ingen 5-timmarsgräns" instead of "Inget
+förbrukat ännu"), `QuotaView.NoSessionLimit`, `QuotaView.Driver` (the weekly window, also on a tie),
+`LastChangedAt` (the session tracker never accepts anything, so the weekly tracker's last accept is the only data
+age; it used to be null forever and the header stuck on "Hämtar…"), `QuotaView.LastActivityAt`
+(`WindowTracker.LastObservedRiseAt` of the weekly window, the only thing "Ingen aktivitet sedan" may quote: the
+weekly tracker accepts nearly every reply because the server's `resets_at` carries novel microseconds, so its last
+accept only means "last poll"; null until a rise has been seen under continuous observation, and the header is then
+the ordinary data age) and the **cadence**: the stale session deadline and a stale session `Spent` hold are ignored
+(`SessionDeadline`, `PolicyInterval`, `IsBurning`), because an in-process transition from a real session would
+otherwise leave them pinning the interval. **An ordinary account whose session merely reads closed is NOT affected
+by any of this**: its tracker deadline still drives "awaiting reset" (30 s, decision 8) and its cadence and
+freshness thresholds are exactly as before.
+
 **Transport liveness vs. data age (added 2026-09-22, from a live false-stale alarm).** While the
 user was actively working, the panel header turned orange and read "Datan kan vara inaktuell —
 senast ändrad för 1 min 50 s sedan" with nothing wrong. `get_usage` only produces a *novel* sample
@@ -386,7 +414,10 @@ Stale although every poll succeeded:
    validly closed — the transport deadlines, the clock-discontinuity rule and failures all still
    apply. An OPEN session window whose snapshot stops changing still goes Stale after 20 min.
 
-**What the panel shows for it (2026-10-13).** The model reports a validly closed session as a window with NO deadline and
+**What the panel shows for it (2026-10-13).** (For an account with *no 5 h limit* the whole session section is
+replaced by one muted line, "Ingen 5-timmarsgräns – bara veckokvoten gäller", the card's session row reads "Ingen
+5-timmarsgräns", and the header is "Ingen aktivitet sedan <tid>" taken from the weekly window's last observed rise (data age until one is seen) --
+docs/panel-v2.md, docs/multi-account.md.) The model reports a validly closed session as a window with NO deadline and
 no percentage (`QuotaModel.ClosedWindowView`: Measuring, "Inget förbrukat ännu") -- the tracker still holds the old
 `resets_at`, and the panel used to print it as "återställs nu · igår kl 23:20" with "100 % av 5 h har gått". The panel
 now says "Ingen aktiv session" / "startar när kontot används" (no time bar), the card "ingen aktiv session", and the
@@ -626,7 +657,7 @@ decisions below override anything above that conflicts with them.
 | 10 | The WTD floor keeps a window red for ~2 h after consumption stops | **Accept, modified.** The session floor decays with confirmed idle time: `floor = r_wtd · exp(−idle / 30 min)`, where idle = time since the last accepted rise, confirmed by novel fingerprints without a rise. Short reading pauses keep the protection; genuine stops end the red. |
 | 11 | Hysteresis counts duplicate replies and poll ticks as evidence | **Accept.** Hysteresis advances only on accepted (novel) observations. Escalation commits to the lowest level ≥ current seen in the last 2 accepted observations. De-escalation needs 3 accepted observations and ≥ 10 min (weekly: 4 and ≥ 2 h). Failures neither count nor reset pending evidence. |
 | 12 | Measuring leaks forecast fields; duplicates never seed | **Accept.** All forecast fields are null whenever State is Measuring. Seed eligibility is re-checked in `Evaluate`, so time alone can make the seed valid. |
-| 13 | A successful poll isn't necessarily usable data | **Accept.** Validity is tracked per window. A window missing or invalid in the latest successful poll becomes Measuring ("data saknas") and drops its forecast. Global Live requires a valid session window. |
+| 13 | A successful poll isn't necessarily usable data | **Accept.** Validity is tracked per window. A window missing or invalid in the latest successful poll becomes Measuring ("data saknas") and drops its forecast. Global Live requires a valid session window. *(A session reported closed counts as valid for this -- see "A closed window is an answer"; so does the missing session of an account with no 5 h limit, which is read as closed and flagged.)* |
 | 14 | WarmStart is skipped after an initial failure | **Accept.** WarmStart is allowed until the first successful ingest. |
 | 15 | Spent at 99.5 % claims blocking without evidence | **Accept.** Spent only at `P ≥ 100`. 97–99.9 % is DryEarly via `rem ≤ 3`. |
 | 16 | Forecasts presented as certainty | **Accept (copy only).** All forecast text is conditional ("i nuvarande takt"). |

@@ -4,7 +4,8 @@ using ClaudeStatusBar.Model;
 namespace ClaudeStatusBar.Ui;
 
 /// <summary>One thin bar of a card: "Session" / "Vecka", how full it is, and the text beside it ("56 % · reset 15:04").</summary>
-public sealed record CardBar(string Caption, double Fraction, string Text, PanelColorRole Role);
+/// <param name="NoBar">Text only, no track: the window does not exist on this account (no 5 h limit).</param>
+public sealed record CardBar(string Caption, double Fraction, string Text, PanelColorRole Role, bool NoBar = false);
 
 /// <summary>
 /// One compact account card of the combined panel (docs/multi-account.md "All accounts in one panel"):
@@ -39,7 +40,10 @@ public static class AccountCards
         return new AccountCard(
             input.Slot, input.Title, input.Subtitle,
             box.Line1, box.Role,
-            Bar("Session", view.Session, now, tz), Bar("Vecka", view.Weekly, now, tz),
+            view.NoSessionLimit
+                ? new CardBar("Session", 0.0, QuotaModel.NoSessionLimitText, PanelColorRole.Measuring, NoBar: true)
+                : Bar("Session", view.Session, now, tz),
+            Bar("Vecka", view.Weekly, now, tz),
             note, noteRole, OfferRelogin: view.NeedsLogin);
     }
 

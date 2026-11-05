@@ -32,7 +32,8 @@ public sealed record AccountIdentity(
     string? SeatTier,
     string? BillingType,
     string? EmailAddress,
-    string? DisplayName)
+    string? DisplayName,
+    string? PlanDisplayName = null)
 {
     /// <summary>
     /// The per-account identity key (see the type doc comment): AccountUuid and
@@ -94,7 +95,8 @@ public sealed record AccountIdentity(
                 ReadString(oa, "seatTier"),
                 ReadString(oa, "billingType"),
                 ReadString(oa, "emailAddress"),
-                ReadString(oa, "displayName"));
+                ReadString(oa, "displayName"),
+                ReadString(oa, "planDisplayName"));
         }
         catch
         {

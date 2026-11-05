@@ -24,7 +24,8 @@ public sealed record StatisticsWindowText(
     RecommendationText? CeilingRecommendation,
     RecommendationText? WeeklyBudgetRecommendation,
     IReadOnlyList<RecentCycleText> RecentCycles,
-    IReadOnlyList<HeatmapDayText> Heatmap);
+    IReadOnlyList<HeatmapDayText> Heatmap,
+    string? NoSessionLimitNote = null);
 
 /// <summary>
 /// The statistics window's text layer (docs/statistics.md decision 4, the task's item 1): a pure
@@ -38,24 +39,30 @@ public sealed record StatisticsWindowText(
 /// </summary>
 public static class StatisticsText
 {
-    public static StatisticsWindowText Compose(StatisticsDataLoader.LoadedData data, StatisticsPeriod period, TimeZoneInfo tz, DateTimeOffset utcNow)
+    /// <summary>Shown in place of the session-only tiles and the activity heatmap for an account that currently has no 5 h limit.</summary>
+    public const string NoSessionLimitNote = QuotaModel.NoSessionLimitText + " på det här kontot";
+
+    /// <param name="noSessionLimit">The account currently has no 5 h limit (QuotaView.NoSessionLimit): the tiles, the ceiling recommendation and the heatmap that only make sense for the 5 h session are left out and a muted note stands in their place. The weekly and pooled-forecast tiles stay.</param>
+    public static StatisticsWindowText Compose(StatisticsDataLoader.LoadedData data, StatisticsPeriod period, TimeZoneInfo tz, DateTimeOffset utcNow, bool noSessionLimit = false)
     {
-        var tiles = new List<TileText>
+        var tiles = new List<TileText>();
+        if (!noSessionLimit)
         {
-            ComposePeakWeekday(data.Engine.PeakWeekday),
-            ComposePeakHour(data.Engine.PeakHour),
-            ComposeTimesAtCeiling(data.Engine.TimesAtCeiling),
-            ComposeWeeklyBudgetShare(data.Engine.WeeklyBudgetShare),
-            ComposeForecastPrecision(data.Engine.ForecastPrecision),
-            ComposeForecastRecall(data.Engine.ForecastRecall),
-        };
+            tiles.Add(ComposePeakWeekday(data.Engine.PeakWeekday));
+            tiles.Add(ComposePeakHour(data.Engine.PeakHour));
+            tiles.Add(ComposeTimesAtCeiling(data.Engine.TimesAtCeiling));
+        }
+        tiles.Add(ComposeWeeklyBudgetShare(data.Engine.WeeklyBudgetShare));
+        tiles.Add(ComposeForecastPrecision(data.Engine.ForecastPrecision));
+        tiles.Add(ComposeForecastRecall(data.Engine.ForecastRecall));
 
         return new StatisticsWindowText(
             tiles,
-            ComposeCeilingRecommendation(data.Engine.CeilingRecommendation),
+            noSessionLimit ? null : ComposeCeilingRecommendation(data.Engine.CeilingRecommendation),
             ComposeWeeklyBudgetRecommendation(data.Engine.WeeklyBudgetRecommendation),
             data.RecentCycles.Select(c => ComposeRecentCycle(c.Row, tz)).ToList(),
-            ComposeHeatmap(data.PeriodCycles, period, tz, utcNow));
+            noSessionLimit ? Array.Empty<HeatmapDayText>() : ComposeHeatmap(data.PeriodCycles, period, tz, utcNow),
+            noSessionLimit ? NoSessionLimitNote : null);
     }
 
     static string LearningLine(int n, int threshold) => $"Samlar data — {n} av {threshold}";

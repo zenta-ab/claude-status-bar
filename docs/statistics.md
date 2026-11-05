@@ -153,6 +153,13 @@ hysteresis history was never persisted and a boolean column has no third "unknow
 data. A reader must not treat a backfilled row's `warned_dry_early=0`/empty predicted fields as
 evidence the warning never fired; it is simply unknowable for that row.
 
+**Accounts without a 5 h limit.** The session-only claims below (peak weekday, peak hour, "Nådde taket", the
+ceiling recommendation, the activity heatmap) cannot exist for an account that currently has no session window
+(`QuotaView.NoSessionLimit`), so instead of "Samlar data…" for ever the window shows one muted line, "Ingen
+5-timmarsgräns på det här kontot", in place of those tiles and of the heatmap (`StatisticsText.Compose(...,
+noSessionLimit: true)`, asked on every reload through `StatisticsForm.AccountRef.HasNoSessionLimit`). The weekly
+tiles, the pooled forecast tiles and the cycle list stay; nothing is re-based on the weekly window.
+
 ## Decision 3 — what may be claimed, and when
 
 The rule from forecast-verification practice: a bucket with fewer than ~10 observations is not a

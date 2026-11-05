@@ -53,12 +53,17 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
 
-## Mac parity for the spent-week shape (2026-11-05)
-- When the weekly quota is spent the server now sends `five_hour: null` and `limits[]` holds no `session` entry,
-  so every strategy refused and a spent account showed "Kan inte läsa kvoten" instead of its countdown. Windows
-  (`Data/UsageParser.cs`, `SessionExplicitlyAbsent`) reads that as a closed session next to a usable weekly
-  reading; a missing `five_hour` key, or a null one without a weekly reading, still refuses. Tests in
-  `ParsingTests.cs` ("Spent week"). `Sources/ClaudeQuotaCore/UsageParser.swift` has the same gap and is not fixed.
+## Mac parity for accounts without a 5 h limit (2026-11-05)
+- Since 2026-10-31 some accounts (certain "Ultra" plans) have no 5 h limit: `five_hour: null`, no `session` entry in
+  `limits[]`, at any weekly percentage (this first looked like a spent-week-only shape because the first two
+  sightings were at 100 %). Every parser strategy refused it, so such an account showed "Kan inte läsa kvoten".
+  Windows reads it as a closed session next to a usable weekly reading **and** flags it
+  (`UsageSnapshot.NoSessionLimit` -> `QuotaView.NoSessionLimit`, per poll, flips back by itself): the weekly window
+  drives the verdict/tooltip/other-accounts rows, the panel replaces the session section with one muted line, the
+  cards show "Ingen 5-timmarsgräns", the CSV logs blank session columns, the statistics window drops the
+  session-only tiles and heatmap for it, and the label can use `oauthAccount.planDisplayName` ("Ultra"). Tests in
+  `ParsingTests.cs` and `NoSessionLimitTests.cs`. **`src/Mac` (`UsageParser.swift`, `QuotaModel.swift`,
+  `PanelText.swift`, `AccountLabel.swift`, ...) is not updated**: a no-limit account is refused there.
 
 ## Mac parity for the availability timeline and the idle-account display (2026-10-15)
 - **The availability model** (`Model/AvailabilityTimeline.cs`, pure): per account contiguous segments from now to a

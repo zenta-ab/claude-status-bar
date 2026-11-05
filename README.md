@@ -37,7 +37,7 @@ through Claude Code logins of its own, one per account you add from the tray men
 - **A Pro, Max, Team or Enterprise subscription to log in with.** Quota windows only exist for
   subscriptions; an API-key login has no plan limits to show. You log in from the app itself; your own
   Claude Code login (terminal, VS Code) is neither needed nor used.
-- To build: .NET SDK 10.0 (`global.json` pins 10.0.204 and rolls forward to newer patches).
+- To build: .NET SDK 10.0 (`global.json` pins 10.0.204 and rolls forward to newer feature bands and patches, e.g. 10.0.403).
 
 ## Install on a computer
 

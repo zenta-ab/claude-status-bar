@@ -192,12 +192,6 @@ public static class UsageParser
             }
         }
 
-        if (session is not { } sessionEntry || ValidPercentage(sessionEntry, "percent") is not { } sessionPct)
-            return null;
-        string? sessionResets = ResetString(sessionEntry, "resets_at");
-        // is_active is the server's own word for it; fall back to "has a deadline" when absent.
-        bool sessionActive = ReadBoolean(sessionEntry, "is_active") ?? sessionResets is not null;
-
         // Weekly is validated independently: an invalid weekly must not invalidate a good
         // session reading, but it must not travel inside the snapshot either.
         double? weeklyPct = null;
@@ -210,17 +204,37 @@ public static class UsageParser
             weeklyActive = ReadBoolean(weeklyEntry, "is_active") ?? weeklyResets is not null;
         }
 
+        if (session is null)
+        {
+            // A spent week: the server drops the session entry and sends `five_hour: null`.
+            return SessionExplicitlyAbsent(response) && weeklyPct is not null
+                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyActive)
+                : null;
+        }
+        if (ValidPercentage(session.Value, "percent") is not { } sessionPct)
+            return null;
+        string? sessionResets = ResetString(session.Value, "resets_at");
+        // is_active is the server's own word for it; fall back to "has a deadline" when absent.
+        bool sessionActive = ReadBoolean(session.Value, "is_active") ?? sessionResets is not null;
+
         return new Reading(sessionPct, sessionResets, sessionActive, weeklyPct, weeklyResets, weeklyActive);
     }
+
+    /// <summary>
+    /// True when the response says outright that no 5 h window exists: `five_hour` is present and
+    /// null. Observed 2026-11-05 on two accounts whose weekly quota was spent (`seven_day` at
+    /// 100 %, `limits[]` holding only `weekly_all`). Like `{utilization: 0, resets_at: null}`, that
+    /// is a closed window -- an answer, not an absence (docs/forecast-and-states.md) -- so it is
+    /// read as one, but only next to a usable weekly reading; a missing key still refuses.
+    /// </summary>
+    static bool SessionExplicitlyAbsent(JsonElement response) =>
+        TryFindExactKey(response, "five_hour", out var fiveHour) && fiveHour.ValueKind == JsonValueKind.Null;
 
     // ---- strategy 2: the exact keys ----
 
     static Reading? ReadExactKeys(JsonElement response)
     {
-        if (!TryFindExactKey(response, "five_hour", out var fiveHour) || fiveHour.ValueKind != JsonValueKind.Object)
-            return null;
-        if (ValidPercentage(fiveHour, "utilization") is not { } sessionPct) return null;
-        string? sessionResets = ResetString(fiveHour, "resets_at");
+        if (!TryFindExactKey(response, "five_hour", out var fiveHour)) return null;
 
         double? weeklyPct = null;
         string? weeklyResets = null;
@@ -230,6 +244,15 @@ public static class UsageParser
             weeklyPct = pct;
             weeklyResets = ResetString(sevenDay, "resets_at");
         }
+
+        // `five_hour: null` is a closed session window (see SessionExplicitlyAbsent).
+        if (fiveHour.ValueKind == JsonValueKind.Null)
+            return weeklyPct is not null
+                ? new Reading(0, null, false, weeklyPct, weeklyResets, weeklyResets is not null)
+                : null;
+        if (fiveHour.ValueKind != JsonValueKind.Object) return null;
+        if (ValidPercentage(fiveHour, "utilization") is not { } sessionPct) return null;
+        string? sessionResets = ResetString(fiveHour, "resets_at");
 
         return new Reading(sessionPct, sessionResets, sessionResets is not null,
             weeklyPct, weeklyResets, weeklyResets is not null);

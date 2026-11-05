@@ -53,6 +53,13 @@ the *remaining hours* of the window using the profile, scaled by recent intensit
 - **Swift parity for statistics.** The Mac app has none of the cycle archive yet. The byte contract
   and golden files are `docs/statistics.md` and `tests/fixtures/statistics/`.
 
+## Mac parity for the spent-week shape (2026-11-05)
+- When the weekly quota is spent the server now sends `five_hour: null` and `limits[]` holds no `session` entry,
+  so every strategy refused and a spent account showed "Kan inte läsa kvoten" instead of its countdown. Windows
+  (`Data/UsageParser.cs`, `SessionExplicitlyAbsent`) reads that as a closed session next to a usable weekly
+  reading; a missing `five_hour` key, or a null one without a weekly reading, still refuses. Tests in
+  `ParsingTests.cs` ("Spent week"). `Sources/ClaudeQuotaCore/UsageParser.swift` has the same gap and is not fixed.
+
 ## Mac parity for the availability timeline and the idle-account display (2026-10-15)
 - **The availability model** (`Model/AvailabilityTimeline.cs`, pure): per account contiguous segments from now to a
   horizon (24 h / 3 d / 7 d) -- blocked from now (spent) or from a forecast run-out until the binding reset (weekly if

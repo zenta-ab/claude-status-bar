@@ -33,7 +33,7 @@ public struct AccountsConfig: Codable, Sendable, Equatable {
     public var maxIcons: Int
     public var accounts: [Account]
 
-    public init(displayMode: DisplayMode = .perAccount, maxIcons: Int = 3,
+    public init(displayMode: DisplayMode = .perAccount, maxIcons: Int = 10,
                 accounts: [Account] = [Account()]) {
         self.displayMode = displayMode
         self.maxIcons = maxIcons

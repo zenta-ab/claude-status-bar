@@ -75,7 +75,7 @@ the user's profile and may legitimately be redirected.
 {
   "version": 2,
   "displayMode": "perAccount",   // or "binding": one icon for the account closest to its limit
-  "maxIcons": 3,                 // perAccount only; accounts beyond this appear in the panel only
+  "maxIcons": 10,                // perAccount only; accounts beyond this appear in the panel only
   "accounts": [
     { "slot": "a1b2c3d4", "label": null, "enabled": true }
   ]

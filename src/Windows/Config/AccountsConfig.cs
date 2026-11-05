@@ -134,7 +134,7 @@ public sealed class AccountsConfig
     /// <summary>0 = the field was absent, i.e. a version 1 file; see AccountReconciler.Migrate.</summary>
     public int Version { get; set; }
     public AccountDisplayMode DisplayMode { get; set; } = AccountDisplayMode.PerAccount;
-    public int MaxIcons { get; set; } = 3;
+    public int MaxIcons { get; set; } = 10;
 
     /// <summary>
     /// "panelMode": "single" | "full" | "cards". Optional and absent by default (= single), so an

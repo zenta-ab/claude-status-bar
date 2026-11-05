@@ -117,7 +117,7 @@ public sealed class StatusBarApplicationContext : ApplicationContext
 
     AccountsConfig _accountsConfig = AccountsConfig.Empty();
     AccountDisplayMode _displayMode = AccountDisplayMode.PerAccount;
-    int _maxIcons = 3;
+    int _maxIcons = 10;
     string? _explicitPanelSlot;
     string? _lastRightClickedSlot;
     string? _shownSlot; // whichever slot RenderAccounts last showed the panel for -- see OnRefreshRequested

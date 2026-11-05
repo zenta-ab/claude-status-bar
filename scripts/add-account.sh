@@ -45,7 +45,7 @@ ensure_config() {
     }
   ],
   "displayMode" : "perAccount",
-  "maxIcons" : 3
+  "maxIcons" : 10
 }
 JSON
     echo "created $ACCOUNTS_JSON with the default single account"

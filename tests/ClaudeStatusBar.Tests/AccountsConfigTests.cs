@@ -35,7 +35,7 @@ public class AccountsConfigTests
             Assert.Equal(AccountsConfigStatus.Missing, load.Status);
             Assert.Equal(AccountsConfig.CurrentVersion, load.Config.Version);
             Assert.Equal(AccountDisplayMode.PerAccount, load.Config.DisplayMode);
-            Assert.Equal(3, load.Config.MaxIcons);
+            Assert.Equal(10, load.Config.MaxIcons);
             Assert.Empty(load.Config.Accounts);
             Assert.False(File.Exists(path)); // the caller saves once it has reconciled against the slots
         }

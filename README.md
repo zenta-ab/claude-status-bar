@@ -105,7 +105,7 @@ account's quota, forecast and history never mixes with another's.
 - **Every account has a login of its own**, created by the app and unaffected by what you do in your
   terminal or VS Code. Nothing ever follows "whichever account is logged in now".
 - **Two display modes**, toggled from the tray icon's right-click menu or in `accounts.json`:
-  `perAccount` (default) shows one icon per account, up to `maxIcons` (3); `binding` shows a
+  `perAccount` (default) shows one icon per account, up to `maxIcons` (10); `binding` shows a
   single icon for whichever account is closest to being blocked. Either way, left-clicking an
   icon opens the panel for that account, and the panel's "other accounts" list lets you switch to
   any account that isn't showing an icon right now.
